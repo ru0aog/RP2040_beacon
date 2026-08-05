@@ -1,5 +1,6 @@
 #include "cw_modem.h"
 #include "si5351_driver.h"
+#include "scheduler.h"
 #include "file_manager.h"
 
 extern bool soft_restart_flag;
@@ -48,23 +49,26 @@ void prepare_cw_frequency(uint32_t freq_hz) {
 
 // Внутренняя функция задержки с опросом Serial и проверкой флагов аварии
 static void cw_delay(uint32_t ms) {
+    if (ms == 0) return;
+
     // Если длительность слишком мала (высокая скорость), используем точный микросекундный таймер
     if (ms <= 15) {
         delayMicroseconds(ms * 1000);
         return;
     }
 
-    // Для обычных пауз проверяем флаги и Serial каждые 2 миллисекунды (вместо 5)
-    uint32_t chunks = ms / 2;
-    uint32_t remainder = ms % 2;
+    // Динамический контроль времени через micros() для исключения накопления дрейфа
+    uint32_t start_us = micros();
+    uint32_t target_us = ms * 1000;
 
-    for (uint32_t i = 0; i < chunks; i++) {
+    while (micros() - start_us < target_us) {
         if (pc_file_written || soft_restart_flag) break;
+        
+        // Опрашиваем Serial
         check_serial_commands();
-        delay(2);
-    }
-    if (remainder > 0 && !pc_file_written && !soft_restart_flag) {
-        delay(remainder);
+        
+        // Короткая микропауза, чтобы не перегружать ядро процессора в пустом цикле
+        delayMicroseconds(500); 
     }
 }
 
@@ -106,17 +110,13 @@ void send_cw_string(const char* str) {
         }
 
         // 2. Если встретили перевод строки \n — принудительно подменяем его на знак равенства '='
+        // изначальный знак '=' НЕ превращается в пробел.
         if (c == '\n') {
-            c = '='; 
+            c = '='; // Знак раздела переноса строки для Морзе (-...-)
         }
 
-        // 2. Если встретили = — принудительно меняем на пробел
-        if (c == '=') {
-            c = ' '; 
-        }
-
-        // 3. Обработка чистого знака пробела (стандартная пауза между словами = 7 точек)
-        if (c == ' ') {
+        else if (c == ' ') {
+            // 3. Обработка чистого знака пробела (стандартная пауза между словами = 7 точек)
             Serial.print(" ");
             cw_delay(CW_DOT_TIME_MS * 4); // 3 (из элемента) + 4 = 7 точек паузы
             continue;

@@ -147,11 +147,11 @@ void init_si5351_pins() {
       si5351_write_reg(0x39, 0xC0); //MS1_P2[7:0]
       //17:включить CLK1 в дробном режиме от MultiSynth 1, источник PLL_A, нагрузка 8 мА.
       si5351_write_reg(0x11, 0x0F);
-
+      CLK_OFF_si5351(0);
       //03:активировать выходы
       si5351_write_reg(0x03, 0x00);
-      Serial.println(" - инициализация CLK0: ОК");
-      Serial.println(" - инициализация CLK1: ОК");
+      Serial.println(" - инит CLK0 : ОК");
+      Serial.println(" - инит CLK1 : ОК");
       Serial.println("[Система] ГЕН SI-5351: ОК. Генератор успешно запущен и настроен.");
   } else {
       Serial.println(F("[Система] КРИТИЧЕСКАЯ ОШИБКА! ГЕН SI-5351 не найден на шине Wire."));
@@ -167,9 +167,7 @@ void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
     uint32_t divider_int = (uint32_t)(f_pll_mHz / freq_mHz);
     uint64_t remainder_mHz = f_pll_mHz % freq_mHz;
     uint32_t ms_den = 1048575;
-    uint64_t quotient = remainder_mHz / freq_mHz;
-    uint64_t remainder2 = remainder_mHz % freq_mHz;
-    uint32_t ms_num = (uint32_t)(quotient * ms_den + (remainder2 * ms_den) / freq_mHz);
+    uint32_t ms_num = (uint32_t)((remainder_mHz * ms_den) / freq_mHz);
     uint32_t p1 = 128 * divider_int + ((128 * ms_num) / ms_den) - 512;
     uint32_t p2 = 128 * ms_num - ms_den * ((128 * ms_num) / ms_den);
     uint32_t p3 = ms_den;
@@ -208,3 +206,17 @@ void SI_POWER_OFF() {
     Serial.println("[Питание] Si5351: ВЫКЛ");
   Wire1.end();
 }
+
+
+// Функция разделения частоты пробелами
+String make_freq_with_space(uint32_t FREQ) {
+  uint32_t mhz  = FREQ / 1000000;          
+  uint32_t khz  = (FREQ % 1000000) / 1000; 
+  uint32_t hz   = FREQ % 1000;             
+
+  char freq_buf[32];
+  snprintf(freq_buf, sizeof(freq_buf), "%lu,%03lu.%03lu", mhz, khz, hz);
+  
+  return String(freq_buf);
+}
+

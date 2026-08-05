@@ -92,29 +92,38 @@ void prepare_rtty_frequencies(uint32_t space_hz, uint32_t mark_hz) {
 // Передача бита на чип Si5351 (8-байтный пакет + команда старта)
 static void send_rtty_bit(TransmitterState state) {
     if (pc_file_written || soft_restart_flag) return;
+    
     if (SI_FAIL == false) {
         uint8_t* data = (state == MARK) ? rtty_reg_mark : rtty_reg_space;
         setFrq_si5351(data, 0); // установить частоту для CLK0
-        CLK_ON_si5351(0);       // разрешить выход частоты на CLK0
-
+        CLK_ON_si5351(0);       // разрешить выход частоты на CLK0      
         if (state == MARK) {
             digitalWrite(LED_BUILTIN, HIGH);
         } else {
             digitalWrite(LED_BUILTIN, LOW);
         }
-        // Дробим блокирующую паузу бита на отрезки по 2000 мкс для опроса Serial
-        uint32_t total_chunks = RTTY_BIT_TIME_US / 2000;
-        uint32_t remainder = RTTY_BIT_TIME_US % 2000;
-        for (uint32_t i = 0; i < total_chunks; i++) {
-            if (pc_file_written || soft_restart_flag) break;
-            check_serial_commands(); 
-            delayMicroseconds(2000);
-        }
-        if (remainder > 0 && !pc_file_written && !soft_restart_flag) {
-            delayMicroseconds(remainder);
+
+        // Засекаем точное время начала передачи бита
+        uint32_t start_bit_us = micros();
+        // Крутим точный цикл ожидания длительности бита
+        while (micros() - start_bit_us < RTTY_BIT_TIME_US) {
+            // Быстрая проверка: прилетели ли данные в UART?
+            // Мы НЕ вызываем тяжелый парсер check_serial_commands()!
+            if (Serial.available() > 0) {
+                // Если пользователь что-то нажал в терминале во время передачи — 
+                // мы расцениваем это как запрос на экстренную остановку (Break)
+                soft_restart_flag = true; 
+                break;
+            }
+            // Даем процессору RP2040 слегка «подышать» (опционально)
+            delayMicroseconds(10); 
         }
     }
 }
+
+
+
+
 
 // Отправка 5-битной посылки кода Бодо/МТК-2
 static void send_rtty_code(uint8_t code) {
@@ -142,32 +151,48 @@ static void send_rtty_code(uint8_t code) {
 }
 
 // Главная функция передачи текста кодом МТК-2
-void send_rtty_string(const char* s) {
-    current_reg = LAT; 
+void send_rtty_raw(const char* s) {
+    current_reg = LAT;  // Начинаем всегда с латинского регистра
 
     while (*s) {
         if (pc_file_written || soft_restart_flag) break; 
         uint8_t code = 0;
         int char_len = 1;
-        MTK2_STATE target_reg = current_reg;
         bool found = false;
 
-        if (find_in_table(table_lat, s, code, char_len)) { target_reg = LAT; found = true; }
-        else if (find_in_table(table_fig, s, code, char_len)) { target_reg = FIG; found = true; }
-        else if (find_in_table(table_rus, s, code, char_len)) { target_reg = RUS; found = true; }
+        // Шаг 1. Сначала ищем универсальные символы (пробел, перевод строки) в текущем регистре,
+        // чтобы предотвратить паразитную отправку кодов смены языка.
+        if (*s == ' ')        { code = 0x04; char_len = 1; found = true; Serial.print(F(" ")); }
+        else if (*s == '\n')  { code = 0x08; char_len = 1; found = true; }
+        else if (*s == '\r')  { code = 0x02; char_len = 1; found = true; }
+        
+        // Шаг 2. Если это обычный символ — ищем по языковым таблицам
+        if (!found) {
+            MTK2_STATE target_reg = current_reg;
+            
+            if (find_in_table(table_lat, s, code, char_len)) { target_reg = LAT; found = true; }
+            else if (find_in_table(table_fig, s, code, char_len)) { target_reg = FIG; found = true; }
+            else if (find_in_table(table_rus, s, code, char_len)) { target_reg = RUS; found = true; }
 
-        if (found) {
-            if (target_reg != current_reg) {
-                uint8_t reg_code = (target_reg == LAT) ? MTK2_LAT : (target_reg == FIG ? MTK2_FIG : MTK2_RUS);
-                send_rtty_code(reg_code);
-                current_reg = target_reg;
+            if (found) {
+                // Если символ требует смены регистра букв/цифр
+                if (target_reg != current_reg) {
+                    uint8_t reg_code = (target_reg == LAT) ? MTK2_LAT : (target_reg == FIG ? MTK2_FIG : MTK2_RUS);
+                    send_rtty_code(reg_code);
+                    current_reg = target_reg;
+                }
             }
+        }
+        
+        // Шаг 3. Физическая отправка кода символа в эфир
+        if (found) {
             send_rtty_code(code);
-            s += char_len;
+            s += char_len;  // Сдвигаем указатель на длину символа (1 байт для ASCII, 2 для UTF-8 кириллицы)
         } else {
-            s++; 
+            s++;  // Пропускаем неизвестный символ
         }
     }
+    // ФИНАЛ СТРОКИ: отправляем служебные CR/LF
     if (!pc_file_written && !soft_restart_flag) {
         send_rtty_code(0x02); // CR
         send_rtty_code(0x08); // LF
@@ -180,16 +205,18 @@ void send_rtty_string(const char* s) {
 void send_rtty_string(String str) {
   if (SI_FAIL == false && pc_file_written == false && soft_restart_flag == false) {
     // СТАРТОВЫЙ ПИЛОТ-ТОН (PREAMBLE): Включаем частоту MARK на 500 мс
-    for (int i = 0; i < 23; i++) {
+    uint32_t preamble_start = millis();
+    while (millis() - preamble_start < 500) {
         if (pc_file_written || soft_restart_flag) break; 
         send_rtty_bit(MARK); 
     }
     // ОСНОВНАЯ ПЕРЕДАЧА текста
     if (!pc_file_written && !soft_restart_flag) {
-        send_rtty_string(str.c_str()); 
+        send_rtty_raw(str.c_str()); 
     }
     // ФИНАЛЬНЫЙ ХВОСТ (POSTAMBLE): Удерживаем частоту MARK еще 500 мс
-    for (int i = 0; i < 23; i++) {
+    uint32_t postamble_start = millis();
+    while (millis() - postamble_start < 500) {
         if (pc_file_written || soft_restart_flag) break; 
         send_rtty_bit(MARK);
     }
@@ -197,4 +224,10 @@ void send_rtty_string(String str) {
     CLK_OFF_si5351(0); 
     digitalWrite(LED_BUILTIN, LOW);
   }
+}
+
+
+// функция-диспетчер
+void send_rtty_string(const char* s) {
+    send_rtty_string(String(s));
 }

@@ -70,7 +70,7 @@ void init_scheduler() {
     Serial.println(buf);
     Serial.print(F("[Система] RTC ")); 
     Serial.print(rtc_chip_name); 
-    Serial.println(F(": OK. Внешний модуль времени успешно запущен."));
+    Serial.println(F(" : OK. Внешний модуль времени успешно запущен."));
   }
 }
 
@@ -115,96 +115,121 @@ void print_current_date() {
   Serial.println(buf);
 }
 
-
-// Модифицированный автоматический парсер текстового расписания
-// Безопасный автоматический парсер расписания по глобальным переменным без копирования строк
+// автоматический парсер текстового расписания
 bool is_time_to_transmit(uint8_t mode) {
-  // Ссылки на оригинальные глобальные строки из file_manager.cpp
   extern String my_ifkp_variable;
   extern String my_rtty_variable;
   extern String my_cw_variable;
 
-  // Выбираем нужную строку в зависимости от запрашиваемой моды
-  String schedule_str = "";
-  if (mode == 0)      schedule_str = my_ifkp_variable;
-  else if (mode == 1) schedule_str = my_rtty_variable;
-  else if (mode == 2) schedule_str = my_cw_variable;
+  const char* p_sched = nullptr;
+  if (mode == 0)      p_sched = my_ifkp_variable.c_str();
+  else if (mode == 1) p_sched = my_rtty_variable.c_str();
+  else if (mode == 2) p_sched = my_cw_variable.c_str();
 
-  if (schedule_str.length() == 0) return false;
+  if (!p_sched || p_sched[0] == '\0') return false;
   
   uint32_t current_absolute_minutes = rtc_hour * 60 + rtc_min;
   
-  // Строгая проверка флагов блокировки
   if (mode == 0 && current_absolute_minutes == last_ifkp_minute) return false;
   if (mode == 1 && current_absolute_minutes == last_rtty_minute) return false;
   if (mode == 2 && current_absolute_minutes == last_cw_minute)   return false;
 
-  uint32_t start_pos = 0;
-  while (start_pos < (uint32_t)schedule_str.length()) {
-    int comma_idx = schedule_str.indexOf(',', start_pos);
-    if (comma_idx == -1) {
-      comma_idx = schedule_str.length();
-    }
+  while (*p_sched != '\0') {
+    // 1. Пропускаем пробелы перед токеном времени
+    while (*p_sched == ' ' || *p_sched == '\t') p_sched++;
+    if (*p_sched == '\0') break;
+
+    // Запоминаем стартовую позицию текущего токена для защиты от зависания
+    const char* token_start = p_sched;
+
+    // 2. Читаем часы
+    char* end_ptr;
+    long sch_hour = strtol(p_sched, &end_ptr, 10);
     
-    String token = schedule_str.substring(start_pos, comma_idx);
-    token.trim();
-    
-    int colon_idx = token.indexOf(':');
-    if (colon_idx != -1) {
-      uint32_t sch_hour = token.substring(0, colon_idx).toInt();
-      uint32_t sch_min  = token.substring(colon_idx + 1).toInt();
+    // 3. Если встретили двоеточие — читаем минуты
+    if (end_ptr != p_sched && *end_ptr == ':') {
+      p_sched = end_ptr + 1; // Встаем сразу за двоеточие
+      long sch_min = strtol(p_sched, &end_ptr, 10);
       
-      if (current_absolute_minutes == (sch_hour * 60 + sch_min)) {
-        // Фиксируем сработку строго для запрашиваемой моды
-        if (mode == 0)      last_ifkp_minute = current_absolute_minutes;
-        else if (mode == 1) last_rtty_minute = current_absolute_minutes;
-        else if (mode == 2) last_cw_minute   = current_absolute_minutes;
-        return true; 
+      // Если и минуты успешно прочитались, проверяем совпадение
+      if (end_ptr != p_sched) {
+        if (current_absolute_minutes == (uint32_t)(sch_hour * 60 + sch_min)) {
+          if (mode == 0)      last_ifkp_minute = current_absolute_minutes;
+          else if (mode == 1) last_rtty_minute = current_absolute_minutes;
+          else if (mode == 2) last_cw_minute   = current_absolute_minutes;
+          return true; 
+        }
       }
+      p_sched = end_ptr; // Смещаем указатель на конец успешно распарсенных минут
+    } else {
+      p_sched = end_ptr; // Смещаем указатель на место, где споткнулся первый strtol
     }
-    start_pos = comma_idx + 1;
+
+    // 4. ГАРАНТИРОВАННАЯ ЗАЩИТА: Если ни один strtol не смог продвинуться вперед 
+    // (например, стоим на запятой, тексте или спецсимволе), принудительно делаем шаг.
+    if (p_sched == token_start) {
+      p_sched++;
+    }
+    
+    // 5. Перематываем указатель строго до следующей запятой (или конца строки)
+    while (*p_sched != '\0' && *p_sched != ',') {
+      p_sched++;
+    }
+    
+    // 6. Если нашли запятую — перешагиваем её для следующей итерации
+    if (*p_sched == ',') {
+      p_sched++; 
+    }
   }
+
   return false;
 }
 
 
-
 // Функция для чтения телеметрии (АЦП RP2040 и температура DS3231)
 String get_telemetry_string() {
+  I2C_DS_restart();
   // 1. Считываем температуру с чипа DS3231
   float rtc_temp = rtc.getTemperature();
 
   // 2. Считываем датчик температуры самого процессора RP2040
-  adc_init();
   adc_set_temp_sensor_enabled(true); // Включаем внутренний термодатчик
   
   adc_select_input(4); // ADC4 - встроенный термодатчик
+  delayMicroseconds(10); // Пауза на стабилизацию мультиплексора
+  adc_read();            // ХОЛОСТОЙ ХОД: Сбрасываем остаточный заряд конденсатора АЦП
+
   uint32_t raw_temp = 0;
-  for(int i=0; i<20; i++) raw_temp += adc_read(); // Увеличили выборку до 20 для стабильности
+  for(int i=0; i<20; i++) {
+    raw_temp += adc_read();
+    delayMicroseconds(2); // Небольшой интервал между выборками
+  }
   float voltage_temp = (raw_temp / 20.0f) * 3.3f / 4095.0f;
   float mcu_temp = 27.0f - (voltage_temp - 0.706f) / 0.001721f; // Формула из даташита RP2040
 
-  // 3. Считываем напряжение питания USB на пине GP27 (ADC1)
-  adc_gpio_init(27);   
-  adc_select_input(1); // ADC1 - пин GP27
+/*
+  // 3. Считываем напряжение VSYS
+  // Переключаемся на встроенный делитель VSYS
+  // ВНИМАНИЕ! делитель не распаян, пока не выводим эти данные в строку
+  adc_select_input(3); // ADC3 - это пин GPIO 29, измеряющий VSYS на Pico
+  delayMicroseconds(10);
+  adc_read(); // Холостой ход
+
   uint32_t raw_vbat = 0;
   for(int i=0; i<20; i++) raw_vbat += adc_read();
   float voltage_pin = (raw_vbat / 20.0f) * 3.3f / 4095.0f;
-  
-  // Калибровка под ваш делитель 47к + 47к (коэффициент 2.0)
-  // Умножаем на 4.0f, чтобы восстановить исходные 5 Вольт из полученных 2.5 Вольт
-  float divider_ratio = 4.0f; 
-  float v_bat = voltage_pin * divider_ratio;
 
-  // Если прибор все равно занижает показания из-за падения на диодах платы, 
-  // можно добавить небольшую программную коррекцию, например: v_bat += 0.1f;
+  // На плате Pico встроенный делитель делит напряжение на 3
+  float v_bat = voltage_pin * 3.0f; 
+*/
 
   // 4. Формируем компактную строчку телеметрии
   char tele_buf[48];
-  snprintf(tele_buf, sizeof(tele_buf), "T_DS=%.1fC T_CPU=%.1fC V=%.1fV", rtc_temp, mcu_temp, v_bat);
+  snprintf(tele_buf, sizeof(tele_buf), "T_DS=%.1fC T_CPU=%.1fC", rtc_temp, mcu_temp);
   
   return String(tele_buf);
 }
+
 
 // Установка даты
 void handle_date_command(String cmd) {

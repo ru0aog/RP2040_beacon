@@ -19,6 +19,7 @@ String my_rtty_baud_var = "";
 String my_cw_wpm_var = "";
 uint32_t CW_DOT_TIME_MS = 60;            // Время точки в мс (по умолчанию ~20 WPM)
 volatile uint32_t RTTY_BIT_TIME_US = 22000; // Время одного бита RTTY в мкс (по умолчанию 45.45 Бод)
+String my_FAT = "";
 
 volatile bool pc_file_written = false;
 
@@ -325,8 +326,9 @@ void init_file_manager() {
 
   if (ram_disk_buffer[510] != 0x55 || ram_disk_buffer[511] != 0xAA) {
     create_default_fat_with_info_file();
+    my_FAT = "Файловая система флэш не обнаружена. Восстановлены настройки по умолчанию.";
   } else {
-    Serial.println("[Система] Корректный диск обнаружен во Flash. Настройки восстановлены.");
+    my_FAT = "Файловая система флэш - корректна. Настройки загружены.";
   }
 
   usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
@@ -335,6 +337,7 @@ void init_file_manager() {
   usb_msc.begin();
   usb_msc.setUnitReady(true);
   read_file_to_variable();
+  Serial.flush();                // Ждем, пока всё улетит в порт
 }
 
 // Функция проверки изменений от ПК для loop()

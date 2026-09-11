@@ -1,6 +1,7 @@
 #include "rtty_modem.h"
 #include "si5351_driver.h" 
 #include "file_manager.h"  
+#include "LCD.h"
 
 // Внешние ссылки на глобальные переменные управления
 extern bool soft_restart_flag;
@@ -69,6 +70,7 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
             len = l;
             if (l > 0 && table[i].s[0] != '\r' && table[i].s[0] != '\n') { // не печатать в командной строке перевод каретки
                 Serial.print(table[i].s);
+                LCD_push_char(table[i].s, 0, 16);
             }
             Serial.flush();
             return true;
@@ -162,9 +164,9 @@ void send_rtty_raw(const char* s) {
 
         // Шаг 1. Сначала ищем универсальные символы (пробел, перевод строки) в текущем регистре,
         // чтобы предотвратить паразитную отправку кодов смены языка.
-        if (*s == ' ')        { code = 0x04; char_len = 1; found = true; Serial.print(F(" ")); }
-        else if (*s == '\n')  { code = 0x08; char_len = 1; found = true; }
-        else if (*s == '\r')  { code = 0x02; char_len = 1; found = true; }
+        if (*s == ' ')        { code = 0x04; char_len = 1; found = true; Serial.print(F(" ")); LCD_push_char(" ", 0, 16);}
+        else if (*s == '\n')  { code = 0x08; char_len = 1; found = true; LCD_push_char(" ", 0, 16);}
+        else if (*s == '\r')  { code = 0x02; char_len = 1; found = true; LCD_push_char(" ", 0, 16);}
         
         // Шаг 2. Если это обычный символ — ищем по языковым таблицам
         if (!found) {

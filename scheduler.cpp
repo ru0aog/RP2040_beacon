@@ -38,9 +38,9 @@ void init_scheduler() {
   delay(100); // Даем чипу DS3231 время на аппаратный старт
   I2C_DS_restart();
   if (!rtc.begin(&Wire1)) {
-    Serial.println("[Система] КРИТИЧЕСКАЯ ОШИБКА! RTC DS-3231 не найден на шине Wire.");
+    Serial.println("[Система] ОШИБКА! модуль RTC не найден на шине Wire.");
     DS_FAIL = true;
-    Serial.println("[Система] Запуск собственных часов чипа RP2040:");
+    Serial.print("[Система] Запуск собственных часов чипа RP2040: ");
     rtc_init();
     // 2. Устанавливаем начальное время (например: 27 июля 2026 года, 15:30:00)
     // Формат: Год, Месяц, День, Часы, Минуты, Секунды
@@ -54,23 +54,23 @@ void init_scheduler() {
       .sec   = 45};
     rtc_set_datetime(&setcurrentTime);
     update_scheduler();
-    char buf[34];
-    snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
-    Serial.println(buf);
-    snprintf(buf, sizeof(buf), " - время     : %02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
-    Serial.println(buf);
-    Serial.println("[Система] Встроенный RTC: ОК. RTC успешно запущен и настроен.");
+
+    Serial.print(get_current_time());
+    Serial.print(" ");
+    Serial.println(get_current_date());
+
+    //Serial.println("[Система] Встроенный RTC: ОК. RTC успешно запущен и настроен.");
   } else {
     DS_FAIL = false;
     update_scheduler();
     char buf[34];
     snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
-    Serial.println(buf);
+    //Serial.println(buf);
     snprintf(buf, sizeof(buf), " - время     : %02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
-    Serial.println(buf);
-    Serial.print(F("[Система] RTC ")); 
-    Serial.print(rtc_chip_name); 
-    Serial.println(F(" : OK. Внешний модуль времени успешно запущен."));
+    //Serial.println(buf);
+    //Serial.print(F("[Система] RTC ")); 
+    //Serial.print(rtc_chip_name); 
+    //Serial.println(F(" : OK. Внешний модуль времени успешно запущен."));
   }
 }
 
@@ -114,6 +114,23 @@ void print_current_date() {
   snprintf(buf, sizeof(buf), "Дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
   Serial.println(buf);
 }
+
+// Возвращает строчку времени
+String get_current_time() {
+  update_scheduler();
+  char buf[9]; // 6 цифр + 1 нулевой символ окончания строки '\0'
+  snprintf(buf, sizeof(buf), "%02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
+  return String(buf);
+}
+
+// Возвращает строчку даты
+String get_current_date() {
+  update_scheduler();
+  char buf[11]; 
+  snprintf(buf, sizeof(buf), "%02d:%02d:%04d", rtc_day, rtc_month, rtc_year);
+  return String(buf);
+}
+
 
 // автоматический парсер текстового расписания
 bool is_time_to_transmit(uint8_t mode) {

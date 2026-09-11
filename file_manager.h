@@ -15,6 +15,7 @@ extern String my_rtty_mark_var;
 extern String my_cw_variable;      // Строка минут запуска (например, "15:22,17:22")
 extern String my_freq_cw_var;      // Строка частоты несущей (например, "3601000")
 extern String my_rtty_baud_var;
+extern String my_FAT;
 
 extern volatile bool pc_file_written; 
 extern volatile uint32_t RTTY_BIT_TIME_US;

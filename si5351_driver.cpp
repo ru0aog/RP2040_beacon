@@ -1,33 +1,41 @@
 ﻿#include "si5351_driver.h"
+#include "gen_fract.h"
 
 bool SI_FAIL = true;
 uint64_t Xtal_freq  = 25000000;
 extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 
 void I2C_SI_restart() {
-  // перезапуск шины Wire1 на линиях генератора
-  Wire1.end();
-  Wire1.setSDA(SI_PIN_SDA);
-  Wire1.setSCL(SI_PIN_SCL);
-  Wire1.setClock(400000);
-  Wire1.begin();
+  if (device_SI[0]) {
+    // перезапуск шины Wire на линиях генератора
+    // Выбираем нужный интерфейс Wire
+    TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
+    // Настройка пинов и старт шины I2C
+    pWire->end();
+    pWire->setSDA(device_SI[2]);
+    pWire->setSCL(device_SI[3]);
+    pWire->setClock(400000);
+    pWire->begin();
+  }
 }
 
 bool si5351_write_reg(uint8_t reg, uint8_t data) {
   // запись в регистр Si5351
+  // Выбираем нужный интерфейс Wire
+  TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
   // возвращает успешность операции
-  if (SI_FAIL == false) {
+  if (device_SI[0]) {
     // Si5351 присутствует
     I2C_SI_restart();
     for (int i = 0; i < 3; i++) {
-      Wire1.beginTransmission(SI5351_I2C_ADDR);
-      Wire1.write(reg);
-      Wire1.write(data);
-      if (Wire1.endTransmission() == 0) {
+      pWire->beginTransmission(SI5351_I2C_ADDR);
+      pWire->write(reg);
+      pWire->write(data);
+      if (pWire->endTransmission() == 0) {
         return true; 
       }
       if (i < 2) {
-        Serial.print("SI5351: I2C error. Retrying ");
+        Serial.print("SI5351: ошибка шины I2C. Перезапуск ");
         Serial.println(i + 2);
         I2C_SI_restart();
         delay(10);
@@ -40,16 +48,18 @@ return false;
 
 void setFrq_si5351(uint8_t *SI_FREQ_DATA, uint8_t CLK_NO) {
   //быстрая отправка данных частоты
-  if (SI_FAIL == false) {
+  if (device_SI[0]) {
     // Si5351 присутствует
     I2C_SI_restart();
-    Wire1.beginTransmission(SI5351_I2C_ADDR);
-    if (CLK_NO==0) {Wire1.write(0x2A);}
-    if (CLK_NO==1) {Wire1.write(0x32);}
+    // Выбираем нужный интерфейс Wire
+    TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
+    pWire->beginTransmission(SI5351_I2C_ADDR);
+    if (CLK_NO==0) {pWire->write(0x2A);}
+    if (CLK_NO==1) {pWire->write(0x32);}
     for (uint8_t i = 0; i < 8; i++) {
-      Wire1.write(SI_FREQ_DATA[i]);
+      pWire->write(SI_FREQ_DATA[i]);
     }
-    Wire1.endTransmission();
+    pWire->endTransmission();
   }
 }
 
@@ -75,17 +85,19 @@ void setFr() {
 }
 
 // Инициализация si5351
-void init_si5351_pins() {
+void init_si5351() {
   // Настраиваем пины и запускаем шину I2C
   I2C_SI_restart();
+  // Выбираем нужный интерфейс Wire
+  TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
   // Сканируем I2C-адрес Si5351 (0x60) для проверки связи
-  Wire1.beginTransmission(0x60);
-  byte si_status = Wire1.endTransmission();
+  pWire->beginTransmission(0x60);
+  byte si_status = pWire->endTransmission();
   if (si_status == 0) {
       SI_FAIL = false;
-      Serial.print(F("[Система] Генератор SI-5351 обнаружен на пинах SDA=")); Serial.print(SI_PIN_SDA);Serial.print(", SCL="); Serial.println(SI_PIN_SCL);
-      SI_POWER_OFF();
-      delay(10);
+      //Serial.print(F("[Система] Генератор SI-5351 обнаружен на пинах SDA=")); Serial.print(SI_PIN_SDA);Serial.print(", SCL="); Serial.println(SI_PIN_SCL);
+      //SI_POWER_OFF();
+      //delay(10);
       SI_POWER_ON();
       //03:отключить все выходы
       si5351_write_reg(0x03, 0xFF);
@@ -150,12 +162,13 @@ void init_si5351_pins() {
       CLK_OFF_si5351(0);
       //03:активировать выходы
       si5351_write_reg(0x03, 0x00);
-      Serial.println(" - инит CLK0 : ОК");
-      Serial.println(" - инит CLK1 : ОК");
-      Serial.println("[Система] ГЕН SI-5351: ОК. Генератор успешно запущен и настроен.");
+      //Serial.println(" - инит CLK0 : ОК");
+      //Serial.println(" - инит CLK1 : ОК");
+      //Serial.println("[Система] ГЕН SI-5351: ОК. Генератор успешно запущен и настроен.");
   } else {
       Serial.println(F("[Система] КРИТИЧЕСКАЯ ОШИБКА! ГЕН SI-5351 не найден на шине Wire."));
       SI_FAIL = true;
+      fractGen_init();
   }
 }
 

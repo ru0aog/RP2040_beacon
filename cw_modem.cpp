@@ -2,6 +2,7 @@
 #include "si5351_driver.h"
 #include "scheduler.h"
 #include "file_manager.h"
+#include "LCD.h"
 
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;
@@ -118,6 +119,7 @@ void send_cw_string(const char* str) {
         else if (c == ' ') {
             // 3. Обработка чистого знака пробела (стандартная пауза между словами = 7 точек)
             Serial.print(" ");
+            LCD_push_char(' ', 0, 16);
             cw_delay(CW_DOT_TIME_MS * 4); // 3 (из элемента) + 4 = 7 точек паузы
             continue;
         }
@@ -126,6 +128,9 @@ void send_cw_string(const char* str) {
         for (int j = 0; morse_table[j].c != 0; j++) {
             if (morse_table[j].c == c) {
                 Serial.print(morse_table[j].c);
+
+                LCD_push_char(morse_table[j].c, 0, 16);
+
                 Serial.flush();
 
                 const char* morse = morse_table[j].morse;

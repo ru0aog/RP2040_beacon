@@ -6,7 +6,7 @@
 #include <RTClib.h> // Подключаем вашу штатную библиотеку часов
 
 // Аппаратная конфигурация пинов
-const uint8_t DS_POWER_PIN = 16;
+extern const uint8_t DS_POWER_PIN;
 const uint8_t DS_PIN_SDA   = 14;
 const uint8_t DS_PIN_SCL   = 15;
 
@@ -20,6 +20,8 @@ void update_scheduler();
 void print_current_time();
 void print_current_date();
 String get_telemetry_string();
+String get_current_time();
+String get_current_date();
 
 extern uint8_t  rtc_hour;
 extern uint8_t  rtc_min;
@@ -27,6 +29,8 @@ extern uint8_t  rtc_sec;
 extern uint16_t rtc_year;
 extern uint8_t  rtc_month;
 extern uint8_t  rtc_day;
+
+extern uint8_t device_DS[5];
 
 extern String rtc_chip_name; // будем пользоваться переменной из основного INO-файла
 

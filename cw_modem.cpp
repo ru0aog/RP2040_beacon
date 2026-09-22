@@ -3,6 +3,8 @@
 #include "scheduler.h"
 #include "file_manager.h"
 #include "LCD.h"
+#include "gen_fract.h"
+#include "LED_BLINK.h"
 
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;
@@ -33,11 +35,10 @@ const cw_map_t morse_table[] = {
 
 // Функция подготовки частоты CW (8-байтный пакет, совместимый с УКВ 144 МГц)
 void prepare_cw_frequency(uint32_t freq_hz) {
+  if (device_SI[0]) {
     if (pc_file_written || soft_restart_flag) return;
-
     cw_frequency_hz = freq_hz;
     uint64_t freq_mHz = (uint64_t)cw_frequency_hz * 1000ULL;
-    
     static uint8_t cw_reg_buffer[8]; 
     calculate_freq_bytes_mHz(freq_mHz, cw_reg_buffer);
     CLK_OFF_si5351(0);               // отключить CLK0
@@ -45,6 +46,14 @@ void prepare_cw_frequency(uint32_t freq_hz) {
     Serial.print("[CW_ГОТОВ]: Частота несущей CW готова: "); 
     Serial.print(cw_frequency_hz); 
     Serial.println(" Hz");
+  }
+  else {
+    set_pio_sdr_freq(freq_hz);
+    Serial.print("[CW_ГОТОВ]: Частота несущей CW готова: "); 
+    Serial.print(fractGen_get_real_frequency()); 
+    Serial.println(" Hz");
+    fractGen_OFF();
+  }
 }
 
 
@@ -78,22 +87,24 @@ static void cw_delay(uint32_t ms) {
 static void send_cw_element(bool is_dash) {
     if (pc_file_written || soft_restart_flag) return;
 
-    if (SI_FAIL == false) {
-        // НАЖАТИЕ КЛЮЧА: Открываем выход генерации CLK0
-        CLK_ON_si5351(0);
-        digitalWrite(LED_BUILTIN, HIGH);
 
-        // Длина тире равна 3-м точкам
-        uint32_t duration = is_dash ? (CW_DOT_TIME_MS * 3) : CW_DOT_TIME_MS;
-        cw_delay(duration);
+    // НАЖАТИЕ КЛЮЧА: Открываем выход генерации CLK0
+    CLK_ON_si5351(0);
+    digitalWrite(LED_BUILTIN, HIGH);
+    ZERO_LED_RED_ON();
 
-        // ОТЖАТИЕ КЛЮЧА: Глушим выход генерации CLK0
-        CLK_OFF_si5351(0);
-        digitalWrite(LED_BUILTIN, LOW);
+    // Длина тире равна 3-м точкам
+    uint32_t duration = is_dash ? (CW_DOT_TIME_MS * 3) : CW_DOT_TIME_MS;
+    cw_delay(duration);
 
-        // Обязательная пауза между элементами одного знака = 1 точка
-        cw_delay(CW_DOT_TIME_MS);
-    }
+    // ОТЖАТИЕ КЛЮЧА: Глушим выход генерации CLK0
+    CLK_OFF_si5351(0);
+    digitalWrite(LED_BUILTIN, LOW);
+    ZERO_LED_OFF();
+
+    // Обязательная пауза между элементами одного знака = 1 точка
+    cw_delay(CW_DOT_TIME_MS);
+
 }
 
 // Посимвольный разбор и отправка строки в эфир

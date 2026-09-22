@@ -2,6 +2,8 @@
 #include "si5351_driver.h" 
 #include "file_manager.h"  
 #include "LCD.h"
+#include "gen_fract.h"
+#include "LED_BLINK.h"
 
 // Внешние ссылки на глобальные переменные управления
 extern bool soft_restart_flag;
@@ -14,7 +16,10 @@ static MTK2_STATE current_reg = LAT;
 
 #define MTK2_LAT 0x1F 
 #define MTK2_FIG 0x1B 
-#define MTK2_RUS 0x00 
+#define MTK2_RUS 0x00
+
+static uint32_t RTTY_space_hz;
+static uint32_t RTTY_mark_hz;
 
 // Таблицы кодировки МТК-2
 const mtk2_map_t table_lat[] PROGMEM = {
@@ -81,45 +86,61 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
 
 // Подготовка сетки частот (совместимо с 144 МГц УКВ)
 void prepare_rtty_frequencies(uint32_t space_hz, uint32_t mark_hz) {
+  if (device_SI[0]) {
     uint64_t space_mHz = (uint64_t)space_hz * 1000ULL;
     uint64_t mark_mHz  = (uint64_t)mark_hz * 1000ULL;
-    
     calculate_freq_bytes_mHz(space_mHz, rtty_reg_space);
     calculate_freq_bytes_mHz(mark_mHz,  rtty_reg_mark);
     Serial.println("[RTTY_ГОТОВ] Сетка частот RTTY готова."); 
     Serial.print("            F_MARK : "); Serial.print(mark_hz); Serial.println(" Hz");
     Serial.print("            F_SPACE: "); Serial.print(space_hz); Serial.println(" Hz");
+  }
+  else {
+    RTTY_mark_hz = mark_hz;
+    set_pio_sdr_freq(mark_hz);
+    Serial.println("[RTTY_ГОТОВ] Сетка частот RTTY готова."); 
+    Serial.print("            F_MARK : "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
+    RTTY_space_hz = space_hz;
+    set_pio_sdr_freq(space_hz);
+    Serial.print("            F_SPACE: "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
+    fractGen_OFF();
+  }
 }
 
 // Передача бита на чип Si5351 (8-байтный пакет + команда старта)
 static void send_rtty_bit(TransmitterState state) {
     if (pc_file_written || soft_restart_flag) return;
-    
-    if (SI_FAIL == false) {
+      if (device_SI[0]) {
         uint8_t* data = (state == MARK) ? rtty_reg_mark : rtty_reg_space;
         setFrq_si5351(data, 0); // установить частоту для CLK0
-        CLK_ON_si5351(0);       // разрешить выход частоты на CLK0      
-        if (state == MARK) {
-            digitalWrite(LED_BUILTIN, HIGH);
-        } else {
-            digitalWrite(LED_BUILTIN, LOW);
-        }
+        CLK_ON_si5351(0);       // разрешить выход частоты на CLK0 
+      }
+    if (state == MARK) {
+        digitalWrite(LED_BUILTIN, HIGH);
+        set_pio_sdr_freq(RTTY_mark_hz);
+        ZERO_LED_RED_ON();
+        fractGen_ON();
+    } else {
+        digitalWrite(LED_BUILTIN, LOW);
+        set_pio_sdr_freq(RTTY_space_hz);
+        ZERO_LED_OFF();
+        fractGen_ON();
+    }
 
-        // Засекаем точное время начала передачи бита
-        uint32_t start_bit_us = micros();
-        // Крутим точный цикл ожидания длительности бита
-        while (micros() - start_bit_us < RTTY_BIT_TIME_US) {
-            // Быстрая проверка: прилетели ли данные в UART?
-            // Мы НЕ вызываем тяжелый парсер check_serial_commands()!
-            if (Serial.available() > 0) {
-                // Если пользователь что-то нажал в терминале во время передачи — 
-                // мы расцениваем это как запрос на экстренную остановку (Break)
-                soft_restart_flag = true; 
-                break;
-            }
-            // Даем процессору RP2040 слегка «подышать» (опционально)
-            delayMicroseconds(10); 
+    // Засекаем точное время начала передачи бита
+    uint32_t start_bit_us = micros();
+    // Крутим точный цикл ожидания длительности бита
+    while (micros() - start_bit_us < RTTY_BIT_TIME_US) {
+        // Быстрая проверка: прилетели ли данные в UART?
+        // Мы НЕ вызываем тяжелый парсер check_serial_commands()!
+        if (Serial.available() > 0) {
+            // Если пользователь что-то нажал в терминале во время передачи — 
+            // мы расцениваем это как запрос на экстренную остановку (Break)
+            soft_restart_flag = true; 
+            break;
         }
+        // Даем процессору RP2040 слегка «подышать» (опционально)
+        delayMicroseconds(10); 
     }
 }
 
@@ -205,7 +226,7 @@ void send_rtty_raw(const char* s) {
 
 // функция со String, включающая преамбулу, текст и постамбулу
 void send_rtty_string(String str) {
-  if (SI_FAIL == false && pc_file_written == false && soft_restart_flag == false) {
+  if (pc_file_written == false && soft_restart_flag == false) {
     // СТАРТОВЫЙ ПИЛОТ-ТОН (PREAMBLE): Включаем частоту MARK на 500 мс
     uint32_t preamble_start = millis();
     while (millis() - preamble_start < 500) {
@@ -225,6 +246,7 @@ void send_rtty_string(String str) {
     // Отключаем выход генерации Si5351
     CLK_OFF_si5351(0); 
     digitalWrite(LED_BUILTIN, LOW);
+    ZERO_LED_OFF();
   }
 }
 

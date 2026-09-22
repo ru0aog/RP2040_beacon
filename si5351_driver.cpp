@@ -65,14 +65,24 @@ void setFrq_si5351(uint8_t *SI_FREQ_DATA, uint8_t CLK_NO) {
 
 void CLK_OFF_si5351(uint8_t CLK_NO) {
   //отключить выход
-  if (CLK_NO==0) {si5351_write_reg(0x10, 0x80);} // отключить драйвер CLK0
-  if (CLK_NO==1) {si5351_write_reg(0x11, 0x80);} // отключить драйвер CLK1
+  if (device_SI[0]) {
+    if (CLK_NO==0) {si5351_write_reg(0x10, 0x80);} // отключить драйвер CLK0
+    if (CLK_NO==1) {si5351_write_reg(0x11, 0x80);} // отключить драйвер CLK1
+  }
+  else {
+    fractGen_OFF();
+  }
 }
 
 void CLK_ON_si5351(uint8_t CLK_NO) {
   //включить выход
-  if (CLK_NO==0) {si5351_write_reg(0x10, 0x0F);} // включить драйвер CLK0
-  if (CLK_NO==1) {si5351_write_reg(0x11, 0x0F);} // включить драйвер CLK1
+  if (device_SI[0]) {
+    if (CLK_NO==0) {si5351_write_reg(0x10, 0x0F);} // включить драйвер CLK0
+    if (CLK_NO==1) {si5351_write_reg(0x11, 0x0F);} // включить драйвер CLK1
+  }
+  else {
+    fractGen_ON();
+  }
 }
 
 void setFr() {
@@ -196,7 +206,11 @@ void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
 
 // Функция включения питания si5351
 void SI_POWER_ON() {
-  I2C_SI_restart();
+  if (device_SI[0]) {
+    // перезапуск шины Wire на линиях генератора
+    // Выбираем нужный интерфейс Wire
+    TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
+    I2C_SI_restart();
     //16,17:включить драйверы CLK0,CLK1
     si5351_write_reg(0x10, 0x0F);
     si5351_write_reg(0x11, 0x0F);
@@ -205,11 +219,20 @@ void SI_POWER_ON() {
     //03:активировать выходы
     si5351_write_reg(0x03, 0x00);
     Serial.println("[Питание] Si5351: ВКЛ");
+  }
+  else {
+    Serial.println("[Система] отсутствует модуль Si5351");
+    Serial.print("[Питание] запускаем внутренний генератор RP2040 на пине "); Serial.println(PIN_I);
+  }
 }
 
 // Функция выключения питания si5351
 void SI_POWER_OFF() {
-  I2C_SI_restart();
+  if (device_SI[0]) {
+    // перезапуск шины Wire на линиях генератора
+    // Выбираем нужный интерфейс Wire
+    TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
+    I2C_SI_restart();
     //16-18:снять питание со всех выходов
     si5351_write_reg(0x10, 0x80);
     si5351_write_reg(0x11, 0x80);
@@ -217,7 +240,13 @@ void SI_POWER_OFF() {
     //03:отключить все выходы
     si5351_write_reg(0x03, 0xFF);
     Serial.println("[Питание] Si5351: ВЫКЛ");
-  Wire1.end();
+    pWire->end();
+  }
+  else {
+    fractGen_OFF();
+    set_sys_clock_khz(125000, true);
+    Serial.println("[Питание] внутренний генератор отключен");
+  }
 }
 
 

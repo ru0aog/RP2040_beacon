@@ -3,16 +3,9 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <RTClib.h> // Подключаем вашу штатную библиотеку часов
 
-// Аппаратная конфигурация пинов
-extern const uint8_t DS_POWER_PIN;
-const uint8_t DS_PIN_SDA   = 14;
-const uint8_t DS_PIN_SCL   = 15;
-
-// Делаем объект часов видимым для всех модулей
-extern bool DS_FAIL;
-extern RTC_DS3231 rtc;
+// Адрес часов на шине I2C
+#define RTC_I2C_ADDRESS 0x68
 
 // Прототипы функций планировщика маяка
 void init_scheduler();

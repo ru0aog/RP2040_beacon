@@ -221,8 +221,8 @@ void SI_POWER_ON() {
     Serial.println("[Питание] Si5351: ВКЛ");
   }
   else {
-    Serial.println("[Система] отсутствует модуль Si5351");
-    Serial.print("[Питание] запускаем внутренний генератор RP2040 на пине "); Serial.println(PIN_I);
+    Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
+    Serial.print("[Питание] Запускаем внутренний генератор RP2040 на пине "); Serial.println(PIN_I);
   }
 }
 
@@ -245,7 +245,7 @@ void SI_POWER_OFF() {
   else {
     fractGen_OFF();
     set_sys_clock_khz(125000, true);
-    Serial.println("[Питание] внутренний генератор отключен");
+    Serial.println("[Питание] Генератор частоты остановлен");
   }
 }
 

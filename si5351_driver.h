@@ -4,10 +4,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-extern const uint8_t SI_POWER_PIN;
-const uint8_t SI_PIN_SDA   = 18;
-const uint8_t SI_PIN_SCL   = 19;
-
 #define SI5351_I2C_ADDR    0x60
 
 extern bool SI_FAIL;

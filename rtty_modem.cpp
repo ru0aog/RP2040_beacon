@@ -118,7 +118,7 @@ static void send_rtty_bit(TransmitterState state) {
     if (state == MARK) {
         digitalWrite(LED_BUILTIN, HIGH);
         set_pio_sdr_freq(RTTY_mark_hz);
-        ZERO_LED_RED_ON();
+        ZERO_LED_BLUE_ON();
         fractGen_ON();
     } else {
         digitalWrite(LED_BUILTIN, LOW);

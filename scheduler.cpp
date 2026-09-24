@@ -1,13 +1,16 @@
-#include "scheduler.h"
-#include <hardware/adc.h> // для работы с АЦП RP2040
+﻿#include <hardware/adc.h> // для работы с АЦП RP2040
 #include <hardware/rtc.h>
+#include <hardware/clocks.h>
 #include <pico/util/datetime.h>
+#include <Wire.h>
+#include "scheduler.h"
 
-// Физическое определение объекта часов для линковщика
-RTC_DS3231 rtc;
+// Перечисление для типов подключенных чипов времени
+enum RtcType { RTC_NONE, RTC_INTERNAL, RTC_DS1307, RTC_DS3231 };
+RtcType activeRtc = RTC_NONE;
+
 datetime_t currentTime;
 
-bool DS_FAIL = true;
 // Глобальные переменные для хранения текущего времени
 uint8_t  rtc_hour  = 0;
 uint8_t  rtc_min   = 0;
@@ -17,89 +20,196 @@ uint8_t  rtc_month = 0;
 uint8_t  rtc_day   = 0;
 
 // Переменные для предотвращения повторных запусков в одну и ту же минуту
-// 255 — стартовое значение, не совпадающее ни с одной минутой суток
 static uint32_t last_ifkp_minute = 9999; 
 static uint32_t last_rtty_minute = 9999;
 static uint32_t last_cw_minute = 9999;
 
+// Вспомогательные функции конвертации BCD (Binary Coded Decimal) формата чипов RTC
+static uint8_t bcd2bin(uint8_t val) { return val - 6 * (val >> 4); }
+static uint8_t bin2bcd(uint8_t val) { return val + 6 * (val / 10); }
+
 void I2C_DS_restart() {
-  // перезапуск шины Wire1 на линиях часов
-  Wire1.end();
-  Wire1.setSDA(DS_PIN_SDA);
-  Wire1.setSCL(DS_PIN_SCL);
-  Wire1.setClock(400000);
-  Wire1.begin();
+  // перезапуск шины Wire на линиях часов
+  if (device_DS[4] == RTC_I2C_ADDRESS) {
+    // если датчик обнаружен
+    // Выбираем нужный интерфейс Wire
+    TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+    // Настройка пинов и старт шины I2C
+    pWire->end();
+    pWire->setSDA(device_DS[2]);
+    pWire->setSCL(device_DS[3]);
+    pWire->begin();
+    pWire->setClock(400000);
+    //Serial.print("[Система] Рестарт шины часов\n");
+  }
 }
 
-// Аппаратная инициализация часов
+// Низкоуровневая проверка: отвечает ли чип по I2C
+bool pingRTC() {
+  // перезапуск шины Wire на линиях часов
+  if (device_DS[4] == RTC_I2C_ADDRESS) {
+    TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+    pWire->beginTransmission(RTC_I2C_ADDRESS);
+    //Serial.println("[Система] пинг модуля RTC");
+    return (pWire->endTransmission() == 0);
+  }
+return 0;
+}
+
+// Аппаратная инициализация часов без библиотек
 void init_scheduler() {
-  pinMode(DS_POWER_PIN, OUTPUT);
-  digitalWrite(DS_POWER_PIN, HIGH);
-  delay(100); // Даем чипу DS3231 время на аппаратный старт
-  I2C_DS_restart();
-  if (!rtc.begin(&Wire1)) {
-    Serial.println("[Система] ОШИБКА! модуль RTC не найден на шине Wire.");
-    DS_FAIL = true;
+  I2C_DS_restart(); // Настраиваем шину пинов
+  
+  TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+  pWire->setTimeout(50);
+  
+  if (!pingRTC()) {
+    Serial.println("[Система] ОШИБКА! Внешний модуль RTC не найден на шине.");
+    activeRtc = RTC_INTERNAL;
+    device_DS[0] = 0;
+    device_DS[4] = 0;
+    
     Serial.print("[Система] Запуск собственных часов чипа RP2040: ");
+
+    #if defined(ARDUINO_ARCH_RP2040)
+    uint32_t clk_sys_hz = rp2040.f_cpu(); // Добавлены скобки вызова функции ()
+    
+    // 1. Аппаратно переключаем источник и настраиваем безопасное тактирование модуля RTC от PLL_SYS
+    clock_configure(clk_rtc,
+                    0, 
+                    CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, // Заменено на верную константу ядра
+                    clk_sys_hz, 
+                    clk_sys_hz / 46875); // Корректный делитель для получения необходимой сетки частот RTC
+    // 2. [КОРРЕКЦИЯ КАЛИБРОВКИ]: Принудительно восстанавливаем частоту периферии clk_peri.
+    // Это намертво фиксирует частоту АЦП, убирая разбег цифр между режимами!
+    clock_configure(clk_peri,
+                    0,
+                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+                    clk_sys_hz,
+                    clk_sys_hz);
+    #endif
+    // 3. Заново инициализируем модуль АЦП на восстановленной частоте
+    adc_init(); 
+    delay(10);
+
+    // Теперь вызов инициализации встроенного календаря абсолютно безопасен и не вызовет зависания
     rtc_init();
-    // 2. Устанавливаем начальное время (например: 27 июля 2026 года, 15:30:00)
-    // Формат: Год, Месяц, День, Часы, Минуты, Секунды
+    delay(10); 
+    
     datetime_t setcurrentTime = {
       .year  = 2026,
       .month = 7,
       .day   = 27,
-      .dotw  = 1, // День недели: 0 - Воскресенье, 1 - Понедельник и т.д.
+      .dotw  = 1, 
       .hour  = 15,
       .min   = 00,
       .sec   = 45};
+      
+    // Безопасная аппаратная установка времени во внутренний регистр
     rtc_set_datetime(&setcurrentTime);
+    delay(10); 
+    
     update_scheduler();
 
     Serial.print(get_current_time());
     Serial.print(" ");
     Serial.println(get_current_date());
-
-    //Serial.println("[Система] Встроенный RTC: ОК. RTC успешно запущен и настроен.");
+    return; // МГНОВЕННЫЙ ВЫХОД, к I2C больше не прикасаемся!
   } else {
-    DS_FAIL = false;
+    device_DS[0] = 1;
+
+    // Автоопределение типа чипа часов (DS3231 vs DS1307A)
+    pWire->beginTransmission(RTC_I2C_ADDRESS);
+    pWire->write(0x0F);
+    pWire->write(0x70); 
+    
+    if (pWire->endTransmission() == 0) {
+      pWire->beginTransmission(RTC_I2C_ADDRESS);
+      pWire->write(0x0F);
+      pWire->endTransmission();
+      
+      uint8_t rxBytes = pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)1);
+      uint8_t testByte = 0;
+      if (rxBytes > 0 && pWire->available()) {
+        testByte = pWire->read();
+      }
+
+      if ((testByte & 0x70) == 0x70) {
+        activeRtc = RTC_DS1307;
+        Serial.println("[Система] Обнаружен стандартный чип DS1307A");
+        
+        pWire->beginTransmission(RTC_I2C_ADDRESS);
+        pWire->write(0x0F);
+        pWire->write(0x00);
+        pWire->endTransmission();
+      } else {
+        activeRtc = RTC_DS3231;
+        Serial.println("[Система] Обнаружен чип высокой точности DS3231");
+      }
+    } else {
+      activeRtc = RTC_DS3231; 
+    }
+
+    if (activeRtc == RTC_DS1307) {
+      pWire->beginTransmission(RTC_I2C_ADDRESS);
+      pWire->write(0x00);
+      pWire->endTransmission();
+      
+      if (pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)1) > 0 && pWire->available()) {
+        uint8_t secReg = pWire->read();
+        if (secReg & 0x80) { 
+          pWire->beginTransmission(RTC_I2C_ADDRESS);
+          pWire->write(0x00);
+          pWire->write(secReg & 0x7F); 
+          pWire->endTransmission();
+          Serial.println("[Система] Осциллятор DS1307A успешно запущен.");
+        }
+      }
+    }
+
     update_scheduler();
     char buf[34];
     snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
-    //Serial.println(buf);
+    Serial.println(buf);
     snprintf(buf, sizeof(buf), " - время     : %02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
-    //Serial.println(buf);
-    //Serial.print(F("[Система] RTC ")); 
-    //Serial.print(rtc_chip_name); 
-    //Serial.println(F(" : OK. Внешний модуль времени успешно запущен."));
+    Serial.println(buf);
   }
 }
 
-// Обновление переменных времени 
+
+// Обновление переменных времени из регистров BCD
 void update_scheduler() {
-  if (DS_FAIL == false) {
-    // из чипа DS3231
-    I2C_DS_restart();
-    DateTime now = rtc.now();
-    rtc_year  = now.year();
-    rtc_month = now.month();
-    rtc_day   = now.day();
-    rtc_hour  = now.hour();
-    rtc_min   = now.minute();
-    rtc_sec   = now.second();
+  if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
+    TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+    
+    pWire->beginTransmission(RTC_I2C_ADDRESS);
+    pWire->write(0x00); // Стартуем с регистра 0х00 (Секунды)
+    pWire->endTransmission();
+    
+    pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)7); // Запрашиваем 7 байт времени
+    if (pWire->available() >= 7) {
+      rtc_sec   = bcd2bin(pWire->read() & 0x7F);
+      rtc_min   = bcd2bin(pWire->read());
+      rtc_hour  = bcd2bin(pWire->read() & 0x3F); // 24-часовой формат
+      pWire->read(); // Пропускаем день недели (регистр 0x03)
+      rtc_day   = bcd2bin(pWire->read());
+      rtc_month = bcd2bin(pWire->read() & 0x1F);
+      rtc_year  = bcd2bin(pWire->read()) + 2000;
+    }
   }
   else {
-    // DS3231 отсутствует
-    rtc_get_datetime(&currentTime);
-    rtc_year  = currentTime.year;
-    rtc_month = currentTime.month;
-    rtc_day   = currentTime.day;
-    rtc_hour  = currentTime.hour;
-    rtc_min   = currentTime.min;
-    rtc_sec   = currentTime.sec;
+    // Резервный режим: Внутренний RTC чипа RP2040
+    if (rtc_get_datetime(&currentTime)) {
+      rtc_year  = currentTime.year;
+      rtc_month = currentTime.month;
+      rtc_day   = currentTime.day;
+      rtc_hour  = currentTime.hour;
+      rtc_min   = currentTime.min;
+      rtc_sec   = currentTime.sec;
+    }
   }
 }
 
-// Вывод времени в консоль
 void print_current_time() {
   update_scheduler();
   char buf[34];
@@ -107,7 +217,6 @@ void print_current_time() {
   Serial.println(buf);
 }
 
-// Вывод только календарной даты в консоль
 void print_current_date() {
   update_scheduler();
   char buf[34];
@@ -115,24 +224,22 @@ void print_current_date() {
   Serial.println(buf);
 }
 
-// Возвращает строчку времени
 String get_current_time() {
   update_scheduler();
-  char buf[9]; // 6 цифр + 1 нулевой символ окончания строки '\0'
+  char buf[9]; 
   snprintf(buf, sizeof(buf), "%02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
   return String(buf);
 }
 
-// Возвращает строчку даты
+// Исправлено: разделители заменены на корректные точки '.'
 String get_current_date() {
   update_scheduler();
   char buf[11]; 
-  snprintf(buf, sizeof(buf), "%02d:%02d:%04d", rtc_day, rtc_month, rtc_year);
+  snprintf(buf, sizeof(buf), "%02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
   return String(buf);
 }
 
-
-// автоматический парсер текстового расписания
+// Автоматический парсер текстового расписания
 bool is_time_to_transmit(uint8_t mode) {
   extern String my_ifkp_variable;
   extern String my_rtty_variable;
@@ -152,23 +259,17 @@ bool is_time_to_transmit(uint8_t mode) {
   if (mode == 2 && current_absolute_minutes == last_cw_minute)   return false;
 
   while (*p_sched != '\0') {
-    // 1. Пропускаем пробелы перед токеном времени
     while (*p_sched == ' ' || *p_sched == '\t') p_sched++;
     if (*p_sched == '\0') break;
 
-    // Запоминаем стартовую позицию текущего токена для защиты от зависания
     const char* token_start = p_sched;
-
-    // 2. Читаем часы
     char* end_ptr;
     long sch_hour = strtol(p_sched, &end_ptr, 10);
     
-    // 3. Если встретили двоеточие — читаем минуты
     if (end_ptr != p_sched && *end_ptr == ':') {
-      p_sched = end_ptr + 1; // Встаем сразу за двоеточие
+      p_sched = end_ptr + 1; 
       long sch_min = strtol(p_sched, &end_ptr, 10);
       
-      // Если и минуты успешно прочитались, проверяем совпадение
       if (end_ptr != p_sched) {
         if (current_absolute_minutes == (uint32_t)(sch_hour * 60 + sch_min)) {
           if (mode == 0)      last_ifkp_minute = current_absolute_minutes;
@@ -177,78 +278,95 @@ bool is_time_to_transmit(uint8_t mode) {
           return true; 
         }
       }
-      p_sched = end_ptr; // Смещаем указатель на конец успешно распарсенных минут
+      p_sched = end_ptr; 
     } else {
-      p_sched = end_ptr; // Смещаем указатель на место, где споткнулся первый strtol
+      p_sched = end_ptr; 
     }
 
-    // 4. ГАРАНТИРОВАННАЯ ЗАЩИТА: Если ни один strtol не смог продвинуться вперед 
-    // (например, стоим на запятой, тексте или спецсимволе), принудительно делаем шаг.
     if (p_sched == token_start) {
       p_sched++;
     }
     
-    // 5. Перематываем указатель строго до следующей запятой (или конца строки)
     while (*p_sched != '\0' && *p_sched != ',') {
       p_sched++;
     }
     
-    // 6. Если нашли запятую — перешагиваем её для следующей итерации
     if (*p_sched == ',') {
       p_sched++; 
     }
   }
-
   return false;
 }
 
-
-// Функция для чтения телеметрии (АЦП RP2040 и температура DS3231)
+// Безопасное чтение телеметрии с проца и часов (при наличии температурного датчика)
 String get_telemetry_string() {
-  I2C_DS_restart();
-  // 1. Считываем температуру с чипа DS3231
-  float rtc_temp = rtc.getTemperature();
+  float rtc_temp = 0.0f;
 
-  // 2. Считываем датчик температуры самого процессора RP2040
-  adc_set_temp_sensor_enabled(true); // Включаем внутренний термодатчик
-  
-  adc_select_input(4); // ADC4 - встроенный термодатчик
-  delayMicroseconds(10); // Пауза на стабилизацию мультиплексора
-  adc_read();            // ХОЛОСТОЙ ХОД: Сбрасываем остаточный заряд конденсатора АЦП
-
-  uint32_t raw_temp = 0;
-  for(int i=0; i<20; i++) {
-    raw_temp += adc_read();
-    delayMicroseconds(2); // Небольшой интервал между выборками
+  // Считываем температуру только если чип определен как DS3231
+  if (device_DS[0] == 1 && activeRtc == RTC_DS3231) {
+    TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+    pWire->beginTransmission(RTC_I2C_ADDRESS);
+    pWire->write(0x11); // Регистр MSB температуры DS3231
+    pWire->endTransmission();
+    
+    pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)2);
+    if (pWire->available() >= 2) {
+      int8_t msb = pWire->read();
+      uint8_t lsb = pWire->read();
+      rtc_temp = msb + ((lsb >> 6) * 0.25f);
+    }
   }
+
+  // Полностью останавливаем аппаратную шину I2C часов, чтобы перехватить контроль над пинами
+  TwoWire *pWireActive = (device_DS[1] == 1) ? &Wire1 : &Wire;
+  pWireActive->end();
+
+  // Переводим пины 26 и 27 в режим обычных цифровых выходов
+  pinMode(26, OUTPUT);
+  pinMode(27, OUTPUT);
+
+  // Жестко выставляем на них логическую единицу (+3.3 В).
+  // Это принудительно запитает «висящий» опорный узел АЦП и уберет утечки!
+  digitalWrite(26, HIGH);
+  digitalWrite(27, HIGH);
+  delayMicroseconds(50); // Даем время потенциалу стабилизироваться на отметке 3.3 В
+
+  // Включаем и настраиваем датчик температуры процессора (Канал 4)
+  adc_set_temp_sensor_enabled(true);
+  adc_select_input(4); 
+  delayMicroseconds(20); 
+  
+  // Холостые сбросы конденсатора
+  for(int h = 0; h < 10; h++) {
+    ::adc_read();
+    delayMicroseconds(2);
+  }
+
+  // Выполняем чистый замер температуры кристалла
+  uint32_t raw_temp = 0;
+  for(int i = 0; i < 20; i++) {
+    raw_temp += ::adc_read(); 
+    delayMicroseconds(2);
+  }
+  
   float voltage_temp = (raw_temp / 20.0f) * 3.3f / 4095.0f;
-  float mcu_temp = 27.0f - (voltage_temp - 0.706f) / 0.001721f; // Формула из даташита RP2040
+  float mcu_temp = 27.0f - (voltage_temp - 0.706f) / 0.001721f;
 
-/*
-  // 3. Считываем напряжение VSYS
-  // Переключаемся на встроенный делитель VSYS
-  // ВНИМАНИЕ! делитель не распаян, пока не выводим эти данные в строку
-  adc_select_input(3); // ADC3 - это пин GPIO 29, измеряющий VSYS на Pico
-  delayMicroseconds(10);
-  adc_read(); // Холостой ход
+  // === ВОССТАНОВЛЕНИЕ РАБОТЫ ШИНЫ ЧАСОВ ===
+  // Возвращаем пины под управление I2C-контроллера Wire1/Wire
+  I2C_DS_restart();
 
-  uint32_t raw_vbat = 0;
-  for(int i=0; i<20; i++) raw_vbat += adc_read();
-  float voltage_pin = (raw_vbat / 20.0f) * 3.3f / 4095.0f;
-
-  // На плате Pico встроенный делитель делит напряжение на 3
-  float v_bat = voltage_pin * 3.0f; 
-*/
-
-  // 4. Формируем компактную строчку телеметрии
   char tele_buf[48];
-  snprintf(tele_buf, sizeof(tele_buf), "T_DS=%.1fC T_CPU=%.1fC", rtc_temp, mcu_temp);
+  if (device_DS[0] == 1 && activeRtc == RTC_DS3231) {
+    snprintf(tele_buf, sizeof(tele_buf), "T_DS=%.1fC T_CPU=%.1fC", rtc_temp, mcu_temp);
+  } else {
+    snprintf(tele_buf, sizeof(tele_buf), "T_DS=N/A T_CPU=%.1fC", mcu_temp);
+  }
   
   return String(tele_buf);
 }
 
-
-// Установка даты
+// Установка даты прямым заполнением регистров в BCD
 void handle_date_command(String cmd) {
   int space_idx = cmd.indexOf(' ');
   if (space_idx == -1) return;
@@ -256,16 +374,9 @@ void handle_date_command(String cmd) {
   String date_part = cmd.substring(space_idx + 1);
   date_part.trim();
   
-  // Ищем первую точку между днем и месяцем
   int first_dot = date_part.indexOf('.');
-  if (first_dot == -1) {
-    Serial.println("[Ошибка] Неверный формат. Используйте: date ДД.ММ.ГГГГ");
-    return;
-  }
-  
-  // Ищем вторую точку между месяцем и годом
   int second_dot = date_part.indexOf('.', first_dot + 1);
-  if (second_dot == -1) {
+  if (first_dot == -1 || second_dot == -1) {
     Serial.println("[Ошибка] Неверный формат. Используйте: date ДД.ММ.ГГГГ");
     return;
   }
@@ -274,18 +385,21 @@ void handle_date_command(String cmd) {
   int m = date_part.substring(first_dot + 1, second_dot).toInt();
   int y = date_part.substring(second_dot + 1).toInt();
   
-  // Проверяем валидность введенного календаря
   if (y >= 2000 && y < 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
-    if (DS_FAIL == false) {
-      // из чипа DS3231
-      I2C_DS_restart();
-      DateTime now = rtc.now();
-      rtc.adjust(DateTime(y, m, d, now.hour(), now.minute(), now.second()));
-      Serial.println("[Система] : Календарная дата в чипе DS3231 успешно обновлена.");
+    if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
+      TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+      
+      // Запись новых параметров в календарную сетку чипа
+      pWire->beginTransmission(RTC_I2C_ADDRESS);
+      pWire->write(0x04); // Начиная с регистра 0x04 (Дата/День месяца)
+      pWire->write(bin2bcd(d));
+      pWire->write(bin2bcd(m));
+      pWire->write(bin2bcd(y - 2000));
+      pWire->endTransmission();
+      Serial.println("[Система] : Календарь внешнего RTC успешно обновлен.");
     }
     else {
-      // DS3231 отсутствует
-      // Создаем пустую структуру для чтения текущего времени
+      // DS3231/DS1307 отсутствует — настраиваем внутренние часы RP2040
       datetime_t current_time;
       // Считываем актуальные данные из встроенного RTC
       if (rtc_get_datetime(&current_time)) {
@@ -294,22 +408,21 @@ void handle_date_command(String cmd) {
         current_time.day   = d;
         // Записываем обновленную структуру обратно в контроллер RTC
         rtc_set_datetime(&current_time);
-          Serial.println("[Система] : Календарная дата встроенного RTC успешно обновлена.");
+        Serial.println("[Система] : Календарь встроенного RTC успешно обновлен.");
       }
     }
-    // Сбрасываем защиты
+    // Принудительно сбрасываем защиты минут, чтобы новые параметры применились мгновенно
     last_ifkp_minute = 9999;
     last_rtty_minute = 9999;
     last_cw_minute   = 9999;
-
+    
     print_current_date(); 
   } else {
     Serial.println("[Ошибка] Недопустимые значения дня, месяца или года.");
   }
 }
 
-
-// Установка времени
+// Установка времени прямым заполнением регистров в BCD
 void handle_time_command(String cmd) {
   int space_idx = cmd.indexOf(' ');
   if (space_idx == -1) return;
@@ -326,44 +439,45 @@ void handle_time_command(String cmd) {
   int h = time_part.substring(0, first_colon).toInt();
   int m = 0;
   int s = 0;
-  
   int second_colon = time_part.indexOf(':', first_colon + 1);
   
   if (second_colon == -1) {
     m = time_part.substring(first_colon + 1).toInt();
-    s = 0; 
   } else {
     m = time_part.substring(first_colon + 1, second_colon).toInt();
     s = time_part.substring(second_colon + 1).toInt();
   }
   
   if (h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
-    if (DS_FAIL == false) {
-      // из чипа DS3231
-      I2C_DS_restart();
-      DateTime now = rtc.now();
-      rtc.adjust(DateTime(now.year(), now.month(), now.day(), h, m, s));
-      Serial.println("[Система] : Время и секунды в чипе DS3231 успешно обновлены.");
+    if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
+      TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
+      
+      // Записываем данные напрямую в регистры BCD начиная с 0x00
+      pWire->beginTransmission(RTC_I2C_ADDRESS);
+      pWire->write(0x00);              // Адрес первого регистра (Секунды)
+      pWire->write(bin2bcd(s));        // Регистр 0x00: Секунды
+      pWire->write(bin2bcd(m));        // Регистр 0x01: Минуты
+      pWire->write(bin2bcd(h) & 0x3F); // Регистр 0x02: Часы (маска 0x3F гарантирует 24-часовой формат)
+      pWire->endTransmission();
+      
+      Serial.println("[Система] : Время внешнего RTC успешно обновлено.");
     }
     else {
-      // DS3231 отсутствует
-      // Создаем пустую структуру для чтения текущего времени
+      // Внешний RTC отсутствует — настраиваем внутренние часы RP2040
       datetime_t current_time;
-      // Считываем актуальные данные из встроенного RTC
       if (rtc_get_datetime(&current_time)) {
         current_time.hour = h;
         current_time.min  = m;
         current_time.sec  = s;
-        // Записываем обновленную структуру обратно в контроллер RTC
         rtc_set_datetime(&current_time);
-          Serial.println("[Система] : Время и секунды встроенного RTC успешно обновлены.");
+        Serial.println("[Система] : Время встроенного RTC успешно обновлено.");
       }
     }
-    // Принудительно сбрасываем все три защиты минут, чтобы новое время применилось мгновенно
+    // Сбрасываем все три минуты блокировок для мгновенного обновления расписания
     last_ifkp_minute = 9999;
     last_rtty_minute = 9999;
     last_cw_minute   = 9999;
-
+    
     update_scheduler();
     print_current_time(); 
   } else {

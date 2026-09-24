@@ -6,10 +6,7 @@
 
 // Адрес датчика на шине I2C.
 #define BME280_ADDRESS 0x76
-
-extern const uint8_t BME_POWER_PIN;
-const uint8_t BME_PIN_SDA   = 12;
-const uint8_t BME_PIN_SCL   = 13;
+#define BMP180_ADDRESS 0x77
 
 extern float  bme_humid;
 extern float  bme_temp;

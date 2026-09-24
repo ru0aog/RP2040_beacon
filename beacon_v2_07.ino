@@ -13,7 +13,7 @@
 #include <Adafruit_TinyUSB.h>
 
 // автоматический маяк на RP2040
-// версия 2.07 от 2026-09-22, автор RU0AOG
+// версия 2.07 от 2026-09-24, автор RU0AOG
 // моды CW, RTTY, IFKP
 // сканирование подключенного оборудования
 // датчик давления BME/BMP280
@@ -24,7 +24,7 @@
 // поддержка RP2040-Zero
 
 #define BCN_VER 2.07
-#define BCN_DAT "2026-09-22"
+#define BCN_DAT "2026-09-24"
 
 // таблица параметров устройств
 /*
@@ -92,13 +92,23 @@ void check_serial_commands() {
             print_current_date();
             print_current_time();
             Serial.print(F("Телеметрия: ")); Serial.println(get_telemetry_string());
+            if (device_BM[0] == 1) {
             Serial.print(F("Телеметрия: ")); Serial.println(get_climate_telemetry());
+            }
+            else {
+            Serial.print(F("Телеметрия: ")); Serial.println("в системе отсутствует датчик давления");
+            }
             Serial.println(F("Введите help для перехода в справочное меню по командам управления\r\n"));
           }
           else if (command.equalsIgnoreCase("TELE")) {
             print_current_time();
             Serial.print(F("Телеметрия: ")); Serial.println(get_telemetry_string());
+            if (device_BM[0] == 1) {
             Serial.print(F("Телеметрия: ")); Serial.println(get_climate_telemetry());
+            }
+            else {
+            Serial.print(F("Телеметрия: ")); Serial.println("в системе отсутствует датчик давления");
+            }
           }
           else if (command.startsWith("time")) {
             int space_idx = command.indexOf(' ');
@@ -258,7 +268,6 @@ void setup() {
   //Serial.print("[Система] Сканирование завершено.\n");
 
   init_BME();          // инициализировать bme280
-  //BME_read();
 
   init_scheduler();    // инициализировать дс3231
 
@@ -327,6 +336,9 @@ void loop() {
       //Serial.print(buf);
       //Serial.print(F(" ")); Serial.print(get_telemetry_string());
       //Serial.print(F(" ")); Serial.println(get_climate_telemetry());
+      ZERO_LED_GREEN_ON();
+      delay(10);
+      ZERO_LED_OFF();
 
       LCD_init(false);      
       String T_DS_text  = "T1=" + get_telemetry_string().substring(5, 9);
@@ -576,7 +588,7 @@ void loop() {
         
         // ШАГ 4: Передача климатической телеметрии
         if (!pc_file_written && !soft_restart_flag) {
-          if (device_SI[0]) {
+          if (device_BM[0] == 1) {
             String telemetry = get_climate_telemetry();
             Serial.print(F("[ЭФИР_CW] Телем: "));
             send_cw_string(telemetry);
@@ -641,6 +653,8 @@ void scanRP2040Ports() {
     if (sda == 16 || scl == 16) continue;
     
     // 2. Исключаем пины GPIO23, GPIO24, GPIO25 (они отсутствуют на распиновке платы)
+    // на плате YD-RP2040 встроенный RGB светодиод WS2812B на пине GPIO23
+    // на плате YD-RP2040 и Pico встроенный обычный светодиод на пине GPIO25
     if (sda >= 23 && sda <= 25) continue;
     if (scl >= 23 && scl <= 25) continue;
 
@@ -730,21 +744,46 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
       // для DS3231/1307
       if (address == 0x68) {
         extern String rtc_chip_name;
+        
+        // --- 100% НАДЕЖНОЕ И БЕЗОПАСНОЕ ОПРЕДЕЛЕНИЕ ТИПА ЧИПА RTC ---
+        // Пытаемся записать биты 4,5,6 (0x70) в регистр статуса 0x0F
         pWire->beginTransmission(address);
-        pWire->write(0x11); // запрос регистра температуры ds3231
+        pWire->write(0x0F);
+        pWire->write(0x70); 
         if (pWire->endTransmission() == 0) {
-          pWire->requestFrom(address, 1);
-          if (pWire->available()) {
-            byte tempMSB = pWire->read();
-            if (tempMSB < 85 || tempMSB > 215) {
-              if (LOGGING) {Serial.print(" - это чип DS3231, температура "); Serial.print(tempMSB); Serial.print(" C");}
-            rtc_chip_name = "DS3231";
-            } else {
-                if (LOGGING) {Serial.print(" - это чип DS1307");}
-              rtc_chip_name = "DS1307";
-            }
+          
+          // Читаем этот же регистр обратно
+          pWire->beginTransmission(address);
+          pWire->write(0x0F);
+          pWire->endTransmission();
+          
+          uint8_t rxBytes = pWire->requestFrom(address, (uint8_t)1);
+          uint8_t testByte = 0;
+          if (rxBytes > 0 && pWire->available()) {
+            testByte = pWire->read();
           }
+
+          // Анализируем: если биты стерлись — это аппаратный регистр DS3231. 
+          // Если записались — это пользовательская NV RAM чипа DS1307.
+          if ((testByte & 0x70) == 0x70) {
+            rtc_chip_name = "DS1307";
+            if (LOGGING) { Serial.print(" - это чип DS1307"); }
+            
+            // Заметаем следы в памяти DS1307A
+            pWire->beginTransmission(address);
+            pWire->write(0x0F);
+            pWire->write(0x00);
+            pWire->endTransmission();
+          } else {
+            rtc_chip_name = "DS3231";
+            if (LOGGING) { Serial.print(" - это чип высокой точности DS3231"); }
+          }
+        } else {
+          // Резервный случай, если транзакция сбоит
+          rtc_chip_name = "DS3231";
         }
+
+        // Заполнение глобальной таблицы приборов маяка
         device_DS[0] = 1;
         device_DS[1] = WIRE_NO;
         device_DS[2] = PIN_SDA;
@@ -752,6 +791,7 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
         device_DS[4] = address;
         device_DS_name = rtc_chip_name + " Часы RTC";
       }
+
 
       // для флэш памяти AT24Cxx
       // Проверяем весь диапазон адресов для памяти AT24Cxx (от 0x50 до 0x57)
@@ -905,6 +945,35 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
         device_BM[3] = PIN_SCL;
         device_BM[4] = address;
       }
+
+      // для датчика давления BME180
+      if (address == 0x77) {
+        if (LOGGING) {Serial.print(" - это датчик давления ");}
+        uint8_t chipID = 0;
+        pWire->beginTransmission(address);
+        pWire->write(0xD0);
+        pWire->endTransmission();
+        pWire->requestFrom(address, 1);
+        chipID = pWire->read();
+        if (chipID == 0x55) {
+          if (LOGGING) {Serial.print("BMP180");}
+          device_BM_name = "BMP180 Барометр";
+        } 
+        else if (chipID == 0x58 || chipID == 0x56 || chipID == 0x57) {
+          if (LOGGING) {Serial.print("BMP280");}
+          device_BM_name = "BMP280 Барометр";
+        } 
+        else {
+          if (LOGGING) {Serial.print("неизвестный чип");}
+          device_BM_name = "неизвестный чип";
+        }
+        device_BM[0] = 1;
+        device_BM[1] = WIRE_NO;
+        device_BM[2] = PIN_SDA;
+        device_BM[3] = PIN_SCL;
+        device_BM[4] = address;
+      }
+
 
       if (LOGGING) {Serial.println("");}
       nDevices++;

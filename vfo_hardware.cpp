@@ -51,7 +51,7 @@ static void detach_peripheral_clock() {
 // Математический расчет аппаратных коэффициентов частоты
 static VfoParameters calculate_freq_params(unsigned int target_frequency_hz) {
     if (target_frequency_hz < 100000)   target_frequency_hz = 100000;
-    if (target_frequency_hz > 35000000) target_frequency_hz = 35000000;
+    if (target_frequency_hz > 30000000) target_frequency_hz = 30000000;
 
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ; 
     unsigned int p1 = 5, p2 = 2, fbdiv_int = 100; 

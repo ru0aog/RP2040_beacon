@@ -7,5 +7,5 @@
 редактирование конфигурации из консоли,
 работа по расписанию,
 передача данных телеметрии, поддержка RP2040-Zero.
-Подробный разбор кода смотри на https://deepwiki.com/ru0aog/RP2040\_beacon/1-project-overview
+Подробный разбор кода смотри на [https://deepwiki.com/ru0aog/RP2040_beacon/1-project-overview](https://deepwiki.com/ru0aog/RP2040_beacon/1-project-overview)
 

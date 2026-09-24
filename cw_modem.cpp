@@ -3,7 +3,7 @@
 #include "scheduler.h"
 #include "file_manager.h"
 #include "LCD.h"
-#include "gen_fract.h"
+#include "vfo_hardware.h"
 #include "LED_BLINK.h"
 
 extern bool soft_restart_flag;
@@ -48,11 +48,13 @@ void prepare_cw_frequency(uint32_t freq_hz) {
     Serial.println(" Hz");
   }
   else {
-    set_pio_sdr_freq(freq_hz);
-    Serial.print("[CW_ГОТОВ]: Частота несущей CW готова: "); 
-    Serial.print(fractGen_get_real_frequency()); 
-    Serial.println(" Hz");
-    fractGen_OFF();
+    //set_pio_sdr_freq(freq_hz);
+    Serial.print("[CW_ГОТОВ]: Частота несущей CW готова: ");
+    vfo_hardware_init(freq_hz, 10.0);
+    vfo_set_cw_key(false);
+    //Serial.print(fractGen_get_real_frequency()); 
+    //Serial.println(" Hz");
+    //fractGen_OFF();
   }
 }
 

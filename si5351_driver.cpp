@@ -1,5 +1,5 @@
 ﻿#include "si5351_driver.h"
-#include "gen_fract.h"
+#include "vfo_hardware.h"
 
 bool SI_FAIL = true;
 uint64_t Xtal_freq  = 25000000;
@@ -70,7 +70,8 @@ void CLK_OFF_si5351(uint8_t CLK_NO) {
     if (CLK_NO==1) {si5351_write_reg(0x11, 0x80);} // отключить драйвер CLK1
   }
   else {
-    fractGen_OFF();
+    //fractGen_OFF();
+    vfo_set_cw_key(false);
   }
 }
 
@@ -81,7 +82,8 @@ void CLK_ON_si5351(uint8_t CLK_NO) {
     if (CLK_NO==1) {si5351_write_reg(0x11, 0x0F);} // включить драйвер CLK1
   }
   else {
-    fractGen_ON();
+    //fractGen_ON();
+    vfo_set_cw_key(true);
   }
 }
 
@@ -98,12 +100,13 @@ void setFr() {
 void init_si5351() {
   // Настраиваем пины и запускаем шину I2C
   I2C_SI_restart();
-  // Выбираем нужный интерфейс Wire
-  TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
-  // Сканируем I2C-адрес Si5351 (0x60) для проверки связи
-  pWire->beginTransmission(0x60);
-  byte si_status = pWire->endTransmission();
-  if (si_status == 0) {
+  if (device_SI[0]){
+    // Выбираем нужный интерфейс Wire
+    TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
+    // Сканируем I2C-адрес Si5351 (0x60) для проверки связи
+    pWire->beginTransmission(0x60);
+    byte si_status = pWire->endTransmission();
+    if (si_status == 0) {
       SI_FAIL = false;
       //Serial.print(F("[Система] Генератор SI-5351 обнаружен на пинах SDA=")); Serial.print(SI_PIN_SDA);Serial.print(", SCL="); Serial.println(SI_PIN_SCL);
       //SI_POWER_OFF();
@@ -175,11 +178,14 @@ void init_si5351() {
       //Serial.println(" - инит CLK0 : ОК");
       //Serial.println(" - инит CLK1 : ОК");
       //Serial.println("[Система] ГЕН SI-5351: ОК. Генератор успешно запущен и настроен.");
-  } else {
-      Serial.println(F("[Система] КРИТИЧЕСКАЯ ОШИБКА! ГЕН SI-5351 не найден на шине Wire."));
-      SI_FAIL = true;
-      fractGen_init();
+    }
   }
+
+  if (!device_SI[0]) {
+      Serial.println(F("[Система] КРИТИЧЕСКАЯ ОШИБКА! ГЕН SI-5351 не найден на шине Wire."));
+      Serial.print(F("[Система] ВНИМАНИЕ! Будет использован внутренний DDS-генератор на пине ")); Serial.println(VFO_OUTPUT_PIN);
+      SI_FAIL = true;
+    }
 }
 
 // Функция расчета регистров si5351
@@ -222,7 +228,7 @@ void SI_POWER_ON() {
   }
   else {
     Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
-    Serial.print("[Питание] Запускаем внутренний генератор RP2040 на пине "); Serial.println(PIN_I);
+    Serial.print("[Питание] Запускаем внутренний DDS-генератор RP2040 на пине "); Serial.println(VFO_OUTPUT_PIN);
   }
 }
 
@@ -243,9 +249,10 @@ void SI_POWER_OFF() {
     pWire->end();
   }
   else {
-    fractGen_OFF();
-    set_sys_clock_khz(125000, true);
-    Serial.println("[Питание] Генератор частоты остановлен");
+    //fractGen_OFF();
+    //set_sys_clock_khz(125000, true);
+    vfo_set_cw_key(false);
+    Serial.print("[Питание] DDS-генератор RP2040 на пине "); Serial.print(VFO_OUTPUT_PIN); Serial.println(" остановлен.");
   }
 }
 

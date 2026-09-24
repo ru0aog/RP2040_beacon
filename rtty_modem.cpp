@@ -2,8 +2,8 @@
 #include "si5351_driver.h" 
 #include "file_manager.h"  
 #include "LCD.h"
-#include "gen_fract.h"
 #include "LED_BLINK.h"
+#include "vfo_hardware.h"
 
 // Внешние ссылки на глобальные переменные управления
 extern bool soft_restart_flag;
@@ -96,14 +96,20 @@ void prepare_rtty_frequencies(uint32_t space_hz, uint32_t mark_hz) {
     Serial.print("            F_SPACE: "); Serial.print(space_hz); Serial.println(" Hz");
   }
   else {
-    RTTY_mark_hz = mark_hz;
-    set_pio_sdr_freq(mark_hz);
-    Serial.println("[RTTY_ГОТОВ] Сетка частот RTTY готова."); 
-    Serial.print("            F_MARK : "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
-    RTTY_space_hz = space_hz;
-    set_pio_sdr_freq(space_hz);
-    Serial.print("            F_SPACE: "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
-    fractGen_OFF();
+    //RTTY_mark_hz = mark_hz;
+    //set_pio_sdr_freq(mark_hz);
+    //Serial.println("[RTTY_ГОТОВ] Сетка частот RTTY готова."); 
+    //Serial.print("            F_MARK : "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
+    //RTTY_space_hz = space_hz;
+    //set_pio_sdr_freq(space_hz);
+    //Serial.print("            F_SPACE: "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
+    //fractGen_OFF();
+    double rtty_shift = (double)mark_hz - (double)space_hz;
+    vfo_hardware_init(mark_hz, rtty_shift);
+    vfo_set_tone_instant(1);
+    //vfo_set_cw_key(false);
+    vfo_set_cw_key(true);
+    Serial.println(F("[RTTY_ГОТОВ]: Аппаратный VFO RTTY инициализирован!"));
   }
 }
 
@@ -115,16 +121,22 @@ static void send_rtty_bit(TransmitterState state) {
         setFrq_si5351(data, 0); // установить частоту для CLK0
         CLK_ON_si5351(0);       // разрешить выход частоты на CLK0 
       }
+      else {
+        if (state == MARK) {
+            vfo_set_tone_instant(0);
+            vfo_set_cw_key(true);
+        } else {
+            vfo_set_tone_instant(1);
+            vfo_set_cw_key(true);
+        }
+      }
+
     if (state == MARK) {
         digitalWrite(LED_BUILTIN, HIGH);
-        set_pio_sdr_freq(RTTY_mark_hz);
-        ZERO_LED_BLUE_ON();
-        fractGen_ON();
+        ZERO_LED_GREEN_ON();
     } else {
         digitalWrite(LED_BUILTIN, LOW);
-        set_pio_sdr_freq(RTTY_space_hz);
-        ZERO_LED_OFF();
-        fractGen_ON();
+        ZERO_LED_RED_ON();
     }
 
     // Засекаем точное время начала передачи бита
@@ -221,6 +233,7 @@ void send_rtty_raw(const char* s) {
         send_rtty_code(0x08); // LF
     }
     digitalWrite(LED_BUILTIN, LOW);
+    ZERO_LED_OFF();
     Serial.println("");
 }
 
@@ -244,7 +257,8 @@ void send_rtty_string(String str) {
         send_rtty_bit(MARK);
     }
     // Отключаем выход генерации Si5351
-    CLK_OFF_si5351(0); 
+    CLK_OFF_si5351(0);
+    vfo_set_cw_key(false);
     digitalWrite(LED_BUILTIN, LOW);
     ZERO_LED_OFF();
   }

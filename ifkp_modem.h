@@ -14,5 +14,7 @@ void send_ifkp_char(char c);
 void send_ifkp_string(const char* str);
 void send_ifkp_string(String str);
 void send_delta(uint8_t delta);
+extern const double IFKP_STEP_HZ; // Экспорт шага сетки частот IFKP для PIO
+void send_ifkp_calibration_ladder(); // Передача тестовой лесенки тонов
 
 #endif

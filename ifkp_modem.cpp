@@ -2,11 +2,17 @@
 #include "si5351_driver.h"
 #include "file_manager.h"
 #include "scheduler.h"
+#include "vfo_hardware.h"
+#include "LED_BLINK.h"
 
 uint32_t IFKP_Base_freq = 3601307;
 // Глобальные переменные для хранения сетки частот IFKP (33 тона)
 uint8_t DATA_IFKP[33][8];
 uint8_t current_tone = 0; // Индекс текущего тона в сетке (0 - 32)
+extern uint8_t device_SI[5]; // Экспорт флага сканера I2C устройств
+const double IFKP_STEP_HZ = 11.697; // Задаем шаг вашей сетки (соответствует 386/33 Гц)
+
+
 
 // Объявление функции расчета частот из соседнего модуля модема, чтобы вызвать её при включении питания
 extern void prepare_ifkp_frequencies(uint32_t base_hz);
@@ -30,23 +36,32 @@ void send_delta(uint8_t delta) {
       if (SI_FAIL == false) CLK_OFF_si5351(0); // Глушим синтезатор
       return;
     }
-    // установить тон
-    if (SI_FAIL == false) {
-      current_tone = (current_tone + delta) % 33;
+    
+    current_tone = (current_tone + delta) % 33;
+
+    // Установка тона в зависимости от доступного железа
+    if (device_SI[0] && SI_FAIL == false) {
       set_ifkp_tone(current_tone);
+    } else {
+      vfo_set_tone_instant(current_tone); // Мгновенный фазонепрерывный прыжок в PIO
     }
+
     // Включаем светодиод индикации передачи
     digitalWrite(LED_BUILTIN, HIGH);
+    ZERO_LED_BLUE_ON();
     uint32_t IFKP_start_time = micros();
     uint32_t IFKP_tone_duration_us = 500000; // 500 миллисекунд в микросекундах
     uint32_t IFKP_halftone_duration_us = IFKP_tone_duration_us / 2;
     bool led_half_turned_off = false;
+
     // Аппаратный цикл удержания длительности знака
     while (micros() - IFKP_start_time < IFKP_tone_duration_us) {
         // Прерываем работу, если зафиксирована активность ПК или подан сигнал рестарта
         if (pc_file_written || soft_restart_flag) {
             digitalWrite(LED_BUILTIN, LOW);
-            if (SI_FAIL == false) CLK_OFF_si5351(0); // Глушим синтезатор
+            ZERO_LED_OFF();
+            if (device_SI[0] && SI_FAIL == false) CLK_OFF_si5351(0);
+            else vfo_set_cw_key(false);
             return;
         }
         // Опрашиваем CLI. Любые задержки внутри CLI больше не ломают общую длительность тона
@@ -55,6 +70,7 @@ void send_delta(uint8_t delta) {
         // гасим светодиод на экваторе длительности (250 мс)
         if (!led_half_turned_off && (micros() - IFKP_start_time >= IFKP_halftone_duration_us)) {
             digitalWrite(LED_BUILTIN, LOW);
+            ZERO_LED_OFF();
             led_half_turned_off = true;
         }
         yield(); // Разгрузка ядра процессора RP2040
@@ -64,8 +80,21 @@ void send_delta(uint8_t delta) {
 
 // Заполнение таблицы базовых частот DATA_IFKP (совместимо с УКВ 144 МГц)
 void prepare_ifkp_frequencies(uint32_t base_hz) {
+    current_tone = 0; // Сброс индекса перед началом сессии
+
+    // ЕСЛИ СИНТЕЗАТОР ОТСУТСТВУЕТ - ИНИЦИАЛИЗИРУЕМ PIO ЯДРО И ВЫХОДИМ
+    if (!device_SI[0] || SI_FAIL == true) {
+        vfo_hardware_init(base_hz, IFKP_STEP_HZ);
+        vfo_set_cw_key(true); // Открываем ВЧ-выход ноги 28 в эфир
+        vfo_set_tone_instant(0);
+        Serial.print(F("[IFKP_PIO] Аппаратное PIO-ядро готово. База: ")); Serial.print(base_hz);
+        Serial.print(F(" Гц, Шаг: ")); Serial.print(IFKP_STEP_HZ, 3); Serial.println(F(" Гц"));
+        return; 
+    }
+
+    // Родной код расчета байт для Si5351 (выполняется, только если чип на месте)
     uint64_t base_mHz = (uint64_t)base_hz * 1000ULL;
-    Serial.println(F("[IFKP_СЕТКА] Расчет тоно и вывод основных частот IFKP:"));
+    Serial.println(F("[IFKP_СЕТКА] Расчет тонов и вывод основных частот IFKP:"));
     for (int i = 0; i < 33; i++) {
         // Шаг 386/33 = 11.697 Гц
         uint64_t freq_mHz = base_mHz + ((uint64_t)i * 11697ULL);
@@ -83,7 +112,6 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
 
 // Модулятор протокола IFKP
 void send_ifkp_char(char c) {
-  if (SI_FAIL == false) {
     // ИСПРАВЛЕНО: Быстрая проверка перед началом отправки составного символа
     if (pc_file_written || soft_restart_flag) return;
 
@@ -146,7 +174,7 @@ void send_ifkp_char(char c) {
     else if (c == '\xD7') { send_delta(13 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
     else if (c == '\xA3') { send_delta(14 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
     else if (c == '\x7F') { send_delta(28 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-  }
+
 }
 
 char trans_utf8_to_ifkp_char(uint16_t utf8_char) {
@@ -229,8 +257,12 @@ char trans_utf8_to_ifkp_char(uint16_t utf8_char) {
 void send_ifkp_string(const char* str) {
   if (str == nullptr) return;
   
-  if (SI_FAIL == false) {
-    CLK_ON_si5351(0);       // разрешить выход частоты на CLK0
+  // Включаем физический выход ВЧ генерации
+  if (device_SI[0] && SI_FAIL == false) {
+    CLK_ON_si5351(0); 
+  } else {
+    vfo_set_cw_key(true);
+  }
     
     int i = 0;
     while (str[i] != '\0') {
@@ -253,18 +285,92 @@ void send_ifkp_string(const char* str) {
 
         // Проверяем флаги сразу после отправки символа
         if (pc_file_written || soft_restart_flag) break;
-
         i++;
     }
 
+  // Выключаем физический выход ВЧ генерации (Уходим в Z-состояние / Паузу)
+  if (device_SI[0] && SI_FAIL == false) {
+    CLK_OFF_si5351(0); 
+  } else {
+    vfo_set_cw_key(false);
+  }
+
     CLK_OFF_si5351(0); // Корректно тушим чип
     digitalWrite(LED_BUILTIN, LOW);
+    ZERO_LED_OFF();
     Serial.println(""); 
-  }
 }
 
 // Функция-помощник для объектов String
 void send_ifkp_string(String str) {
   send_ifkp_string(str.c_str());
+}
+
+
+// Передача калибровочной лесенки (Свип-тест от 0 до 32 тона с миганием)
+void send_ifkp_calibration_ladder() {
+    
+    // Включаем физический ВЧ-выход
+    if (device_SI && SI_FAIL == false) {
+        CLK_ON_si5351(0); 
+    } else {
+        vfo_set_cw_key(true);
+    }
+
+    // Последовательный перебор всех тонов вверх
+    for (uint8_t i = 0; i < 33; i++) {
+        // Мгновенная проверка флагов ПК или аварийного рестарта во время свипа
+        if (pc_file_written || soft_restart_flag) break;
+
+        current_tone = i; // Жестко фиксируем индекс текущего тона
+
+        // Физическое переключение частоты
+        if (device_SI && SI_FAIL == false) {
+            set_ifkp_tone(current_tone);
+        } else {
+            vfo_set_tone_instant(current_tone);
+        }
+
+        Serial.print(F(".")); 
+
+        // Аппаратные флаги индикации начала тона
+        digitalWrite(LED_BUILTIN, HIGH);
+        ZERO_LED_BLUE_ON(); // Зажигаем красный индикатор на старте ступени
+        bool led_half_turned_off = false;
+
+        // Настройка временных меток для полупериода мигания (500 мс / 2 = 250 мс)
+        uint32_t start_ms = millis();
+        const uint32_t tone_duration_ms = 500;
+        const uint32_t halftone_duration_ms = tone_duration_ms / 2;
+
+        // Аппаратный цикл точного удержания длительности знака
+        while (millis() - start_ms < tone_duration_ms) {
+            if (pc_file_written || soft_restart_flag) {
+                digitalWrite(LED_BUILTIN, LOW);
+                ZERO_LED_OFF();
+                if (device_SI && SI_FAIL == false) CLK_OFF_si5351(0); else vfo_set_cw_key(false);
+                return;
+            }
+            check_serial_commands();
+            
+            // Гасим светодиоды ровно на середине длительности тона (через 250 мс)
+            if (!led_half_turned_off && (millis() - start_ms >= halftone_duration_ms)) {
+                digitalWrite(LED_BUILTIN, LOW);
+                ZERO_LED_OFF(); // Выключаем индикацию, создавая эффект мигания
+                led_half_turned_off = true;
+            }
+            yield(); // Разгрузка ядра процессора
+        }
+    }
+
+    // Выключаем физический ВЧ-выход по завершении теста
+    if (device_SI && SI_FAIL == false) {
+        CLK_OFF_si5351(0); 
+    } else {
+        vfo_set_cw_key(false);
+    }
+    
+    digitalWrite(LED_BUILTIN, LOW);
+    ZERO_LED_OFF();
 }
 

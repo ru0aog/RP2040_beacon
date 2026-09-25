@@ -1,5 +1,5 @@
-﻿#ifndef VFO_HARDWARE_H
-#define VFO_HARDWARE_H
+﻿#ifndef VFO_HARDWARE2_H
+#define VFO_HARDWARE2_H
 
 #include <Arduino.h>
 

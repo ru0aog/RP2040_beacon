@@ -1,4 +1,4 @@
-﻿#include "vfo_hardware2.h"
+﻿#include "vfo_hardware.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "hardware/pll.h"
@@ -223,16 +223,13 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
     
-    // Начальный дефолтный конфиг на случай непредвиденных аномалий
     PllConfig best_pll = { 100, 5, 2, 120000000ULL }; 
 #ifdef VFO_CLOCK_133_MHZ
     best_pll = { 133, 6, 2, 133003879ULL };
 #endif
 
     uint32_t min_dither_metric = 0xFFFFFFFFu;
-    bool found = false;
 
-    // ВЧ кремниевые фильтры и диапазоны перебора по спецификации RP2040
     for (uint32_t p1 = 2; p1 <= 6; p1++) {
         for (uint32_t p2 = 1; p2 <= 2; p2++) {
             uint32_t pdiv_total = p1 * p2;
@@ -240,39 +237,33 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
             for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
                 uint64_t vco_hz = fbdiv * crystal_hz;
                 
-                // Кремниевое ограничение: VCO должно быть строго в диапазоне 400 - 1200 МГц
                 if (vco_hz < 400000000ULL || vco_hz > 1200000000ULL) continue;
                 
                 uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
                 
-                // Системное ограничение: тактовая частота в диапазоне 100 - 133 МГц
                 if (clk_sys_hz < 100000000ULL || clk_sys_hz > 133000000ULL) continue;
                 
-                // Виртуально рассчитываем параметры тона под текущего кандидата clk_sys
                 uint64_t clocks_per_period = 2ULL;
                 uint64_t pio_denom = base_target_chz * clocks_per_period;
                 uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 100ULL) / pio_denom;
                 
-                if ((pio_div_fixed8 >> 8) < 2) continue; // Защита от слишком малого делителя
+                if ((pio_div_fixed8 >> 8) < 2) continue; 
                 
                 uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
                 uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
                 uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
                 uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
                 
-                // Вычисляем метрику близости к целому числу (активность dither-шума)
                 uint32_t dist_to_0 = test_dds_step;
                 uint32_t dist_to_max = 0xFFFFFFFFu - test_dds_step;
                 uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
                 
-                // Ищем частоту PLL, где dds_step ближе всего к границам (0 или 2^32)
                 if (current_metric < min_dither_metric) {
                     min_dither_metric = current_metric;
                     best_pll.fbdiv = fbdiv;
                     best_pll.p1 = p1;
                     best_pll.p2 = p2;
                     best_pll.clk_sys_hz = clk_sys_hz;
-                    found = true;
                 }
             }
         }
@@ -280,11 +271,88 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     return best_pll;
 }
 
+// === ПОЛНОСТЬЮ ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ИНИЦИАЛИЗАЦИИ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // === 1. ЗАЩИТА СМЕНЫ СЕАНСА: Остановка старого dither-механизма ===
 #ifdef VFO_DITHER_ON_CORE1
+    multicore_reset_core1(); // Принудительно глушим старый плотный цикл Core 1
+#else
+    if (timer_already_running) {
+        cancel_repeating_timer(&sdr_dither_timer);
+        timer_already_running = false;
+    }
+#endif
+
+    current_active_tone = VFO_TONE_NONE;
+    xorshift_state = VFO_RAND_SEED_INIT + time_us_32(); 
+
+    // Защищенное выделение аппаратного спинлока (строго один раз за аптайм)
+    if (vfo_spin_lock == nullptr) {
+        int lock_id = spin_lock_claim_unused(true);
+        vfo_spin_lock = spin_lock_init(lock_id);
+    }
+
+    // Подготовка целевых коэффициентов тактирования PLL
+    uint32_t best_fbdiv = 100, best_p1 = 5, best_p2 = 2;
+    uint64_t clk_sys_target_hz = 120000000ULL;
+
+#ifdef VFO_PLL_AUTOTUNE
+    // Динамический автотюнинг PLL под базовую частоту текущей передачи
+    PllConfig optimal_pll = vfo_find_optimal_pll(base_freq_hz);
+    best_fbdiv = optimal_pll.fbdiv;
+    best_p1 = optimal_pll.p1;
+    best_p2 = optimal_pll.p2;
+    clk_sys_target_hz = optimal_pll.clk_sys_hz;
+#else
+    // Статический режим на базе дефайнов
+#ifdef VFO_CLOCK_133_MHZ
+    best_fbdiv = 133; best_p1 = 6; best_p2 = 2; clk_sys_target_hz = 133000000ULL;
+#endif
+#endif
+
+    // 2. Аппаратная перестройка системной тактовой частоты (clk_sys)
+    detach_peripheral_clock(); // Спасаем USB/UART/Таймеры, уводя clk_peri на фиксированные 48 МГц
+    uint32_t ints_status = save_and_disable_interrupts();
+    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 12 * 1000000, 12 * 1000000);
+    reset_block(RESETS_RESET_PLL_SYS_BITS);
+    unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
+
+    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)best_fbdiv);
+    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2); 
+    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, (uint32_t)clk_sys_target_hz, (uint32_t)clk_sys_target_hz);
+    restore_interrupts(ints_status);
+
+    // Фиксация точной системной частоты для расчёта делителей
+    current_clk_sys_hz = (uint32_t)(((uint64_t)best_fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(best_p1 * best_p2));
+
+    // === 3. ЗАЩИТА ПАМЯТИ PIO: Загрузка программы строго один раз ===
+    if (!pio_program_loaded) {
+        lo_offset = pio_add_program(lo_pio, &pio_square_program);
+        pio_program_loaded = true;
+    }
+    
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_wrap(&c, lo_offset + 0, lo_offset + 1);
+    sm_config_set_set_pins(&c, VFO_OUTPUT_PIN, 1);
+    
+    pio_gpio_init(lo_pio, VFO_OUTPUT_PIN); 
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, VFO_OUTPUT_PIN, 1, true); 
+    
+    pio_sm_init(lo_pio, lo_sm, lo_offset, &c);
+    pio_sm_set_enabled(lo_pio, lo_sm, true);
+
+    // 4. Предрасчет всей сетки частот в ОЗУ от ФАКТИЧЕСКОЙ частоты current_clk_sys_hz
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
+        unsigned int tone_freq = (unsigned int)(base_freq_hz + (i * step_hz));
+        ifkp_tones[i] = calculate_freq_params(current_clk_sys_hz, tone_freq);
+    }
+
+    // 5. Безопасный чистый пуск dither-механизмов
+    vfo_set_tone_instant(0);
+
+#ifdef VFO_DITHER_ON_CORE1
     tone_changed = true;
-    multicore_launch_core1(vfo_core1_entry); 
+    multicore_launch_core1(vfo_core1_entry); // Запускаем заново остановленное ядро
 #else
     add_repeating_timer_us(-(int64_t)VFO_DITHER_INTERVAL_US, vfo_dither_callback, NULL, &sdr_dither_timer);
     timer_already_running = true;
@@ -324,4 +392,3 @@ void __not_in_flash_func(vfo_set_cw_key)(bool key_down) {
         current_active_tone = VFO_TONE_NONE;
     }
 }
-

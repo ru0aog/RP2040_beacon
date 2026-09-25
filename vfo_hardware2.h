@@ -1,5 +1,5 @@
-﻿#ifndef VFO_HARDWARE2_H
-#define VFO_HARDWARE2_H
+﻿#ifndef VFO_HARDWARE_H
+#define VFO_HARDWARE_H
 
 #include <Arduino.h>
 
@@ -9,10 +9,8 @@
 #define VFO_DITHER_RAND_BITS   4 // Амплитуда рандомизации в младших битах (4 бита: шум в диапазоне -7..+7)
 #define VFO_SNAP_TO_GRID         // Включить привязку частоты в окне +-0.1 Гц для минимизации dds_step
 
-// === НОВЫЙ МЕХАНИЗМ: Динамический автотюнинг PLL ===
-#define VFO_PLL_AUTOTUNE         // Раскомментировать для адаптивного подбора clk_sys под целевую частоту.
-                                 // Эффективен на 100% для CW (одиночная несущая) и частично для IFKP/RTTY
-                                 // (подстройка под центр сетки/базовый тон снижает средний шум дизеринга).
+// === Динамический автотюнинг PLL ===
+#define VFO_PLL_AUTOTUNE         // Адаптивный подбор clk_sys под целевую частоту для CW/IFKP/RTTY
 
 // === ЧАСТЬ A: Двухъядерный режим ===
 #define VFO_DITHER_ON_CORE1      // Вынос дизеринга в плотный цикл на Core 1.

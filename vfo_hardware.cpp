@@ -89,7 +89,12 @@ struct PllConfig {
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
 static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };
-static const pio_program_t pio_square_program = { .instructions = pio_square_instructions, .length = 2, .origin = -1 };
+static const pio_program_t pio_square_program = { 
+    .instructions = pio_square_instructions, 
+    .length = 2, 
+    .origin = -1,
+    .pio_version = 0 
+};
 
 VfoParameters ifkp_tones[VFO_IFKP_TONES_COUNT];
 static PIO lo_pio = pio0;
@@ -97,7 +102,11 @@ static unsigned int lo_sm = 0;
 
 static unsigned int lo_offset = 0;
 static bool pio_program_loaded = false;
+
+#ifndef VFO_DITHER_ON_CORE1
 static bool timer_already_running = false;
+static struct repeating_timer sdr_dither_timer; 
+#endif
 
 static uint8_t current_active_tone = VFO_TONE_NONE;
 
@@ -122,7 +131,6 @@ static volatile uint32_t m2_carry_prev = 0;
 static volatile uint32_t xorshift_state = VFO_RAND_SEED_INIT;
 
 static uint32_t current_clk_sys_hz = 120000000;
-static struct repeating_timer sdr_dither_timer; 
 
 /**
  * Быстрый генератор псевдослучайных чисел Xorshift32 в ОЗУ.
@@ -190,10 +198,13 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
 /**
  * Таймерный колбэк (Для режима Core 0).
  */
+#ifndef VFO_DITHER_ON_CORE1
 static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) {
+    (void)t; // Подавление warning'а -Wunused-parameter
     vfo_dither_step(dds_step, target_pio_int, target_pio_frac8);
     return true; 
 }
+#endif
 
 /**
  * Главная точка входа для второго ядра (Core 1).

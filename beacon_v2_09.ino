@@ -1,4 +1,4 @@
-﻿/**  
+﻿/**
  * ============================================================================  
  *  beacon_v2_09.ino — Автоматический радиомаяк на RP2040 (главный скетч)  
  *  Версия 2.09 от 2026-09-25, автор RU0AOG  
@@ -184,6 +184,8 @@ void check_serial_commands() {
             LCD_print(">> CPU RESET <<", 0, 0);
             Serial.flush();
             SI_POWER_OFF();
+            Serial.println(F("***"));
+            Serial.println(F(""));
             delay(500);
             watchdog_reboot(0, 0, 0);
           }

@@ -309,7 +309,7 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
             for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
                 uint64_t vco_hz = fbdiv * crystal_hz;
                 
-                if (vco_hz < 400000000ULL || vco_hz > 1200000000ULL) continue;
+                if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;
                 
                 uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
                 

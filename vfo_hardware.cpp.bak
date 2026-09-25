@@ -1,19 +1,83 @@
-﻿#include "vfo_hardware.h"
+/**  
+ * ============================================================================  
+ *  vfo_hardware.cpp — Программный ВЧ-генератор (VFO) на PIO RP2040  
+ *  Версия 2.09 от 2026-09-25, автор RU0AOG  
+ * ============================================================================  
+ *  
+ *  НАЗНАЧЕНИЕ  
+ *  ----------  
+ *  Превращает сам RP2040 в перестраиваемый радиочастотный генератор (VFO) без  
+ *  внешнего синтезатора Si5351. Сигнал-меандр выводится строго на GPIO 28  
+ *  (физ. пин 34) и служит аварийным ВЧ-трактом для модуляторов IFKP / RTTY / CW,  
+ *  когда чип Si5351 отсутствует или не отвечает.  
+ *  
+ *  ПРИНЦИП ГЕНЕРАЦИИ  
+ *  -----------------  
+ *  1. Тактовая ядра фиксируется на 120 МГц (или 133 МГц при VFO_CLOCK_133_MHZ),  
+ *     реальное значение считается из калиброванного кварца VFO_CALIBRATED_XOSC_HZ.  
+ *  2. Блок PIO гоняет микропрограмму из 2 инструкций (set 1 -> set 0), формируя  
+ *     меандр: f_out = clk_sys / (2 * D), где D — делитель clkdiv в формате  
+ *     fixed-point 16.8 (16 бит целая часть + 8 бит дробная).  
+ *  3. Дробного 8-битного делителя недостаточно для точной частоты (на КВ его квант  
+ *     ~13 кГц), поэтому дробная часть подстраивается на лету дельта-сигма  
+ *     модуляцией делителя (vfo_dither_step).  
+ *  
+ *  МЕХАНИЗМЫ СНИЖЕНИЯ СПУРОВ (переключаются через #define в vfo_hardware.h)  
+ *  -----------------------------------------------------------------------  
+ *  VFO_USE_MASH2        — дельта-сигма 2-го порядка (MASH-1-1): переносит квантовый  
+ *                         шум вверх по спектру и разбивает idle-тоны. Если выключено —  
+ *                         работает формирователь 1-го порядка.  
+ *  VFO_DITHER_RANDOMIZE — инжекция симметричного псевдослучайного дизера (Xorshift32,  
+ *                         диапазон -7..+7 при VFO_DITHER_RAND_BITS=4, среднее строго 0) —  
+ *                         превращает дискретные спуры в шумовой пол.  
+ *  VFO_SNAP_TO_GRID     — привязка частоты в окне +-0.1 Гц к точке с минимальным  
+ *                         dds_step (перебор +-10 сЦг). Эффективна на НЧ; на КВ окно  
+ *                         слишком узкое и выигрыш мал.  
+ *  
+ *  РЕЖИМЫ ИСПОЛНЕНИЯ ДИЗЕРИНГА  
+ *  ---------------------------  
+ *  VFO_DITHER_ON_CORE1  — дизеринг выполняется в плотном бесконечном цикле на Core 1  
+ *                         (vfo_core1_entry), обновляя clkdiv с частотой в единицы МГц.  
+ *                         Параметры тона публикуются с Core 0 под аппаратным спинлоком  
+ *                         (vfo_spin_lock) через флаг tone_changed; аккумуляторы фазы  
+ *                         сбрасываются только на Core 1.  
+ *  (иначе)              — дизеринг работает на Core 0 по таймерному прерыванию с  
+ *                         интервалом VFO_DITHER_INTERVAL_US (напр. 10 мкс = 100 кГц).  
+ *  
+ *  ТОЧНОСТЬ / ОГРАНИЧЕНИЯ  
+ *  ----------------------  
+ *  Все внутренние расчёты частоты ведутся в сантигерцах (0.01 Гц), а dds_step  
+ *  вычисляется двухэтапным делением со сдвигами (calculate_raw_params_chz), чтобы  
+ *  избежать переполнения uint64 на КВ-частотах. Рабочий диапазон: 100 кГц ... 30 МГц.  
+ *  vfo_hardware_init защищён от повторных вызовов (модемы переинициализируют VFO на  
+ *  каждую передачу): PIO-программа грузится один раз (pio_program_loaded), Core 1  
+ *  гасится через multicore_reset_core1() перед реконфигом PLL/PIO, а старый таймер  
+ *  снимается (timer_already_running / cancel_repeating_timer).  
+ *  ВАЖНО: любой out-of-band спур и гармоники меандра (3-я, 5-я, ...) в итоге  
+ *  подавляет только аналоговый выходной ФНЧ на GPIO 28 — цифровые меры лишь  
+ *  отодвигают шум туда, где фильтр эффективен.  
+ *  
+ *  ПУБЛИЧНЫЙ API  
+ *  -------------  
+ *  vfo_hardware_init(base_freq_hz, step_hz) — фиксация клока, настройка PIO,  
+ *                         предрасчёт сетки из 33 тонов в ОЗУ, запуск дизеринга.  
+ *  vfo_set_tone_instant(tone_index) — мгновенное переключение несущей на  
+ *                         предрассчитанный тон (потокобезопасно для обоих режимов).  
+ *  vfo_set_cw_key(key_down)        — телеграфная манипуляция (вкл/выкл выхода).  
+ *  
+ *  Все критичные ко времени функции помечены __not_in_flash_func и выполняются из  
+ *  ОЗУ; в горячем пути дизеринга — только целочисленная арифметика.  
+ * ============================================================================  
+ */
+
+#include "vfo_hardware.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "hardware/pll.h"
 #include "hardware/sync.h"
 #include "hardware/resets.h"
 #include "hardware/timer.h"
-#include "pico/multicore.h"
-
-// Структура для возврата найденных физических коэффициентов PLL
-struct PllConfig {
-    uint32_t fbdiv;
-    uint32_t p1;
-    uint32_t p2;
-    uint64_t clk_sys_hz;
-};
+#include "pico/multicore.h" // Поддержка многоядерности SDK
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
 static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };
@@ -23,6 +87,7 @@ VfoParameters ifkp_tones[VFO_IFKP_TONES_COUNT];
 static PIO lo_pio = pio0;
 static unsigned int lo_sm = 0;
 
+// Статические трекеры состояния для предотвращения утечек памяти при повторных init
 static unsigned int lo_offset = 0;
 static bool pio_program_loaded = false;
 static bool timer_already_running = false;
@@ -187,9 +252,18 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
 }
 
 /**
- * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
+ * Расчет аппаратных коэффициентов частоты с Grid Snapping.
  */
-static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int target_frequency_hz) {
+static VfoParameters calculate_freq_params(unsigned int target_frequency_hz) {
+    uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ; 
+    
+#ifdef VFO_CLOCK_133_MHZ
+    unsigned int p1 = 6, p2 = 2, fbdiv_int = 133; 
+#else
+    unsigned int p1 = 5, p2 = 2, fbdiv_int = 100; 
+#endif
+
+    uint64_t clk_sys_hz = ((uint64_t)fbdiv_int * crystal_hz) / (uint64_t)(p1 * p2);
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
 
 #ifdef VFO_SNAP_TO_GRID
@@ -215,68 +289,13 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
 #endif
 }
 
-/**
- * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
- * Минимизирует остаток dds_step для целевой частоты.
- */
-static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
-    uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
-    uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
-    
-    PllConfig best_pll = { 100, 5, 2, 120000000ULL }; 
-#ifdef VFO_CLOCK_133_MHZ
-    best_pll = { 133, 6, 2, 133003879ULL };
-#endif
-
-    uint32_t min_dither_metric = 0xFFFFFFFFu;
-
-    for (uint32_t p1 = 2; p1 <= 6; p1++) {
-        for (uint32_t p2 = 1; p2 <= 2; p2++) {
-            uint32_t pdiv_total = p1 * p2;
-            
-            for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
-                uint64_t vco_hz = fbdiv * crystal_hz;
-                
-                if (vco_hz < 400000000ULL || vco_hz > 1200000000ULL) continue;
-                
-                uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
-                
-                if (clk_sys_hz < 100000000ULL || clk_sys_hz > 133000000ULL) continue;
-                
-                uint64_t clocks_per_period = 2ULL;
-                uint64_t pio_denom = base_target_chz * clocks_per_period;
-                uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 100ULL) / pio_denom;
-                
-                if ((pio_div_fixed8 >> 8) < 2) continue; 
-                
-                uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
-                uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
-                uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
-                uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
-                
-                uint32_t dist_to_0 = test_dds_step;
-                uint32_t dist_to_max = 0xFFFFFFFFu - test_dds_step;
-                uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
-                
-                if (current_metric < min_dither_metric) {
-                    min_dither_metric = current_metric;
-                    best_pll.fbdiv = fbdiv;
-                    best_pll.p1 = p1;
-                    best_pll.p2 = p2;
-                    best_pll.clk_sys_hz = clk_sys_hz;
-                }
-            }
-        }
-    }
-    return best_pll;
-}
-
-// === ПОЛНОСТЬЮ ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ИНИЦИАЛИЗАЦИИ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // === 1. ЗАЩИТА СМЕНЫ СЕАНСА: Остановка старого dither-механизма ===
 #ifdef VFO_DITHER_ON_CORE1
-    multicore_reset_core1(); // Принудительно глушим старый плотный цикл Core 1
+    // Безопасно тушим Core 1 ПЕРЕД тем, как трогать PLL и PIO
+    multicore_reset_core1();
 #else
+    // Если работаем по таймеру — отключаем прерывание прошлого сеанса
     if (timer_already_running) {
         cancel_repeating_timer(&sdr_dither_timer);
         timer_already_running = false;
@@ -292,38 +311,28 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         vfo_spin_lock = spin_lock_init(lock_id);
     }
 
-    // Подготовка целевых коэффициентов тактирования PLL
-    uint32_t best_fbdiv = 100, best_p1 = 5, best_p2 = 2;
-    uint64_t clk_sys_target_hz = 120000000ULL;
-
-#ifdef VFO_PLL_AUTOTUNE
-    // Динамический автотюнинг PLL под базовую частоту текущей передачи
-    PllConfig optimal_pll = vfo_find_optimal_pll(base_freq_hz);
-    best_fbdiv = optimal_pll.fbdiv;
-    best_p1 = optimal_pll.p1;
-    best_p2 = optimal_pll.p2;
-    clk_sys_target_hz = optimal_pll.clk_sys_hz;
-#else
-    // Статический режим на базе дефайнов
-#ifdef VFO_CLOCK_133_MHZ
-    best_fbdiv = 133; best_p1 = 6; best_p2 = 2; clk_sys_target_hz = 133000000ULL;
-#endif
-#endif
-
-    // 2. Аппаратная перестройка системной тактовой частоты (clk_sys)
-    detach_peripheral_clock(); // Спасаем USB/UART/Таймеры, уводя clk_peri на фиксированные 48 МГц
+    // 2. Настройка системной тактовой частоты (120 МГц или 133 МГц)
+    detach_peripheral_clock();
     uint32_t ints_status = save_and_disable_interrupts();
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 12 * 1000000, 12 * 1000000);
     reset_block(RESETS_RESET_PLL_SYS_BITS);
     unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
 
-    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)best_fbdiv);
-    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2); 
-    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, (uint32_t)clk_sys_target_hz, (uint32_t)clk_sys_target_hz);
+#ifdef VFO_CLOCK_133_MHZ
+    pll_init(pll_sys, 1, 1596000000ULL, 6, 2); 
+    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, 133000000, 133000000);
+#else
+    pll_init(pll_sys, 1, 1200000000ULL, 5, 2); 
+    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, 120000000, 120000000);
+#endif
     restore_interrupts(ints_status);
 
-    // Фиксация точной системной частоты для расчёта делителей
-    current_clk_sys_hz = (uint32_t)(((uint64_t)best_fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(best_p1 * best_p2));
+#ifdef VFO_CLOCK_133_MHZ
+    unsigned int p1 = 6, p2 = 2, fbdiv_int = 133;
+#else
+    unsigned int p1 = 5, p2 = 2, fbdiv_int = 100;
+#endif
+    current_clk_sys_hz = (uint32_t)(((uint64_t)fbdiv_int * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(p1 * p2));
 
     // === 3. ЗАЩИТА ПАМЯТИ PIO: Загрузка программы строго один раз ===
     if (!pio_program_loaded) {
@@ -341,10 +350,10 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     pio_sm_init(lo_pio, lo_sm, lo_offset, &c);
     pio_sm_set_enabled(lo_pio, lo_sm, true);
 
-    // 4. Предрасчет всей сетки частот в ОЗУ от ФАКТИЧЕСКОЙ частоты current_clk_sys_hz
+    // 4. Предрасчет всей сетки частот в ОЗУ
     for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
         unsigned int tone_freq = (unsigned int)(base_freq_hz + (i * step_hz));
-        ifkp_tones[i] = calculate_freq_params(current_clk_sys_hz, tone_freq);
+        ifkp_tones[i] = calculate_freq_params(tone_freq);
     }
 
     // 5. Безопасный чистый пуск dither-механизмов

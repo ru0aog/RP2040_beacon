@@ -53,6 +53,15 @@ extern uint8_t  rtc_month;
 extern uint8_t  rtc_day;
 
 extern uint8_t device_DS[5];
+// Тип активного источника времени (реализация в scheduler.cpp)  
+enum RtcType {  
+    RTC_NONE, 
+    RTC_INTERNAL, 
+    RTC_DS1307, 
+    RTC_DS3231
+};  
+  
+extern RtcType activeRtc;
 
 extern String rtc_chip_name; // будем пользоваться переменной из основного INO-файла
 

@@ -380,12 +380,15 @@ void loop() {
       //Serial.print(F(" ")); Serial.print(get_telemetry_string());
       //Serial.print(F(" ")); Serial.println(get_climate_telemetry());
       ZERO_LED_GREEN_ON();
-      delay(10);
+      delay(5);
       ZERO_LED_OFF();
 
-      LCD_init(false);      
+      LCD_init(true);   
+      String T_CPU_text = "";
       String T_DS_text  = "T1=" + get_telemetry_string().substring(5, 9);
-      String T_CPU_text = "CPU " + get_telemetry_string().substring(17, 21) + " ";
+      if (device_DS[0] == 1 && activeRtc == RTC_DS1307) {T_CPU_text = "CPU " + get_telemetry_string().substring(15, 19) + " ";}
+      if (device_DS[0] == 1 && activeRtc == RTC_DS3231) {T_CPU_text = "CPU " + get_telemetry_string().substring(17, 21) + " ";}
+      if (device_DS[0] == 0) {                           T_CPU_text = "CPU " + get_telemetry_string().substring(15, 19) + " ";}
       String T_CL_text  = "TMP " + get_climate_telemetry().substring(5, 9) + " ";
       String P_CL_text  = get_climate_telemetry().substring(17, 22) + "mm";
       String Time_text  = "  " + get_current_time().substring(0, 5);
@@ -662,11 +665,12 @@ void loop() {
 }
 
 void I2C_Scanner() {
+  int BME_POWER_PIN = 13;
 //  pinMode(DS_POWER_PIN, OUTPUT);
 //  digitalWrite(DS_POWER_PIN, HIGH);
-//  pinMode(BME_POWER_PIN, OUTPUT);
-//  digitalWrite(BME_POWER_PIN, HIGH);
-//  delay(100); // Даем чипам время на аппаратный старт
+  pinMode(BME_POWER_PIN, OUTPUT);
+  digitalWrite(BME_POWER_PIN, HIGH);
+  delay(100); // Даем чипам время на аппаратный старт
   
   scanRP2040Ports();
 

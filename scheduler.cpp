@@ -60,7 +60,6 @@
 #include "scheduler.h"
 
 // Перечисление для типов подключенных чипов времени
-enum RtcType { RTC_NONE, RTC_INTERNAL, RTC_DS1307, RTC_DS3231 };
 RtcType activeRtc = RTC_NONE;
 
 datetime_t currentTime;

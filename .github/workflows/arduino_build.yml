@@ -48,6 +48,3 @@ jobs:
         files: ./build/*.uf2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        name: arduino-rp2040-uf2
-        path: ./build/*.uf2

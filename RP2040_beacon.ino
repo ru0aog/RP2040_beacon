@@ -59,8 +59,8 @@
 #include "scheduler.h"
 #include "cw_modem.h"
 #include "bme280.h"
-#include "LCD.h"
-#include "LED_BLINK.h"
+#include "lcd.h"
+#include "led_blink.h"
 #include <hardware/watchdog.h>
 #include <hardware/adc.h>
 #include "vfo_hardware.h"

@@ -312,28 +312,40 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
     return params;
 }
 
+
+
+
+
+
+
+
+
 /**
  * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
+ */
+/**
+ * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
+ * Изменено: Метрика оценивает исключительно ошибку dds_step.
  */
 static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
 
 #ifdef VFO_SNAP_TO_GRID
-    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; 
+    uint32_t min_dds_metric = 0xFFFFFFFFu; // 32-битный максимум
     VfoParameters best_params = calculate_raw_params_chz(clk_sys_hz, base_target_chz);
 
     for (int32_t offset_chz = -10; offset_chz <= 10; offset_chz++) {
         uint64_t candidate_chz = (uint64_t)((int64_t)base_target_chz + offset_chz);
         VfoParameters candidate_params = calculate_raw_params_chz(clk_sys_hz, candidate_chz);
         
-        uint64_t full_frac = ((uint64_t)candidate_params.pio_frac << 32) | candidate_params.dds_step;
-        
-        uint64_t dist_to_0 = full_frac;
-        uint64_t dist_to_max = (1ULL << 40) - full_frac;
-        uint64_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
+        // Оценка близости dds_step к краям 32-битной сетки
+        uint32_t dstep = candidate_params.dds_step;
+        uint32_t dist_to_0 = dstep;
+        uint32_t dist_to_max = 0xFFFFFFFFu - dstep;
+        uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
 
-        if (current_metric < min_full_frac_metric) {
-            min_full_frac_metric = current_metric;
+        if (current_metric < min_dds_metric) {
+            min_dds_metric = current_metric;
             best_params = candidate_params;
         }
     }
@@ -343,8 +355,22 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
 #endif
 }
 
+
+
+
+
+
+
+
+
+
 /**
  * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
+ */
+/**
+ * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
+ * Направлен на первичную минимизацию 32-битного остатка dds_step.
+ * Вторичный критерий — минимизация pio_frac, третичный — выбор максимальной clk_sys.
  */
 static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
@@ -355,7 +381,8 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     best_pll = { 133, 6, 2, 133003879ULL };
 #endif
 
-    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; 
+    uint32_t min_dds_metric = 0xFFFFFFFFu;       // Предел для 32-битной ошибки DDS
+    uint32_t min_frac_metric = 255;              // Предел для ошибки аппаратного делителя PIO
 
     for (uint32_t p1 = 2; p1 <= 6; p1++) {
         for (uint32_t p2 = 1; p2 <= 2; p2++) {
@@ -384,16 +411,30 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                 uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
                 uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
                 
-                uint64_t full_frac = ((uint64_t)test_pio_frac << 32) | test_dds_step;
+                // 1. Первичная метрика: Близость dds_step к целому числу (0 или 2^32)
+                uint32_t dist_dds_0 = test_dds_step;
+                uint32_t dist_dds_max = 0xFFFFFFFFu - test_dds_step;
+                uint32_t current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;
                 
-                uint64_t dist_to_0 = full_frac;
-                uint64_t dist_to_max = (1ULL << 40) - full_frac;
-                uint64_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
+                // 2. Вторичная метрика: Близость pio_frac к целому числу (0 или 256)
+                uint32_t dist_frac_0 = test_pio_frac;
+                uint32_t dist_frac_max = 256 - test_pio_frac;
+                uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
 
-                if (current_metric < min_full_frac_metric || 
-                   (current_metric == min_full_frac_metric && clk_sys_hz > best_pll.clk_sys_hz)) {
+                // Условия многокритериального выбора:
+                bool is_better_dds = (current_dds_metric < min_dds_metric);
+                bool is_equal_dds = (current_dds_metric == min_dds_metric);
+                
+                bool is_better_frac = (current_frac_metric < min_frac_metric);
+                bool is_equal_frac = (current_frac_metric == min_frac_metric);
+
+                if (is_better_dds || 
+                   (is_equal_dds && is_better_frac) ||
+                   (is_equal_dds && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
                     
-                    min_full_frac_metric = current_metric;
+                    min_dds_metric = current_dds_metric;
+                    min_frac_metric = current_frac_metric;
+                    
                     best_pll.fbdiv = fbdiv;
                     best_pll.p1 = p1;
                     best_pll.p2 = p2;
@@ -404,6 +445,17 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     }
     return best_pll;
 }
+
+
+
+
+
+
+
+
+
+
+
 
 // === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {

@@ -86,7 +86,7 @@
 #define VFO_DITHER_INTERVAL_US 10 
 
 // === Аппаратная конфигурация физического уровня ===
-#define VFO_OUTPUT_PIN       14            // Сигнал строго на GPIO 28
+#define VFO_OUTPUT_PIN       14            // Пин для выхода сигнала радиочастоты 
 #define VFO_IFKP_TONES_COUNT 33            // Количество фиксированных тонов в сетке
 #define VFO_TONE_NONE        255           // Флаг неопределенного тона
 

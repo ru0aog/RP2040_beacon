@@ -12,7 +12,7 @@
 
 // === Конфигурация механизмов снижения спуров ===
 #define VFO_USE_MASH2            // Включить Delta-Sigma 2-го порядка (MASH-1-1). Если выключено — 1-й порядок.
-//#define VFO_DITHER_RANDOMIZE     // Включить рандомизацию входа аккумулятора (Dither Injection)
+#define VFO_DITHER_RANDOMIZE     // Включить рандомизацию входа аккумулятора (Dither Injection)
 #define VFO_DITHER_RAND_BITS   4 // Амплитуда рандомизации в младших битах (4 бита: шум в диапазоне -7..+7)
 /*
 | N | размах дизера |

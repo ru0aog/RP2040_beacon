@@ -1,72 +1,7 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Программный ВЧ-генератор (VFO) на PIO RP2040  
- *  Версия 2.10 (с автотюнингом PLL), 2026-09-25, автор RU0AOG  
- * ============================================================================  
- *  
- *  НАЗНАЧЕНИЕ  
- *  ----------  
- *  Превращает сам RP2040 в перестраиваемый радиочастотный генератор (VFO) без  
- *  внешнего синтезатора Si5351. Меандр выводится строго на GPIO 28 (физ. пин 34)  
- *  и используется модуляторами IFKP / RTTY / CW как запасной ВЧ-тракт, когда  
- *  чип Si5351 не найден на шине.  
- *  
- *  ПРИНЦИП РАБОТЫ  
- *  -------------  
- *  PIO-программа из 2 инструкций (set 1 -> set 0) формирует меандр с периодом  
- *  2 такта, поэтому f_out = clk_sys / (2 * D), где D — делитель PIO в формате  
- *  16.8 (целая часть pio_int + дробная pio_frac). Грубого 8-битного дробного  
- *  делителя недостаточно, поэтому средняя частота «дотягивается» дельта-сигма  
- *  дизерингом: 32-битный аккумулятор dds_step на каждом шаге слегка подкручивает  
- *  дробную часть clkdiv, а усреднение даёт микрогерцовое эффективное разрешение.  
- *  
- *  МЕХАНИЗМЫ СНИЖЕНИЯ СПУРОВ (переключаются #define в vfo_hardware.h)  
- *  ----------------------------------------------------------------  
- *  1. MASH-1-1 (VFO_USE_MASH2) — noise shaping 2-го порядка в vfo_dither_step,  
- *     уводит шум квантования дизеринга вверх по спектру.  
- *  2. Рандомизация (VFO_DITHER_RANDOMIZE) — Xorshift32 (vfo_xorshift32)  
- *     добавляет знакопеременный джиттер ±(2^(BITS-1)-1) к dds_step, разбивая  
- *     дискретные спуры в непрерывную шумовую юбку.  
- *  3. Двухъядерный режим (VFO_DITHER_ON_CORE1) — дизеринг вынесен в плотный  
- *     цикл на Core 1 (vfo_core1_entry), частота обновления clkdiv в единицы МГц  
- *     (спуры уносятся далеко от несущей). Иначе — таймерный колбэк на Core 0  
- *     с интервалом VFO_DITHER_INTERVAL_US (vfo_dither_callback).  
- *  4. Snap-to-grid (VFO_SNAP_TO_GRID) — в окне ±0.1 Гц выбирается частота с  
- *     минимальным dds_step (метрика min(dds_step, 2^32-dds_step)).  
- *  5. Автотюнинг PLL (VFO_PLL_AUTOTUNE) — vfo_find_optimal_pll перебирает  
- *     коэффициенты PLL (p1=2..6, p2=1..2, fbdiv=30..150) в пределах  
- *     VCO 400..1200 МГц и clk_sys 100..133 МГц, выбирая такую clk_sys, при  
- *     которой остаток делителя (и, значит, шум дизеринга) для целевой частоты  
- *     минимален. При выключенном автотюнинге частота фиксируется по  
- *     VFO_CLOCK_133_MHZ (133 МГц) или дефолтно 120 МГц.  
- *  
- *  ЗАЩИТА ПОВТОРНОЙ ИНИЦИАЛИЗАЦИИ  
- *  ------------------------------  
- *  vfo_hardware_init вызывается заново на каждую передачу, поэтому:  
- *    - Core 1 глушится через multicore_reset_core1() перед реконфигом PLL;  
- *      таймерный режим снимается через cancel_repeating_timer (timer_already_running);  
- *    - PIO-программа грузится строго один раз (pio_program_loaded);  
- *    - аппаратный спинлок захватывается один раз за аптайм (vfo_spin_lock).  
- *  
- *  ТОЧНОСТЬ РАСЧЁТА  
- *  ---------------  
- *  Все делители считаются в сантигерцах (0.01 Гц) целочисленно, dds_step  
- *  вычисляется двухступенчатым делением со сдвигами (calculate_raw_params_chz)  
- *  без переполнения uint64 на всём диапазоне 100 кГц..30 МГц. Все критичные ко  
- *  времени функции помечены __not_in_flash_func и работают только с целыми.  
- *  
- *  МЕЖЪЯДЕРНАЯ СИНХРОНИЗАЦИЯ  
- *  -------------------------  
- *  vfo_set_tone_instant публикует dds_step/target_pio_int/target_pio_frac8 под  
- *  спинлоком и выставляет флаг tone_changed; Core 1 подхватывает его, копирует  
- *  значения и сбрасывает накопители фазы (dds_accumulator / MASH) для устранения  
- *  фазовых щелчков на границах символов манипуляции.  
- *  
- *  ВАЖНО (аппаратно)  
- *  -----------------  
- *  Меандр с GPIO богат гармониками (3-я -9.5 dBc, 5-я и т.д.). Цифровые меры  
- *  лишь отодвигают шум квантования; окончательно спуры и гармоники давит  
- *  аналоговый выходной ФНЧ на GPIO 28.  
+ *  Версия 2.20 (С автотюнингом по 40-битной полной дроби), 2026-09-26  
  * ============================================================================  
  */
 
@@ -200,7 +135,7 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
  */
 #ifndef VFO_DITHER_ON_CORE1
 static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) {
-    (void)t; // Подавление warning'а -Wunused-parameter
+    (void)t; 
     vfo_dither_step(dds_step, target_pio_int, target_pio_frac8);
     return true; 
 }
@@ -271,24 +206,29 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
 
 /**
  * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
+ * Изменено: метрика оценивает ПОЛНУЮ ошибку дробной части (40-бит).
  */
 static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
 
 #ifdef VFO_SNAP_TO_GRID
-    uint32_t min_dither_metric = 0xFFFFFFFFu;
+    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; // 40-битный максимум
     VfoParameters best_params = calculate_raw_params_chz(clk_sys_hz, base_target_chz);
 
     for (int32_t offset_chz = -10; offset_chz <= 10; offset_chz++) {
         uint64_t candidate_chz = (uint64_t)((int64_t)base_target_chz + offset_chz);
         VfoParameters candidate_params = calculate_raw_params_chz(clk_sys_hz, candidate_chz);
         
-        uint32_t dist_to_0 = candidate_params.dds_step;
-        uint32_t dist_to_max = 0xFFFFFFFFu - candidate_params.dds_step;
-        uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
+        // Сборка 40-битного дробного остатка: pio_frac (8 бит) + dds_step (32 бита)
+        uint64_t full_frac = ((uint64_t)candidate_params.pio_frac << 32) | candidate_params.dds_step;
+        
+        // Нахождение расстояния до ближайшего целого числа
+        uint64_t dist_to_0 = full_frac;
+        uint64_t dist_to_max = (1ULL << 40) - full_frac;
+        uint64_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
 
-        if (current_metric < min_dither_metric) {
-            min_dither_metric = current_metric;
+        if (current_metric < min_full_frac_metric) {
+            min_full_frac_metric = current_metric;
             best_params = candidate_params;
         }
     }
@@ -300,7 +240,8 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
 
 /**
  * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
- * Минимизирует остаток dds_step для целевой частоты.
+ * Изменено: Направлен на минимизацию ПОЛНОЙ 40-битной дробной части делителя PIO.
+ * При равенстве метрик выбирает более высокую clk_sys.
  */
 static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
@@ -311,7 +252,7 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     best_pll = { 133, 6, 2, 133003879ULL };
 #endif
 
-    uint32_t min_dither_metric = 0xFFFFFFFFu;
+    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; // Предел для 40-битной ошибки
 
     for (uint32_t p1 = 2; p1 <= 6; p1++) {
         for (uint32_t p2 = 1; p2 <= 2; p2++) {
@@ -330,19 +271,28 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                 uint64_t pio_denom = base_target_chz * clocks_per_period;
                 uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 100ULL) / pio_denom;
                 
-                if ((pio_div_fixed8 >> 8) < 2) continue; 
+                uint32_t test_pio_int = pio_div_fixed8 >> 8;
+                if (test_pio_int < 2) continue; 
+                
+                uint32_t test_pio_frac = pio_div_fixed8 & 0xFFu;
                 
                 uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
                 uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
                 uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
                 uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
                 
-                uint32_t dist_to_0 = test_dds_step;
-                uint32_t dist_to_max = 0xFFFFFFFFu - test_dds_step;
-                uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
+                // Объединение pio_frac и dds_step в сквозную 40-битную дробь
+                uint64_t full_frac = ((uint64_t)test_pio_frac << 32) | test_dds_step;
                 
-                if (current_metric < min_dither_metric) {
-                    min_dither_metric = current_metric;
+                // Считаем метрику близости к целому числу (снизу или сверху)
+                uint64_t dist_to_0 = full_frac;
+                uint64_t dist_to_max = (1ULL << 40) - full_frac;
+
+                // Строгое улучшение метрики, либо равенство (тогда берем более высокую clk_sys)
+                if (current_metric < min_full_frac_metric || 
+                   (current_metric == min_full_frac_metric && clk_sys_hz > best_pll.clk_sys_hz)) {
+                    
+                    min_full_frac_metric = current_metric;
                     best_pll.fbdiv = fbdiv;
                     best_pll.p1 = p1;
                     best_pll.p2 = p2;
@@ -430,12 +380,22 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         ifkp_tones[i] = calculate_freq_params(current_clk_sys_hz, tone_freq);
     }
 
+    // === ДОБАВЛЕНО: ОТЛАДОЧНЫЙ ВЫВОД ПАРАМЕТРОВ ДЛЯ БАЗОВОЙ ЧАСТОТЫ В SERIAL ===
+    VfoParameters base_params = calculate_freq_params(current_clk_sys_hz, base_freq_hz);
+    Serial.printf("\n--- VFO PLL Autotune (40-bit Match) ---\n");
+    Serial.printf("Target Freq: %u Hz\n", base_freq_hz);
+    Serial.printf("PLL Config : FBDIV=%u, P1=%u, P2=%u\n", best_fbdiv, best_p1, best_p2);
+    Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz);
+    Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", base_params.pio_int, base_params.pio_frac);
+    Serial.printf("DDS Step   : 0x%08X (%u)\n", base_params.dds_step, base_params.dds_step);
+    Serial.printf("---------------------------------------\n");
+
     // 5. Безопасный чистый пуск dither-механизмов
     vfo_set_tone_instant(0);
 
 #ifdef VFO_DITHER_ON_CORE1
     tone_changed = true;
-    multicore_launch_core1(vfo_core1_entry); // Запускаем заново остановленное ядро
+    multicore_launch_core1(vfo_core1_entry); 
 #else
     add_repeating_timer_us(-(int64_t)VFO_DITHER_INTERVAL_US, vfo_dither_callback, NULL, &sdr_dither_timer);
     timer_already_running = true;

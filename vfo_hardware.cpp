@@ -153,14 +153,15 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
  * Главная точка входа для второго ядра (Core 1).
  */
 /**
+/**
  * Главная точка входа для второго ядра (Core 1).
- * Версия 2.50 — Регистро-резидентный высокоскоростной Си-цикл без ОЗУ-структур и NOP.
+ * Версия 2.51 — Исправлен знаковый сдвиг MASH-2 и объявление profile_pin_mask.
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
     // Регистро-резидентные копии статических параметров тона
-    uint32_t l_step = 0;
-    uint32_t l_int = 8;
-    uint32_t l_frac = 0;
+    int32_t l_step = 0;
+    int32_t l_int = 8;
+    int32_t l_frac = 0;
 
     // Регистро-резидентное состояние накопителей (DDS и ГПСЧ)
     uint32_t loc_acc1 = 0;
@@ -172,14 +173,17 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
     // Прямой кэшированный указатель на регистр SM PIO
     volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
+    
+    // ДОБАВЛЕНО ДЛЯ ИСПРАВЛЕНИЯ ОШИБКИ СБОРКИ: Маска пина отладки
+    const uint32_t profile_pin_mask = (1u << VFO_PROFILE_PIN);
 
     while (true) {
         // Опрос флага смены тона (в ОЗУ смотрим только раз за сессию передачи)
         if (__builtin_expect(tone_changed, 0)) {
             uint32_t save = spin_lock_blocking(vfo_spin_lock);
-            l_step = dds_step;
-            l_int  = target_pio_int;
-            l_frac = target_pio_frac8;
+            l_step = (int32_t)dds_step;
+            l_int  = (int32_t)target_pio_int;
+            l_frac = (int32_t)target_pio_frac8;
             
             loc_acc1 = 0;
             loc_rand_state = xorshift_state;
@@ -191,9 +195,14 @@ static void __not_in_flash_func(vfo_core1_entry)() {
             spin_unlock(vfo_spin_lock, save);
         }
 
+#ifdef VFO_DITHER_PROFILE
+        // Мгновенный аппаратный тоггл отладочного пина 13 через шину SIO (1 такт)
+        sio_hw->gpio_togl = profile_pin_mask;
+#endif
+
 #ifdef VFO_DITHER_FAST
-        // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ СИ-КОНВЕЙЕР ===
-        uint32_t step = l_step;
+        // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ СИ-КОНВЕЙЕР (Без ОЗУ-структур и NOP) ===
+        int32_t step = l_step;
 
 #ifdef VFO_DITHER_RANDOMIZE
         // Быстрый регистровый Xorshift32
@@ -206,39 +215,41 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         if (__builtin_expect(r_dither == -(1 << (VFO_DITHER_RAND_BITS - 1)), 0)) {
             r_dither = 0; 
         }
-        step = (uint32_t)((int32_t)step + r_dither);
+        step = (int32_t)((int32_t)step + r_dither);
 #endif
 
         int32_t total_correction = 0;
 
 #ifdef VFO_USE_MASH2
         uint32_t old_acc1 = loc_acc1;
-        loc_acc1 += step;
+        loc_acc1 += (uint32_t)step;
         uint32_t carry1 = (loc_acc1 < old_acc1) ? 1 : 0; 
 
         uint32_t old_acc2 = loc_acc2;
         loc_acc2 += loc_acc1;
         uint32_t carry2 = (loc_acc2 < old_acc2) ? 1 : 0; 
 
+        // Коррекция может принимать отрицательные значения (-1), это штатное поведение MASH-2
         total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
         loc_m2_carry_prev = carry2; 
 #else
         uint32_t old_acc = loc_acc1;
-        loc_acc1 += step;
+        loc_acc1 += (uint32_t)step;
         if (loc_acc1 < old_acc) {
             total_correction = 1;
         }
 #endif
 
-        // Атомарная нормализация фракции знаками (без тяжелых while-циклов)
-        uint32_t current_frac = (uint32_t)((int32_t)l_frac + total_correction);
-        uint32_t current_int  = l_int;
+        // НАДЕЖНАЯ ЗНАКОВАЯ НОРМАЛИЗАЦИЯ: переменные принудительно приведены к int32_t
+        int32_t current_frac = l_frac + total_correction;
+        int32_t current_int  = l_int;
 
+        // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1
         current_int += (current_frac >> 8); 
-        current_frac &= 0xFFu;              
+        current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка
 
-        // Единственная STR-запись в периферию за всю итерацию цикла (без NOP!)
-        *clkdiv_reg = (current_int << 16) | (current_frac << 8);
+        // Единственная за всю итерацию STR-инструкция записи в шину периферии PIO
+        *clkdiv_reg = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
 
 #else
         // === ЭТАЛОННАЯ МЕДЛЕННАЯ СИ-ВЕРСИЯ (С прогонкой через глобальное ОЗУ) ===
@@ -249,7 +260,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         m2_carry_prev = loc_m2_carry_prev;
 #endif
 
-        vfo_dither_step(l_step, l_int, l_frac);
+        vfo_dither_step((uint32_t)l_step, (uint32_t)l_int, (uint32_t)l_frac);
 
         loc_acc1 = dds_accumulator;
         loc_rand_state = xorshift_state;
@@ -260,6 +271,12 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 #endif
     }
 }
+
+
+
+
+
+
 
 
 static void detach_peripheral_clock() {

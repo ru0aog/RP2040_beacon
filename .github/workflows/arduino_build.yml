@@ -32,17 +32,9 @@ jobs:
 
     - name: Compile Sketch
       run: |
-        # ВМЕСТО КОПИРОВАНИЯ: Перемещаем (переименовываем) файл, чтобы не было дубликатов функций
-        mv beacon_v2_10.ino RP2040_beacon.ino
-        
-        # Исправление регистра файлов для Linux
-        cp BME280.h bme280.h 2>/dev/null || true
-        cp BME280.cpp bme280.cpp 2>/dev/null || true
-        cp LCD.h lcd.h 2>/dev/null || true
-        cp LCD.cpp lcd.cpp 2>/dev/null || true
-        
-        # Компилируем проект
-        arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=tinyusb,flash=2097152_1048576 --output-dir ./build .
+        # Компилируем скетч, явно указав имя файла beacon_v2_10.ino
+        # Это исключит любые проблемы с дублированием .cpp файлов и регистра букв в Linux
+        arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=tinyusb,flash=2097152_1048576 --output-dir ./build beacon_v2_10.ino
 
     - name: Upload UF2 Artifact
       uses: actions/upload-artifact@v4

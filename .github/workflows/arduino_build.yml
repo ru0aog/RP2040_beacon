@@ -42,7 +42,7 @@ jobs:
         cp LCD.cpp lcd.cpp 2>/dev/null || true
         
         # Компилируем проект с вашими точными параметрами: Adafruit TinyUSB + 2MB Flash (1MB Sketch / 1MB FS)
-        arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=adafruit,flash=2097152_1048576 --output-dir ./build .
+        arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=tinyusb,flash=2097152_1048576 --output-dir ./build .
 
     - name: Upload UF2 Artifact
       uses: actions/upload-artifact@v4

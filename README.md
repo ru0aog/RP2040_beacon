@@ -3,7 +3,7 @@
 # 🛰️ Автоматический КВ/УКВ-радиомаяк на RP2040 (RP2040_beacon)
 
 [![DeepWiki](https://shields.io)](https://deepwiki.com/ru0aog/RP2040_beacon)
-[![Arduino RP2040 Build](https://github.com/badge.svg)](https://github.com)
+[![Arduino RP2040 Build](https://github.com)](https://github.com)
 
 **RP2040_beacon** — это многофункциональный автоматический КВ/УКВ-радиомаяк, построенный на базе микроконтроллера RP2040 (с полной поддержкой миниатюрных плат **RP2040-Zero**). Проект ориентирован на радиолюбительские эксперименты, исследование прохождения радиоволн и оперативную передачу телеметрии в эфир.
 

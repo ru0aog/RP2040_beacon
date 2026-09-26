@@ -152,13 +152,17 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
 /**
  * Главная точка входа для второго ядра (Core 1).
  */
+/**
+ * Главная точка входа для второго ядра (Core 1).
+ * Версия 2.50 — Регистро-резидентный высокоскоростной Си-цикл без ОЗУ-структур и NOP.
+ */
 static void __not_in_flash_func(vfo_core1_entry)() {
-    // Локальные копии параметров тона
+    // Регистро-резидентные копии статических параметров тона
     uint32_t l_step = 0;
     uint32_t l_int = 8;
     uint32_t l_frac = 0;
 
-    // Локальные аккумуляторы состояния (DDS и ГПСЧ) для разрыва зависимостей по ОЗУ
+    // Регистро-резидентное состояние накопителей (DDS и ГПСЧ)
     uint32_t loc_acc1 = 0;
     uint32_t loc_rand_state = VFO_RAND_SEED_INIT;
 #ifdef VFO_USE_MASH2
@@ -166,17 +170,13 @@ static void __not_in_flash_func(vfo_core1_entry)() {
     uint32_t loc_m2_carry_prev = 0;
 #endif
 
-    // Адрес целевого регистра clkdiv для прямой ASM-записи мимо структуры PIO
+    // Прямой кэшированный указатель на регистр SM PIO
     volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
-    
-    // Битовая маска для аппаратного тоггла пина отладки
-    const uint32_t profile_pin_mask = (1u << VFO_PROFILE_PIN);
 
     while (true) {
-        // Проверка смены тона на Си-уровне
+        // Опрос флага смены тона (в ОЗУ смотрим только раз за сессию передачи)
         if (__builtin_expect(tone_changed, 0)) {
             uint32_t save = spin_lock_blocking(vfo_spin_lock);
-            
             l_step = dds_step;
             l_int  = target_pio_int;
             l_frac = target_pio_frac8;
@@ -188,148 +188,60 @@ static void __not_in_flash_func(vfo_core1_entry)() {
             loc_m2_carry_prev = 0;
 #endif
             tone_changed = false; 
-            
             spin_unlock(vfo_spin_lock, save);
         }
 
-#ifdef VFO_DITHER_PROFILE
-        // Шаг 1: Аппаратный тоггл пина через SIO (выполняется за 1 такт)
-        sio_hw->gpio_togl = profile_pin_mask;
-#endif
-
-
-
-
-
-
 #ifdef VFO_DITHER_FAST
-        // === ВЕТКА УЛЬТРАЗВУКОВОЙ ASM-ОПТИМИЗАЦИИ (С дросселированием шины PIO) ===
+        // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ СИ-КОНВЕЙЕР ===
         uint32_t step = l_step;
 
 #ifdef VFO_DITHER_RANDOMIZE
-        // Быстрый Xorshift в локальном регистре
-        loc_rand_state = vfo_xorshift32_raw(loc_rand_state);
+        // Быстрый регистровый Xorshift32
+        loc_rand_state ^= loc_rand_state << 13;
+        loc_rand_state ^= loc_rand_state >> 17;
+        loc_rand_state ^= loc_rand_state << 5;
+        
         int32_t r_bits = (int32_t)(loc_rand_state & ((1u << VFO_DITHER_RAND_BITS) - 1));
         int32_t r_dither = r_bits - (1 << (VFO_DITHER_RAND_BITS - 1));
-        if (r_dither == -(1 << (VFO_DITHER_RAND_BITS - 1))) {
+        if (__builtin_expect(r_dither == -(1 << (VFO_DITHER_RAND_BITS - 1)), 0)) {
             r_dither = 0; 
         }
         step = (uint32_t)((int32_t)step + r_dither);
 #endif
 
-        // Структура контекста в ОЗУ для разгрузки регистров компилятора
-        struct {
-            uint32_t acc1;
-            uint32_t acc2;
-            uint32_t step;
-            uint32_t m2_carry_prev;
-            uint32_t pio_int;
-            uint32_t pio_frac;
-            volatile uint32_t *pio_clkdiv;
-        } __attribute__((packed)) ctx;
-
-        ctx.acc1 = loc_acc1;
-        ctx.step = step;
-        ctx.pio_int = l_int;
-        ctx.pio_frac = l_frac;
-        ctx.pio_clkdiv = clkdiv_reg;
-#ifdef VFO_USE_MASH2
-        ctx.acc2 = loc_acc2;
-        ctx.m2_carry_prev = loc_m2_carry_prev;
-#else
-        ctx.acc2 = 0;
-        ctx.m2_carry_prev = 0;
-#endif
-
-        asm volatile (
-            ".thumb             \n\t"
-            ".syntax unified    \n\t"
-            
-            // Загрузка данных из ОЗУ структуры в нижние регистры r0-r4
-            "ldr  r0, [%0, #0]  \n\t"  // r0 = ctx.acc1
-            "ldr  r2, [%0, #8]  \n\t"  // r2 = ctx.step
-            "movs r1, #0        \n\t"  // r1 = carry1 = 0
+        int32_t total_correction = 0;
 
 #ifdef VFO_USE_MASH2
-            "ldr  r3, [%0, #4]  \n\t"  // r3 = ctx.acc2
-            "movs r4, #0        \n\t"  // r4 = carry2 = 0
+        uint32_t old_acc1 = loc_acc1;
+        loc_acc1 += step;
+        uint32_t carry1 = (loc_acc1 < old_acc1) ? 1 : 0; 
 
-            // Вычисление MASH-2
-            "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
-            "adcs r1, r1        \n\t"  // r1 (carry1) = r1 + r1 + C
-            "adds r3, r0        \n\t"  // r3 (acc2) += r0 (acc1)
-            "adcs r4, r4        \n\t"  // r4 (carry2) = r4 + r4 + C
+        uint32_t old_acc2 = loc_acc2;
+        loc_acc2 += loc_acc1;
+        uint32_t carry2 = (loc_acc2 < old_acc2) ? 1 : 0; 
 
-            "str  r3, [%0, #4]  \n\t"  // Сохраняем обновленный acc2 обратно в структуру
-            
-            // Расчет коррекции с защитой от затирания
-            "adds r1, r4        \n\t"  // r1 = carry1 + carry2
-            "ldr  r2, [%0, #12] \n\t"  // r2 = СТАРЫЙ ctx.m2_carry_prev (загружаем до перезаписи!)
-            "subs r1, r2        \n\t"  // r1 = total_correction = (carry1 + carry2) - old_prev
-            
-            // Фиксация текущего переноса для следующего шага
-            "str  r4, [%0, #12] \n\t"  // ctx.m2_carry_prev = r4 (текущий carry2)
+        total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
+        loc_m2_carry_prev = carry2; 
 #else
-
-
-            // Вычисление MASH-1
-            "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
-            "adcs r1, r1        \n\t"  // r1 (total_correction) = r1 + r1 + C
-#endif
-            "str  r0, [%0, #0]  \n\t"  // Сохраняем обновленный acc1 обратно
-
-            // Вычисление нового FRAC и знаковая коррекция INT
-            "ldr  r2, [%0, #20] \n\t"  // r2 = ctx.pio_frac
-            "adds r2, r1        \n\t"  // r2 (current_frac) = pio_frac + total_correction
-            "movs r3, r2        \n\t"  // r3 = копия current_frac перед наложением маски
-            
-            "asrs r2, r2, #8    \n\t"  // r2 = знаковый сдвиг (current_frac >> 8)
-            "ldr  r1, [%0, #16] \n\t"  // r1 = ctx.pio_int
-            "adds r1, r2        \n\t"  // r1 (current_int) = pio_int + коррекция
-            
-            "movs r4, #255      \n\t"  // r4 = 0xFF
-            "ands r3, r4        \n\t"  // r3 (current_frac) &= r4 (0xFF)
-
-            // Сборка 32-битного clkdiv 
-            "lsls r1, r1, #16   \n\t"  // r1 = current_int << 16
-            "lsls r3, r3, #8    \n\t"  // r3 = current_frac << 8
-            "orrs r1, r3        \n\t"  // r1 = clkdiv = r1 | r3
-            
-            // Прямая запись в шину PIO
-            "ldr  r0, [%0, #24] \n\t"  // r0 = ctx.pio_clkdiv
-            "str  r1, [r0]      \n\t"  // *pio_clkdiv = clkdiv
-
-            // === ДОБАВЛЕНО: ДОЗИРОВАННОЕ ДРОССЕЛИРОВАНИЕ ЦИКЛА ===
-            // 8 тактов NOP создают безопасное терапевтическое окно для автомата PIO.
-            // Частота записи упадет до ~8-10 МГц, чего более чем достаточно для Noise Shaping,
-            // но хаотичный шум («белая стена») полностью исчезнет.
-            "nop \n\t" "nop \n\t" "nop \n\t" "nop \n\t"
-            "nop \n\t" "nop \n\t" "nop \n\t" "nop \n\t"
-            :
-            : "r" (&ctx)
-            : "r0", "r1", "r2", "r3", "r4", "memory", "cc"
-        );
-
-        // Возвращаем результаты обратно в Си-переменные рантайма
-        loc_acc1 = ctx.acc1;
-#ifdef VFO_USE_MASH2
-        loc_acc2 = ctx.acc2;
-        loc_m2_carry_prev = ctx.m2_carry_prev;
+        uint32_t old_acc = loc_acc1;
+        loc_acc1 += step;
+        if (loc_acc1 < old_acc) {
+            total_correction = 1;
+        }
 #endif
 
+        // Атомарная нормализация фракции знаками (без тяжелых while-циклов)
+        uint32_t current_frac = (uint32_t)((int32_t)l_frac + total_correction);
+        uint32_t current_int  = l_int;
+
+        current_int += (current_frac >> 8); 
+        current_frac &= 0xFFu;              
+
+        // Единственная STR-запись в периферию за всю итерацию цикла (без NOP!)
+        *clkdiv_reg = (current_int << 16) | (current_frac << 8);
+
 #else
-
-
-
-
-
-
-
-
-
-
-        // === ЭТАЛОННАЯ СИ-ВЕРСИЯ (Без оптимизации, для сравнения) ===
-        // Принудительно гоним данные в глобальные volatile, чтобы работала базовая Си-функция
+        // === ЭТАЛОННАЯ МЕДЛЕННАЯ СИ-ВЕРСИЯ (С прогонкой через глобальное ОЗУ) ===
         dds_accumulator = loc_acc1;
         xorshift_state = loc_rand_state;
 #ifdef VFO_USE_MASH2
@@ -348,6 +260,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 #endif
     }
 }
+
 
 static void detach_peripheral_clock() {
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);

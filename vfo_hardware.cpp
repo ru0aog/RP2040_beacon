@@ -197,8 +197,13 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         sio_hw->gpio_togl = profile_pin_mask;
 #endif
 
+
+
+
+
+
 #ifdef VFO_DITHER_FAST
-        // === ВЕТКА УЛЬТРАЗВУКОВОЙ ASM-ОПТИМИЗАЦИИ (Шаг 2 и Шаг 3) ===
+        // === ВЕТКА УЛЬТРАЗВУКОВОЙ ASM-ОПТИМИЗАЦИИ (С дросселированием шины PIO) ===
         uint32_t step = l_step;
 
 #ifdef VFO_DITHER_RANDOMIZE
@@ -212,57 +217,116 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         step = (uint32_t)((int32_t)step + r_dither);
 #endif
 
-        uint32_t carry1 = 0;
-        uint32_t carry2 = 0;
+        // Структура контекста в ОЗУ для разгрузки регистров компилятора
+        struct {
+            uint32_t acc1;
+            uint32_t acc2;
+            uint32_t step;
+            uint32_t m2_carry_prev;
+            uint32_t pio_int;
+            uint32_t pio_frac;
+            volatile uint32_t *pio_clkdiv;
+        } __attribute__((packed)) ctx;
 
-        // Шаг 2 и 3: Высокоскоростной расчет аккумуляторов и сборка clkdiv
+        ctx.acc1 = loc_acc1;
+        ctx.step = step;
+        ctx.pio_int = l_int;
+        ctx.pio_frac = l_frac;
+        ctx.pio_clkdiv = clkdiv_reg;
 #ifdef VFO_USE_MASH2
-        // Ассемблерный MASH-2 (Delta-Sigma 2-го порядка)
-        asm volatile (
-            "adds %0, %0, %3    \n\t"  // loc_acc1 += step (с установкой флагов)
-            "adcs %1, %1, %1    \n\t"  // Сдвиг carry1 через флаг переноса (C)
-            "adds %2, %2, %0    \n\t"  // loc_acc2 += loc_acc1
-            "adcs %4, %4, %4    \n\t"  // Сдвиг carry2 через флаг переноса (C)
-            : "+r" (loc_acc1), "+r" (carry1), "+r" (loc_acc2), "+r" (step), "+r" (carry2)
-            :
-            : "cc"
-        );
-        // Коррекция MASH-2: Перенос = Carry1 + Carry2 - Carry2_Prev
-        int32_t total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
-        loc_m2_carry_prev = carry2;
+        ctx.acc2 = loc_acc2;
+        ctx.m2_carry_prev = loc_m2_carry_prev;
 #else
-        // Ассемблерный MASH-1 (Delta-Sigma 1-го порядка)
-        asm volatile (
-            "adds %0, %0, %2    \n\t"  // loc_acc1 += step
-            "adcs %1, %1, %1    \n\t"  // carry1 = флаг переноса
-            : "+r" (loc_acc1), "+r" (carry1)
-            : "r" (step)
-            : "cc"
-        );
-        int32_t total_correction = (int32_t)carry1;
+        ctx.acc2 = 0;
+        ctx.m2_carry_prev = 0;
 #endif
 
-        // Избавление от ветвления при нормализации (Шаг 2): безусловный битовый сдвиг
-        uint32_t current_frac = (uint32_t)((int32_t)l_frac + total_correction);
-        uint32_t current_int  = l_int;
-
-        // Если произошел выход за границы 0..255, сдвиг восстановит INT и FRAC атомарно
-        current_int += (current_frac >> 8); 
-        current_frac &= 0xFFu;              
-
-        // Ассемблерная финальная сборка регистра clkdiv и мгновенная запись в шину
-        uint32_t final_clkdiv;
         asm volatile (
-            "lsls %1, %2, #16   \n\t"  // final_clkdiv = current_int << 16
-            "lsls %0, %3, #8    \n\t"  // tmp = current_frac << 8
-            "orrs %0, %0, %1    \n\t"  // final_clkdiv |= tmp
-            "str  %0, [%4]      \n\t"  // *clkdiv_reg = final_clkdiv
-            : "=&r" (final_clkdiv), "=&r" (step)
-            : "r" (current_int), "r" (current_frac), "r" (clkdiv_reg)
-            : "memory"
+            ".thumb             \n\t"
+            ".syntax unified    \n\t"
+            
+            // Загрузка данных из ОЗУ структуры в нижние регистры r0-r4
+            "ldr  r0, [%0, #0]  \n\t"  // r0 = ctx.acc1
+            "ldr  r2, [%0, #8]  \n\t"  // r2 = ctx.step
+            "movs r1, #0        \n\t"  // r1 = carry1 = 0
+
+#ifdef VFO_USE_MASH2
+            "ldr  r3, [%0, #4]  \n\t"  // r3 = ctx.acc2
+            "movs r4, #0        \n\t"  // r4 = carry2 = 0
+
+            // Вычисление MASH-2 
+            "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
+            "adcs r1, r1        \n\t"  // r1 (carry1) = r1 + r1 + C
+            "adds r3, r0        \n\t"  // r3 (acc2) += r0 (acc1)
+            "adcs r4, r4        \n\t"  // r4 (carry2) = r4 + r4 + C
+
+            "str  r3, [%0, #4]  \n\t"  // Сохраняем обновленный acc2 обратно
+            
+            // Расчет коррекции: r1 = carry1 + carry2 - m2_carry_prev
+            "adds r1, r4        \n\t"  // r1 = carry1 + carry2
+            "ldr  r4, [%0, #12] \n\t"  // r4 = ctx.m2_carry_prev
+            "subs r1, r4        \n\t"  // r1 = total_correction
+            
+            // Восстанавливаем carry2 и сохраняем как новый m2_carry_prev
+            "subs r4, r1, r4    \n\t"  
+            "str  r4, [%0, #12] \n\t"  
+#else
+            // Вычисление MASH-1
+            "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
+            "adcs r1, r1        \n\t"  // r1 (total_correction) = r1 + r1 + C
+#endif
+            "str  r0, [%0, #0]  \n\t"  // Сохраняем обновленный acc1 обратно
+
+            // Вычисление нового FRAC и знаковая коррекция INT
+            "ldr  r2, [%0, #20] \n\t"  // r2 = ctx.pio_frac
+            "adds r2, r1        \n\t"  // r2 (current_frac) = pio_frac + total_correction
+            "movs r3, r2        \n\t"  // r3 = копия current_frac перед наложением маски
+            
+            "asrs r2, r2, #8    \n\t"  // r2 = знаковый сдвиг (current_frac >> 8)
+            "ldr  r1, [%0, #16] \n\t"  // r1 = ctx.pio_int
+            "adds r1, r2        \n\t"  // r1 (current_int) = pio_int + коррекция
+            
+            "movs r4, #255      \n\t"  // r4 = 0xFF
+            "ands r3, r4        \n\t"  // r3 (current_frac) &= r4 (0xFF)
+
+            // Сборка 32-битного clkdiv 
+            "lsls r1, r1, #16   \n\t"  // r1 = current_int << 16
+            "lsls r3, r3, #8    \n\t"  // r3 = current_frac << 8
+            "orrs r1, r3        \n\t"  // r1 = clkdiv = r1 | r3
+            
+            // Прямая запись в шину PIO
+            "ldr  r0, [%0, #24] \n\t"  // r0 = ctx.pio_clkdiv
+            "str  r1, [r0]      \n\t"  // *pio_clkdiv = clkdiv
+
+            // === ДОБАВЛЕНО: ДОЗИРОВАННОЕ ДРОССЕЛИРОВАНИЕ ЦИКЛА ===
+            // 8 тактов NOP создают безопасное терапевтическое окно для автомата PIO.
+            // Частота записи упадет до ~8-10 МГц, чего более чем достаточно для Noise Shaping,
+            // но хаотичный шум («белая стена») полностью исчезнет.
+            "nop \n\t" "nop \n\t" "nop \n\t" "nop \n\t"
+            "nop \n\t" "nop \n\t" "nop \n\t" "nop \n\t"
+            :
+            : "r" (&ctx)
+            : "r0", "r1", "r2", "r3", "r4", "memory", "cc"
         );
 
+        // Возвращаем результаты обратно в Си-переменные рантайма
+        loc_acc1 = ctx.acc1;
+#ifdef VFO_USE_MASH2
+        loc_acc2 = ctx.acc2;
+        loc_m2_carry_prev = ctx.m2_carry_prev;
+#endif
+
 #else
+
+
+
+
+
+
+
+
+
+
         // === ЭТАЛОННАЯ СИ-ВЕРСИЯ (Без оптимизации, для сравнения) ===
         // Принудительно гоним данные в глобальные volatile, чтобы работала базовая Си-функция
         dds_accumulator = loc_acc1;

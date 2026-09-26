@@ -34,8 +34,15 @@ jobs:
       run: |
         # Компилируем ваш скетч под стандартную Raspberry Pi Pico
         # Точка указывает компилятору собирать весь текущий корень репозитория
-        # Хитрость: делаем копию скетча с именем папки репозитория, чтобы arduino-cli не ругался
+        # Делаем копию скетча с именем папки репозитория
         cp beacon_v2_10.ino RP2040_beacon.ino
+        
+        # Создаем копии файлов в нижнем регистре, чтобы Linux их нашел
+        cp BME280.h bme280.h
+        cp BME280.cpp bme280.cpp
+        cp LCD.h lcd.h
+        cp LCD.cpp lcd.cpp
+        
         # Компилируем проект
         arduino-cli compile --fqbn rp2040:rp2040:rpipico --output-dir ./build .
 

@@ -21,9 +21,9 @@ jobs:
     - name: Install Raspberry Pi Pico Core
       run: |
         # Добавляем индекс плат от Earle F. Philhower
-        arduino-cli core update-index --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+        arduino-cli core update-index --additional-urls https://github.com
         # Устанавливаем ядро RP2040
-        arduino-cli core install rp2040:rp2040 --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+        arduino-cli core install rp2040:rp2040 --additional-urls https://github.com
 
     - name: Install Libraries
       run: |
@@ -32,19 +32,17 @@ jobs:
 
     - name: Compile Sketch
       run: |
-        # Компилируем ваш скетч под стандартную Raspberry Pi Pico
-        # Точка указывает компилятору собирать весь текущий корень репозитория
-        # Делаем копию скетча с именем папки репозитория
+        # Делаем копию скетча с именем папки репозитория, чтобы удовлетворить требования компилятора
         cp beacon_v2_10.ino RP2040_beacon.ino
         
-        # Создаем копии файлов в нижнем регистре, чтобы Linux их нашел
-        cp BME280.h bme280.h
-        cp BME280.cpp bme280.cpp
-        cp LCD.h lcd.h
-        cp LCD.cpp lcd.cpp
+        # Исправление регистра файлов для Linux (если в коде они прописаны маленькими буквами)
+        cp BME280.h bme280.h 2>/dev/null || true
+        cp BME280.cpp bme280.cpp 2>/dev/null || true
+        cp LCD.h lcd.h 2>/dev/null || true
+        cp LCD.cpp lcd.cpp 2>/dev/null || true
         
-        # Компилируем проект
-        arduino-cli compile --fqbn rp2040:rp2040:rpipico --output-dir ./build .
+        # Компилируем проект с вашими точными параметрами: Adafruit TinyUSB + 2MB Flash (1MB Sketch / 1MB FS)
+        arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=adafruit,flash=2097152_1048576 --output-dir ./build .
 
     - name: Upload UF2 Artifact
       uses: actions/upload-artifact@v4

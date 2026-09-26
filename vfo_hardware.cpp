@@ -254,23 +254,23 @@ static void __not_in_flash_func(vfo_core1_entry)() {
             "ldr  r3, [%0, #4]  \n\t"  // r3 = ctx.acc2
             "movs r4, #0        \n\t"  // r4 = carry2 = 0
 
-            // Вычисление MASH-2 
+            // Вычисление MASH-2
             "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
             "adcs r1, r1        \n\t"  // r1 (carry1) = r1 + r1 + C
             "adds r3, r0        \n\t"  // r3 (acc2) += r0 (acc1)
             "adcs r4, r4        \n\t"  // r4 (carry2) = r4 + r4 + C
 
-            "str  r3, [%0, #4]  \n\t"  // Сохраняем обновленный acc2 обратно
+            "str  r3, [%0, #4]  \n\t"  // Сохраняем обновленный acc2 обратно в структуру
             
-            // Расчет коррекции: r1 = carry1 + carry2 - m2_carry_prev
+            // Расчет коррекции с защитой от затирания
             "adds r1, r4        \n\t"  // r1 = carry1 + carry2
-            "ldr  r4, [%0, #12] \n\t"  // r4 = ctx.m2_carry_prev
-            "subs r1, r4        \n\t"  // r1 = total_correction
+            "ldr  r2, [%0, #12] \n\t"  // r2 = СТАРЫЙ ctx.m2_carry_prev (загружаем до перезаписи!)
+            "subs r1, r2        \n\t"  // r1 = total_correction = (carry1 + carry2) - old_prev
             
-            // Восстанавливаем carry2 и сохраняем как новый m2_carry_prev
-            "subs r4, r1, r4    \n\t"  
-            "str  r4, [%0, #12] \n\t"  
+            // Фиксация текущего переноса для следующего шага
+            "str  r4, [%0, #12] \n\t"  // ctx.m2_carry_prev = r4 (текущий carry2)
 #else
+
             // Вычисление MASH-1
             "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
             "adcs r1, r1        \n\t"  // r1 (total_correction) = r1 + r1 + C

@@ -1,0 +1,42 @@
+name: Arduino RP2040 Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Позволяет запускать сборку вручную одной кнопкой
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Arduino CLI
+      uses: arduino/setup-arduino-cli@v2
+
+    - name: Install Raspberry Pi Pico Core
+      run: |
+        # Добавляем индекс плат от Earle F. Philhower
+        arduino-cli core update-index --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+        # Устанавливаем ядро RP2040
+        arduino-cli core install rp2040:rp2040 --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+
+    - name: Install Libraries
+      run: |
+        # Устанавливаем библиотеку Adafruit TinyUSB
+        arduino-cli lib install "Adafruit TinyUSB Library"
+
+    - name: Compile Sketch
+      run: |
+        # Компилируем ваш скетч под стандартную Raspberry Pi Pico
+        arduino-cli compile --fqbn rp2040:rp2040:rpipico --output-dir ./build beacon_v2_10.ino
+
+    - name: Upload UF2 Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: arduino-rp2040-uf2
+        path: ./build/*.uf2

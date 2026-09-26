@@ -496,14 +496,24 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz);
     Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);
     Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);
+
 #ifdef VFO_DITHER_FAST
-    Serial.printf("Dither Mode: VFO_DITHER_FAST (High-Speed Sign-Correct C Loop)\n");
+    #ifdef VFO_DITHER_RANDOMIZE
+        Serial.printf("Dither Mode: VFO_DITHER_FAST (High-Speed C Loop + RANDOMIZE ON)\n");
+    #else
+        Serial.printf("Dither Mode: VFO_DITHER_FAST (High-Speed C Loop + RANDOMIZE OFF)\n");
+    #endif
 #else
-    Serial.printf("Dither Mode: Standard C-Version\n");
+    #ifdef VFO_DITHER_RANDOMIZE
+        Serial.printf("Dither Mode: Standard C-Version (RANDOMIZE ON)\n");
+    #else
+        Serial.printf("Dither Mode: Standard C-Version (RANDOMIZE OFF)\n");
+    #endif
 #endif
     Serial.printf("---------------------------------------------\n");
 
     vfo_set_tone_instant(0);
+
 
 
 #ifdef VFO_DITHER_ON_CORE1

@@ -33,7 +33,8 @@ jobs:
     - name: Compile Sketch
       run: |
         # Компилируем ваш скетч под стандартную Raspberry Pi Pico
-        arduino-cli compile --fqbn rp2040:rp2040:rpipico --output-dir ./build beacon_v2_10.ino
+        # Точка указывает компилятору собирать весь текущий корень репозитория
+        arduino-cli compile --fqbn rp2040:rp2040:rpipico --output-dir ./build .
 
     - name: Upload UF2 Artifact
       uses: actions/upload-artifact@v4

@@ -51,9 +51,9 @@
 #include "si5351_driver.h"
 #include "scheduler.h"
 #include "file_manager.h"
-#include "LCD.h"
+#include "lcd.h"
 #include "vfo_hardware.h"
-#include "LED_BLINK.h"
+#include "led_blink.h"
 
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;

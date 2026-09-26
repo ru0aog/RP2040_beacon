@@ -44,7 +44,7 @@
  */
 
 #include <hardware/gpio.h>
-#include "LED_BLINK.h"
+#include "led_blink.h"
 
 // Определяем маски пинов для всех трех типов плат одновременно
 // GPIO16 (Zero), GPIO23 (YD-RP2040), GPIO25 (Обычная Pico / LED_BUILTIN)

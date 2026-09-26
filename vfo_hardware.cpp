@@ -1,7 +1,7 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Программный ВЧ-генератор (VFO) на PIO RP2040  
- *  Версия 2.20 (С автотюнингом по 40-битной полной дроби), 2026-09-26  
+ *  Версия 2.22 (Полная сборка с автотюнингом по 40-битной дроби), 2026-09-26  
  * ============================================================================  
  */
 
@@ -206,7 +206,7 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
 
 /**
  * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
- * Изменено: метрика оценивает ПОЛНУЮ ошибку дробной части (40-бит).
+ * Метрика оценивает ПОЛНУЮ ошибку дробной части (40-бит).
  */
 static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
@@ -240,7 +240,7 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
 
 /**
  * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
- * Изменено: Направлен на минимизацию ПОЛНОЙ 40-битной дробной части делителя PIO.
+ * Направлен на минимизацию ПОЛНОЙ 40-битной дробной части делителя PIO.
  * При равенстве метрик выбирает более высокую clk_sys.
  */
 static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
@@ -284,9 +284,10 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                 // Объединение pio_frac и dds_step в сквозную 40-битную дробь
                 uint64_t full_frac = ((uint64_t)test_pio_frac << 32) | test_dds_step;
                 
-                // Считаем метрику близости к целому числу (снизу или сверху)
+                // Считаем метрику близости к целому числу (расстояние до 0 или до 2^40)
                 uint64_t dist_to_0 = full_frac;
                 uint64_t dist_to_max = (1ULL << 40) - full_frac;
+                uint64_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
 
                 // Строгое улучшение метрики, либо равенство (тогда берем более высокую clk_sys)
                 if (current_metric < min_full_frac_metric || 

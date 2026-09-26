@@ -51,8 +51,8 @@
 #include "rtty_modem.h"
 #include "si5351_driver.h" 
 #include "file_manager.h"  
-#include "LCD.h"
-#include "LED_BLINK.h"
+#include "lcd.h"
+#include "led_blink.h"
 #include "vfo_hardware.h"
 
 // Внешние ссылки на глобальные переменные управления

@@ -1,7 +1,7 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Программный ВЧ-генератор (VFO) на PIO RP2040  
- *  Версия 2.10 (Полная сборка с автотюнингом по 40-битной дроби), 2026-09-26  
+ *  Версия 2.10 (Профилирование и ASM-оптимизация Core 1), 2026-09-26  
  * ============================================================================  
  */
 
@@ -12,6 +12,7 @@
 #include "hardware/sync.h"
 #include "hardware/resets.h"
 #include "hardware/timer.h"
+#include "hardware/structs/sio.h"
 #include "pico/multicore.h"
 
 // Структура для возврата найденных физических коэффициентов PLL
@@ -54,7 +55,7 @@ static volatile uint32_t target_pio_int = 8;
 static volatile uint32_t target_pio_frac8 = 0;  
 static volatile bool tone_changed = false; 
 
-// Глобальное состояние DDS-накопителей в ОЗУ
+// Глобальное состояние DDS-накопителей в ОЗУ (используется в С-ориентированных ветках)
 static volatile uint32_t dds_accumulator = 0; 
 #ifdef VFO_USE_MASH2
 static volatile uint32_t dds_accum_m2 = 0;    
@@ -70,6 +71,13 @@ static uint32_t current_clk_sys_hz = 120000000;
 /**
  * Быстрый генератор псевдослучайных чисел Xorshift32 в ОЗУ.
  */
+static inline uint32_t __not_in_flash_func(vfo_xorshift32_raw)(uint32_t state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
 static inline uint32_t __not_in_flash_func(vfo_xorshift32)() {
     uint32_t x = xorshift_state;
     x ^= x << 13;
@@ -80,7 +88,7 @@ static inline uint32_t __not_in_flash_func(vfo_xorshift32)() {
 }
 
 /**
- * Единичный атомарный шаг расчета дизеринга (MASH-1-1 + Рандомизация).
+ * Единичный атомарный шаг расчета дизеринга (Эталонная Си-версия).
  */
 static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_int, uint32_t local_frac) {
     uint32_t step = local_step;
@@ -145,29 +153,134 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
  * Главная точка входа для второго ядра (Core 1).
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
+    // Локальные копии параметров тона
     uint32_t l_step = 0;
     uint32_t l_int = 8;
     uint32_t l_frac = 0;
 
+    // Локальные аккумуляторы состояния (DDS и ГПСЧ) для разрыва зависимостей по ОЗУ
+    uint32_t loc_acc1 = 0;
+    uint32_t loc_rand_state = VFO_RAND_SEED_INIT;
+#ifdef VFO_USE_MASH2
+    uint32_t loc_acc2 = 0;
+    uint32_t loc_m2_carry_prev = 0;
+#endif
+
+    // Адрес целевого регистра clkdiv для прямой ASM-записи мимо структуры PIO
+    volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
+    
+    // Битовая маска для аппаратного тоггла пина отладки
+    const uint32_t profile_pin_mask = (1u << VFO_PROFILE_PIN);
+
     while (true) {
-        if (tone_changed) {
+        // Проверка смены тона на Си-уровне
+        if (__builtin_expect(tone_changed, 0)) {
             uint32_t save = spin_lock_blocking(vfo_spin_lock);
             
             l_step = dds_step;
             l_int  = target_pio_int;
             l_frac = target_pio_frac8;
             
+            loc_acc1 = 0;
+            loc_rand_state = xorshift_state;
 #ifdef VFO_USE_MASH2
-            dds_accum_m2 = 0;
-            m2_carry_prev = 0;
+            loc_acc2 = 0;
+            loc_m2_carry_prev = 0;
 #endif
-            dds_accumulator = 0;
             tone_changed = false; 
             
             spin_unlock(vfo_spin_lock, save);
         }
 
+#ifdef VFO_DITHER_PROFILE
+        // Шаг 1: Аппаратный тоггл пина через SIO (выполняется за 1 такт)
+        sio_hw->gpio_togl = profile_pin_mask;
+#endif
+
+#ifdef VFO_DITHER_FAST
+        // === ВЕТКА УЛЬТРАЗВУКОВОЙ ASM-ОПТИМИЗАЦИИ (Шаг 2 и Шаг 3) ===
+        uint32_t step = l_step;
+
+#ifdef VFO_DITHER_RANDOMIZE
+        // Быстрый Xorshift в локальном регистре
+        loc_rand_state = vfo_xorshift32_raw(loc_rand_state);
+        int32_t r_bits = (int32_t)(loc_rand_state & ((1u << VFO_DITHER_RAND_BITS) - 1));
+        int32_t r_dither = r_bits - (1 << (VFO_DITHER_RAND_BITS - 1));
+        if (r_dither == -(1 << (VFO_DITHER_RAND_BITS - 1))) {
+            r_dither = 0; 
+        }
+        step = (uint32_t)((int32_t)step + r_dither);
+#endif
+
+        uint32_t carry1 = 0;
+        uint32_t carry2 = 0;
+
+        // Шаг 2 и 3: Высокоскоростной расчет аккумуляторов и сборка clkdiv
+#ifdef VFO_USE_MASH2
+        // Ассемблерный MASH-2 (Delta-Sigma 2-го порядка)
+        asm volatile (
+            "adds %0, %0, %3    \n\t"  // loc_acc1 += step (с установкой флагов)
+            "adcs %1, %1, %1    \n\t"  // Сдвиг carry1 через флаг переноса (C)
+            "adds %2, %2, %0    \n\t"  // loc_acc2 += loc_acc1
+            "adcs %4, %4, %4    \n\t"  // Сдвиг carry2 через флаг переноса (C)
+            : "+r" (loc_acc1), "+r" (carry1), "+r" (loc_acc2), "+r" (step), "+r" (carry2)
+            :
+            : "cc"
+        );
+        // Коррекция MASH-2: Перенос = Carry1 + Carry2 - Carry2_Prev
+        int32_t total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
+        loc_m2_carry_prev = carry2;
+#else
+        // Ассемблерный MASH-1 (Delta-Sigma 1-го порядка)
+        asm volatile (
+            "adds %0, %0, %2    \n\t"  // loc_acc1 += step
+            "adcs %1, %1, %1    \n\t"  // carry1 = флаг переноса
+            : "+r" (loc_acc1), "+r" (carry1)
+            : "r" (step)
+            : "cc"
+        );
+        int32_t total_correction = (int32_t)carry1;
+#endif
+
+        // Избавление от ветвления при нормализации (Шаг 2): безусловный битовый сдвиг
+        uint32_t current_frac = (uint32_t)((int32_t)l_frac + total_correction);
+        uint32_t current_int  = l_int;
+
+        // Если произошел выход за границы 0..255, сдвиг восстановит INT и FRAC атомарно
+        current_int += (current_frac >> 8); 
+        current_frac &= 0xFFu;              
+
+        // Ассемблерная финальная сборка регистра clkdiv и мгновенная запись в шину
+        uint32_t final_clkdiv;
+        asm volatile (
+            "lsls %1, %2, #16   \n\t"  // final_clkdiv = current_int << 16
+            "lsls %0, %3, #8    \n\t"  // tmp = current_frac << 8
+            "orrs %0, %0, %1    \n\t"  // final_clkdiv |= tmp
+            "str  %0, [%4]      \n\t"  // *clkdiv_reg = final_clkdiv
+            : "=&r" (final_clkdiv), "=&r" (step)
+            : "r" (current_int), "r" (current_frac), "r" (clkdiv_reg)
+            : "memory"
+        );
+
+#else
+        // === ЭТАЛОННАЯ СИ-ВЕРСИЯ (Без оптимизации, для сравнения) ===
+        // Принудительно гоним данные в глобальные volatile, чтобы работала базовая Си-функция
+        dds_accumulator = loc_acc1;
+        xorshift_state = loc_rand_state;
+#ifdef VFO_USE_MASH2
+        dds_accum_m2 = loc_acc2;
+        m2_carry_prev = loc_m2_carry_prev;
+#endif
+
         vfo_dither_step(l_step, l_int, l_frac);
+
+        loc_acc1 = dds_accumulator;
+        loc_rand_state = xorshift_state;
+#ifdef VFO_USE_MASH2
+        loc_acc2 = dds_accum_m2;
+        loc_m2_carry_prev = m2_carry_prev;
+#endif
+#endif
     }
 }
 
@@ -206,23 +319,20 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
 
 /**
  * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
- * Метрика оценивает ПОЛНУЮ ошибку дробной части (40-бит).
  */
 static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
 
 #ifdef VFO_SNAP_TO_GRID
-    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; // 40-битный максимум
+    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; 
     VfoParameters best_params = calculate_raw_params_chz(clk_sys_hz, base_target_chz);
 
     for (int32_t offset_chz = -10; offset_chz <= 10; offset_chz++) {
         uint64_t candidate_chz = (uint64_t)((int64_t)base_target_chz + offset_chz);
         VfoParameters candidate_params = calculate_raw_params_chz(clk_sys_hz, candidate_chz);
         
-        // Сборка 40-битного дробного остатка: pio_frac (8 бит) + dds_step (32 бита)
         uint64_t full_frac = ((uint64_t)candidate_params.pio_frac << 32) | candidate_params.dds_step;
         
-        // Нахождение расстояния до ближайшего целого числа
         uint64_t dist_to_0 = full_frac;
         uint64_t dist_to_max = (1ULL << 40) - full_frac;
         uint64_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
@@ -240,8 +350,6 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
 
 /**
  * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
- * Направлен на минимизацию ПОЛНОЙ 40-битной дробной части делителя PIO.
- * При равенстве метрик выбирает более высокую clk_sys.
  */
 static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
@@ -252,7 +360,7 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     best_pll = { 133, 6, 2, 133003879ULL };
 #endif
 
-    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; // Предел для 40-битной ошибки
+    uint64_t min_full_frac_metric = 0xFFFFFFFFFFULL; 
 
     for (uint32_t p1 = 2; p1 <= 6; p1++) {
         for (uint32_t p2 = 1; p2 <= 2; p2++) {
@@ -281,15 +389,12 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                 uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
                 uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
                 
-                // Объединение pio_frac и dds_step в сквозную 40-битную дробь
                 uint64_t full_frac = ((uint64_t)test_pio_frac << 32) | test_dds_step;
                 
-                // Считаем метрику близости к целому числу (расстояние до 0 или до 2^40)
                 uint64_t dist_to_0 = full_frac;
                 uint64_t dist_to_max = (1ULL << 40) - full_frac;
                 uint64_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
 
-                // Строгое улучшение метрики, либо равенство (тогда берем более высокую clk_sys)
                 if (current_metric < min_full_frac_metric || 
                    (current_metric == min_full_frac_metric && clk_sys_hz > best_pll.clk_sys_hz)) {
                     
@@ -305,11 +410,16 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     return best_pll;
 }
 
-// === ПОЛНОСТЬЮ ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ИНИЦИАЛИЗАЦИИ ===
+// === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
-    // === 1. ЗАЩИТА СМЕНЫ СЕАНСА: Остановка старого dither-механизма ===
+#ifdef VFO_DITHER_PROFILE
+    // Инициализация отладочного пина под замер частоты цикла дизеринга
+    gpio_init(VFO_PROFILE_PIN);
+    gpio_set_dir(VFO_PROFILE_PIN, GPIO_OUT);
+#endif
+
 #ifdef VFO_DITHER_ON_CORE1
-    multicore_reset_core1(); // Принудительно глушим старый плотный цикл Core 1
+    multicore_reset_core1(); 
 #else
     if (timer_already_running) {
         cancel_repeating_timer(&sdr_dither_timer);
@@ -320,32 +430,27 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     current_active_tone = VFO_TONE_NONE;
     xorshift_state = VFO_RAND_SEED_INIT + time_us_32(); 
 
-    // Защищенное выделение аппаратного спинлока (строго один раз за аптайм)
     if (vfo_spin_lock == nullptr) {
         int lock_id = spin_lock_claim_unused(true);
         vfo_spin_lock = spin_lock_init(lock_id);
     }
 
-    // Подготовка целевых коэффициентов тактирования PLL
     uint32_t best_fbdiv = 100, best_p1 = 5, best_p2 = 2;
     uint64_t clk_sys_target_hz = 120000000ULL;
 
 #ifdef VFO_PLL_AUTOTUNE
-    // Динамический автотюнинг PLL под базовую частоту текущей передачи
     PllConfig optimal_pll = vfo_find_optimal_pll(base_freq_hz);
     best_fbdiv = optimal_pll.fbdiv;
     best_p1 = optimal_pll.p1;
     best_p2 = optimal_pll.p2;
     clk_sys_target_hz = optimal_pll.clk_sys_hz;
 #else
-    // Статический режим на базе дефайнов
 #ifdef VFO_CLOCK_133_MHZ
     best_fbdiv = 133; best_p1 = 6; best_p2 = 2; clk_sys_target_hz = 133000000ULL;
 #endif
 #endif
 
-    // 2. Аппаратная перестройка системной тактовой частоты (clk_sys)
-    detach_peripheral_clock(); // Спасаем USB/UART/Таймеры, уводя clk_peri на фиксированные 48 МГц
+    detach_peripheral_clock(); 
     uint32_t ints_status = save_and_disable_interrupts();
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 12 * 1000000, 12 * 1000000);
     reset_block(RESETS_RESET_PLL_SYS_BITS);
@@ -356,10 +461,8 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, (uint32_t)clk_sys_target_hz, (uint32_t)clk_sys_target_hz);
     restore_interrupts(ints_status);
 
-    // Фиксация точной системной частоты для расчёта делителей
     current_clk_sys_hz = (uint32_t)(((uint64_t)best_fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(best_p1 * best_p2));
 
-    // === 3. ЗАЩИТА ПАМЯТИ PIO: Загрузка программы строго один раз ===
     if (!pio_program_loaded) {
         lo_offset = pio_add_program(lo_pio, &pio_square_program);
         pio_program_loaded = true;
@@ -375,23 +478,24 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     pio_sm_init(lo_pio, lo_sm, lo_offset, &c);
     pio_sm_set_enabled(lo_pio, lo_sm, true);
 
-    // 4. Предрасчет всей сетки частот в ОЗУ от ФАКТИЧЕСКОЙ частоты current_clk_sys_hz
     for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
         unsigned int tone_freq = (unsigned int)(base_freq_hz + (i * step_hz));
         ifkp_tones[i] = calculate_freq_params(current_clk_sys_hz, tone_freq);
     }
 
-    // === ДОБАВЛЕНО: ОТЛАДОЧНЫЙ ВЫВОД ПАРАМЕТРОВ ДЛЯ БАЗОВОЙ ЧАСТОТЫ В SERIAL ===
     VfoParameters base_params = calculate_freq_params(current_clk_sys_hz, base_freq_hz);
-    Serial.printf("\n--- VFO PLL Autotune (40-bit Match) ---\n");
+    Serial.printf("\n--- VFO Core 1 ASM Optimization Active ---\n");
     Serial.printf("Target Freq: %u Hz\n", base_freq_hz);
-    Serial.printf("PLL Config : FBDIV=%u, P1=%u, P2=%u\n", best_fbdiv, best_p1, best_p2);
     Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz);
     Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", base_params.pio_int, base_params.pio_frac);
-    Serial.printf("DDS Step   : 0x%08X (%u)\n", base_params.dds_step, base_params.dds_step);
-    Serial.printf("---------------------------------------\n");
+    Serial.printf("DDS Step   : 0x%08X\n", base_params.dds_step);
+#ifdef VFO_DITHER_FAST
+    Serial.printf("Dither Mode: VFO_DITHER_FAST (ASM Cortex-M0+)\n");
+#else
+    Serial.printf("Dither Mode: Standard C-Version\n");
+#endif
+    Serial.printf("-----------------------------------------\n");
 
-    // 5. Безопасный чистый пуск dither-механизмов
     vfo_set_tone_instant(0);
 
 #ifdef VFO_DITHER_ON_CORE1

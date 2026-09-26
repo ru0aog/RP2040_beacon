@@ -65,7 +65,7 @@
 Для самостоятельного изменения логики и локальной компиляции проекта вам понадобятся:
 
 1. Среда разработки **Arduino IDE**.
-2. Установленное стороннее ядро плат **Raspberry Pi Pico/RP2040** от *Earle F. Philhower* (добавьте ссылку на индекс плат в настройки: `https://github.com`).
+2. Установленное стороннее ядро плат **Raspberry Pi Pico/RP2040** от *Earle F. Philhower* ([ссылка на индекс плат: `https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json`]).
 3. Библиотека **Adafruit TinyUSB Library**, установленная через стандартный менеджер библиотек.
 
 ### Конфигурация платы в Arduino IDE (FQBN):

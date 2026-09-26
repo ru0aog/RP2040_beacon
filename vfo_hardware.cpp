@@ -152,11 +152,6 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
 /**
  * Главная точка входа для второго ядра (Core 1).
  */
-/**
-/**
- * Главная точка входа для второго ядра (Core 1).
- * Версия 2.51 — Исправлен знаковый сдвиг MASH-2 и объявление profile_pin_mask.
- */
 static void __not_in_flash_func(vfo_core1_entry)() {
     // Регистро-резидентные копии статических параметров тона
     int32_t l_step = 0;
@@ -273,12 +268,6 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 }
 
 
-
-
-
-
-
-
 static void detach_peripheral_clock() {
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);
 }
@@ -313,16 +302,6 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
 }
 
 
-
-
-
-
-
-
-
-/**
- * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
- */
 /**
  * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
  * Изменено: Метрика оценивает исключительно ошибку dds_step.
@@ -356,17 +335,6 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
 }
 
 
-
-
-
-
-
-
-
-
-/**
- * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
- */
 /**
  * Сканирующий матричный алгоритм поиска оптимальной частоты PLL (clk_sys).
  * Направлен на первичную минимизацию 32-битного остатка dds_step.
@@ -447,16 +415,6 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
 }
 
 
-
-
-
-
-
-
-
-
-
-
 // === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
 #ifdef VFO_DITHER_PROFILE
@@ -530,20 +488,23 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         ifkp_tones[i] = calculate_freq_params(current_clk_sys_hz, tone_freq);
     }
 
-    VfoParameters base_params = calculate_freq_params(current_clk_sys_hz, base_freq_hz);
-    Serial.printf("\n--- VFO Core 1 ASM Optimization Active ---\n");
-    Serial.printf("Target Freq: %u Hz\n", base_freq_hz);
+    // === ИСТИННЫЙ ДИАГНОСТИЧЕСКИЙ ВЫВОД ПАРАМЕТРОВ БАЗОВОГО ТОНА В SERIAL ===
+    VfoParameters real_base_params = ifkp_tones[0]; // Берем параметры CW несущей из рантайм-таблицы
+    
+    Serial.printf("\n--- VFO Runtime Diagnostics (True Target) ---\n");
+    Serial.printf("Target Freq: %u Hz (Grid Freq: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);
     Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz);
-    Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", base_params.pio_int, base_params.pio_frac);
-    Serial.printf("DDS Step   : 0x%08X\n", base_params.dds_step);
+    Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);
+    Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);
 #ifdef VFO_DITHER_FAST
-    Serial.printf("Dither Mode: VFO_DITHER_FAST (ASM Cortex-M0+)\n");
+    Serial.printf("Dither Mode: VFO_DITHER_FAST (High-Speed Sign-Correct C Loop)\n");
 #else
     Serial.printf("Dither Mode: Standard C-Version\n");
 #endif
-    Serial.printf("-----------------------------------------\n");
+    Serial.printf("---------------------------------------------\n");
 
     vfo_set_tone_instant(0);
+
 
 #ifdef VFO_DITHER_ON_CORE1
     tone_changed = true;

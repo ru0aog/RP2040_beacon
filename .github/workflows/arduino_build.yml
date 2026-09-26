@@ -37,6 +37,15 @@ jobs:
 
     - name: Upload UF2 Artifact
       uses: actions/upload-artifact@v4
+
+    - name: Create GitHub Release
+      # Этот шаг сработает только тогда, когда сборка запущена созданием тега (например, v1.0.0)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ./build/*.uf2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         name: arduino-rp2040-uf2
         path: ./build/*.uf2

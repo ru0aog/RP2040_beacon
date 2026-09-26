@@ -271,6 +271,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
             "str  r4, [%0, #12] \n\t"  // ctx.m2_carry_prev = r4 (текущий carry2)
 #else
 
+
             // Вычисление MASH-1
             "adds r0, r2        \n\t"  // r0 (acc1) += r2 (step)
             "adcs r1, r1        \n\t"  // r1 (total_correction) = r1 + r1 + C

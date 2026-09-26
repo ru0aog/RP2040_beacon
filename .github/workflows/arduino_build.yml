@@ -40,9 +40,3 @@ jobs:
       with:
         name: arduino-rp2040-uf2
         path: ./build/*.uf2
-        
-    - name: Upload UF2 Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: arduino-rp2040-uf2
-        path: ./build/*.uf2

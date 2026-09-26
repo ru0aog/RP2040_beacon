@@ -59,7 +59,7 @@
 #include "file_manager.h"
 #include "scheduler.h"
 #include "vfo_hardware.h"
-#include "LED_BLINK.h"
+#include "led_blink.h"
 
 uint32_t IFKP_Base_freq = 3601307;
 // Глобальные переменные для хранения сетки частот IFKP (33 тона)

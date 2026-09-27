@@ -59,6 +59,9 @@
 #include <Wire.h>
 #include "scheduler.h"
 
+extern const uint8_t PIN_dev_TX; // пин управления усилителем
+extern bool dev_TX_state;        // состояние усилителя
+
 // Перечисление для типов подключенных чипов времени
 RtcType activeRtc = RTC_NONE;
 
@@ -232,6 +235,7 @@ void init_scheduler() {
 
 // Обновление переменных времени из регистров BCD
 void update_scheduler() {
+  digitalWrite(PIN_dev_TX, dev_TX_state);
   if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     

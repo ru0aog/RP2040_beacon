@@ -69,6 +69,9 @@
 #define BCN_VER 2.10
 #define BCN_DAT "2026-09-26"
 
+bool dev_TX_state  = false;
+uint8_t PIN_dev_TX = 15;
+
 // таблица параметров устройств
 /*
   device_BM[0] = 1;
@@ -302,6 +305,10 @@ void setup() {
   Serial.print(exactSeconds, 2); 
   Serial.println(" сек");
   //Serial.println("...");
+
+  pinMode(PIN_dev_TX, OUTPUT);
+  digitalWrite(PIN_dev_TX, dev_TX_state);
+
   Serial.println("[Система] Питание маяка включено.");
   Serial.println("[Система] Последовательное соединение восстановлено.");
   pinMode(LED_BUILTIN, OUTPUT);
@@ -361,7 +368,7 @@ void loop() {
   static uint32_t last_rtc_tick = 0;
   if (millis() - last_rtc_tick >= 250) {
     last_rtc_tick = millis();
-    update_scheduler(); 
+    update_scheduler();
   }
 
   // =========================================================================
@@ -428,6 +435,8 @@ void loop() {
       
       // Засекаем точное время старта сеанса связи IFKP
       uint32_t ifkp_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
       SI_POWER_ON();
       
       if (!pc_file_written && !soft_restart_flag) {
@@ -498,6 +507,7 @@ void loop() {
       // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА
       is_transmitting = false;
       SI_POWER_OFF();
+      dev_TX_state = false;
       update_scheduler(); // Гарантированно сдвигаем планировщик во избежание бесконечного перезапуска цикла
       Serial.println("");
     } 
@@ -520,6 +530,8 @@ void loop() {
       
       // Засекаем точное время старта сеанса
       uint32_t rtty_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
       SI_POWER_ON();
       
       if (!pc_file_written && !soft_restart_flag) {
@@ -577,6 +589,7 @@ void loop() {
       // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА
       is_transmitting = false;
       SI_POWER_OFF();
+      dev_TX_state = false;
       update_scheduler(); // Гарантированно сдвигаем планировщик, чтобы избежать зацикливания
       Serial.println("");
     } 
@@ -599,7 +612,8 @@ void loop() {
       
       // Засекаем точное время старта сеанса в эфире
       uint32_t cw_session_start_ms = millis();
-
+      dev_TX_state = true;
+      update_scheduler();
       SI_POWER_ON();
       
       if (!pc_file_written && !soft_restart_flag) {
@@ -657,6 +671,7 @@ void loop() {
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
       is_transmitting = false; 
       SI_POWER_OFF();
+      dev_TX_state = false;
       update_scheduler(); // Переключаем планировщик на следующий интервал времени
       Serial.println("");
     } 

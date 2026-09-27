@@ -70,7 +70,7 @@
 #define BCN_DAT "2026-09-26"
 
 bool dev_TX_state  = false;
-uint8_t PIN_dev_TX = 15;
+const uint8_t PIN_dev_TX = 15;
 
 // таблица параметров устройств
 /*

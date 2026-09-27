@@ -732,11 +732,10 @@ void scanRP2040Ports() {
 
     // ИСКЛЮЧЕНИЯ ДЛЯ RP2040-ZERO:
     // 1. Так как шаг цикла +=4, при sda=14 значение scl станет равен 15. 
-    //    При sda=18 значение scl станет равным 19. Проверяем, чтобы никто не задел GPIO16.
-    if (sda == 16 || scl == 16) continue;
+    //    Исключаем пины 14,15,16,23,24,25
     if (sda == 14 || scl == 14) continue;
-
-    // 2. Исключаем пины GPIO23, GPIO24, GPIO25 (при sda=22, scl будет 23 — исключаем)
+    if (sda == 15 || scl == 15) continue;
+    if (sda == 16 || scl == 16) continue;
     if (sda >= 23 && sda <= 25) continue;
     if (scl >= 23 && scl <= 25) continue;
 

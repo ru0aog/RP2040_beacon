@@ -366,8 +366,8 @@ void send_ifkp_string(String str) {
 // Передача калибровочной лесенки (Свип-тест от 0 до 32 тона с миганием)
 void send_ifkp_calibration_ladder() {
     
-    // Включаем физический ВЧ-выход
-    if (device_SI && SI_FAIL == false) {
+    // Включаем физический ВЧ-выход с корректной проверкой флага
+    if (device_SI[0] && SI_FAIL == false) {
         CLK_ON_si5351(0); 
     } else {
         vfo_set_cw_key(true);
@@ -375,13 +375,13 @@ void send_ifkp_calibration_ladder() {
 
     // Последовательный перебор всех тонов вверх
     for (uint8_t i = 0; i < 33; i++) {
-        // Мгновенная проверка флагов ПК или аварийного рестарта во время свипа
+        // Мгновенная проверка флага прерывания сеанса связи от ПК или кнопки
         if (pc_file_written || soft_restart_flag) break;
 
         current_tone = i; // Жестко фиксируем индекс текущего тона
 
         // Физическое переключение частоты
-        if (device_SI && SI_FAIL == false) {
+        if (device_SI[0] && SI_FAIL == false) {
             set_ifkp_tone(current_tone);
         } else {
             vfo_set_tone_instant(current_tone);
@@ -389,38 +389,35 @@ void send_ifkp_calibration_ladder() {
 
         Serial.print(F(".")); 
 
-        // Аппаратные флаги индикации начала тона
+        // Индикация начала тона
         digitalWrite(LED_BUILTIN, HIGH);
-        ZERO_LED_BLUE_ON(); // Зажигаем красный индикатор на старте ступени
+        ZERO_LED_BLUE_ON(); 
         bool led_half_turned_off = false;
 
-        // Настройка временных меток для полупериода мигания (500 мс / 2 = 250 мс)
         uint32_t start_ms = millis();
         const uint32_t tone_duration_ms = 500;
         const uint32_t halftone_duration_ms = tone_duration_ms / 2;
 
-        // Аппаратный цикл точного удержания длительности знака
         while (millis() - start_ms < tone_duration_ms) {
             if (pc_file_written || soft_restart_flag) {
                 digitalWrite(LED_BUILTIN, LOW);
                 ZERO_LED_OFF();
-                if (device_SI && SI_FAIL == false) CLK_OFF_si5351(0); else vfo_set_cw_key(false);
+                if (device_SI[0] && SI_FAIL == false) CLK_OFF_si5351(0); else vfo_set_cw_key(false);
                 return;
             }
             check_serial_commands();
             
-            // Гасим светодиоды ровно на середине длительности тона (через 250 мс)
             if (!led_half_turned_off && (millis() - start_ms >= halftone_duration_ms)) {
                 digitalWrite(LED_BUILTIN, LOW);
-                ZERO_LED_OFF(); // Выключаем индикацию, создавая эффект мигания
+                ZERO_LED_OFF(); 
                 led_half_turned_off = true;
             }
-            yield(); // Разгрузка ядра процессора
+            yield(); 
         }
     }
 
     // Выключаем физический ВЧ-выход по завершении теста
-    if (device_SI && SI_FAIL == false) {
+    if (device_SI[0] && SI_FAIL == false) {
         CLK_OFF_si5351(0); 
     } else {
         vfo_set_cw_key(false);
@@ -429,4 +426,5 @@ void send_ifkp_calibration_ladder() {
     digitalWrite(LED_BUILTIN, LOW);
     ZERO_LED_OFF();
 }
+
 

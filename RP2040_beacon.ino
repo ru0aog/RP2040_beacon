@@ -263,7 +263,7 @@ void check_serial_commands() {
               LCD_print("LOG FILE BLANK", 0, 0);
               Serial.println(F("[Система] Журнал успешно очищен!"));
               // Пишем в файл на виртуальную флешку историю работы
-              log_file_write_line(get_current_time() + " очистка лога");
+              log_file_write_line(get_current_time() + " Лог очищен");
             }
           }
           else if (command.startsWith("setparam ")) {
@@ -409,7 +409,7 @@ void loop() {
   // Отслеживаем клик (переход из HIGH в LOW). 
   // Запуск возможен только из режима ожидания (USR_IDLE) и если станция абсолютно свободна (!is_transmitting)
   if (current_button_state == LOW && old_button_state == HIGH && !is_transmitting && usr_chain_state == USR_IDLE && millis() > 1000) {
-    Serial.println(F("[Кнопка] Нажата кнопка USR! Запуск цепочки с блокировкой планировщика..."));
+    Serial.println(F("[Кнопка]  Нажата кнопка USR! Запуск цепочки с блокировкой планировщика..."));
     LCD_init(true);
     LCD_print("USR CHAIN ACTIVE", 0, 0);
     is_transmitting = true;         // Включаем глобальную блокировку планировщика
@@ -635,7 +635,7 @@ void loop() {
           snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс IFKP завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ifkp_session_duration_sec);
           Serial.println(end_buf);
           // Пишем в файл на виртуальную флешку историю работы
-          log_file_write_line(get_current_time() + " - Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
+          log_file_write_line(get_current_time() + " Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
         }
       } 
       
@@ -726,7 +726,7 @@ void loop() {
           Serial.println(end_buf);
         
         // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line(get_current_time() + " - Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
+        log_file_write_line(get_current_time() + " Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
         }
       } 
       
@@ -813,7 +813,7 @@ void loop() {
         Serial.println(end_buf);
 
         // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line(get_current_time() + " - Сеанс CW завершен. Длительность: " + String(cw_session_duration_sec) + " сек.");
+        log_file_write_line(get_current_time() + " Сеанс CW завершен. Длительность: " + String(cw_session_duration_sec) + " сек.");
       } 
       
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании

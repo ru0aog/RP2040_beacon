@@ -58,7 +58,15 @@ void read_file_to_variable();
 // API для работы с журналом LOG.TXT
 void log_file_clear();
 void log_file_write_line(String message);
-
 extern bool is_transmitting; // Ссылка на флаг занятости эфира из главного скетча
+
+// ГЕОМЕТРИЯ И ЛИМИТЫ ФАЙЛОВОЙ СИСТЕМЫ МАЯКА
+#define INFO_FIRST_CLUSTER   2
+#define INFO_CLUSTERS        20    // 20 секторов = 10 КБ под конфигурацию
+#define INFO_MAX_BYTES       (INFO_CLUSTERS * 512)
+
+#define LOG_FIRST_CLUSTER    22    // Идет сразу за INFO (2 + 20)
+#define LOG_CLUSTERS         100   // 100 секторов = 50 КБ под логи работы
+#define LOG_MAX_BYTES        (LOG_CLUSTERS * 512)
 
 #endif

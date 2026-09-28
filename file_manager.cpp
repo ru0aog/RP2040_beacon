@@ -110,90 +110,94 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
 
 // Внутренняя функция сохранения ОЗУ во Flash
 static void save_ram_to_flash() {
-  Serial.println("[Система] Сохраняем конфигурацию во Flash-память...");
+  //Serial.println("[Система] Сохраняем конфигурацию во Flash-память...");
   uint32_t ints = save_and_disable_interrupts();
   flash_range_erase(FLASH_TARGET_OFFSET, DISK_SIZE_BYTES);
   flash_range_program(FLASH_TARGET_OFFSET, ram_disk_buffer, DISK_SIZE_BYTES);
   restore_interrupts(ints);
   flash_flush_cache();
-  Serial.println("[Система] Успешно сохранено!");
+  //Serial.println("[Система] Успешно сохранено!");
 }
+
+
+// Вспомогательная функция для записи 12-битной ячейки в таблицу FAT12
+static void set_fat12_entry(uint32_t fat_start_bytes, uint16_t cluster, uint16_t value) {
+  uint32_t byte_offset = fat_start_bytes + ((cluster * 3) / 2);
+  if (cluster % 2 == 0) {
+    ram_disk_buffer[byte_offset] = (uint8_t)(value & 0xFF);
+    ram_disk_buffer[byte_offset + 1] = (ram_disk_buffer[byte_offset + 1] & 0xF0) | ((value >> 8) & 0x0F);
+  } else {
+    ram_disk_buffer[byte_offset] = (ram_disk_buffer[byte_offset] & 0x0F) | ((value << 4) & 0xF0);
+    ram_disk_buffer[byte_offset + 1] = (uint8_t)((value >> 4) & 0xFF);
+  }
+}
+
+
 
 // Внутренняя функция генерации FAT структуры по умолчанию (Совместимо с Windows 10/11)
 static void create_default_fat_with_info_file() {
-  Serial.println("[Система] Файлы отсутствуют. Генерируем диск и файл info.txt...");
+  Serial.println("[Система] Файлы отсутствуют. Генерируем расширенный диск FAT12...");
   memset(ram_disk_buffer, 0, DISK_SIZE_BYTES);
 
-  // -------------------------------------------------------------------------
-  // СЕКТОР 0: Идеальный Boot Sector FAT12 (Совместимо с Windows 10/11)
-  // -------------------------------------------------------------------------
-  ram_disk_buffer[0] = 0xEB; ram_disk_buffer[1] = 0x3C; ram_disk_buffer[2] = 0x90; // Jump
-  memcpy(&ram_disk_buffer[3], "MSDOS5.0", 8);                                     // OEM Name
-  
-  // Стандартный BIOS Parameter Block (BPB)
-  ram_disk_buffer[11] = (uint8_t)(SECTOR_SIZE & 0xFF);         // Bytes per sector - Low (0x00)
-  ram_disk_buffer[12] = (uint8_t)((SECTOR_SIZE >> 8) & 0xFF);  // Bytes per sector - High (0x02)
-  ram_disk_buffer[13] = 1;                                     // Sectors per cluster (1)
-  ram_disk_buffer[14] = 1;                                     // Reserved sectors (1)
+  // СЕКТОР 0: Загрузочный сектор (геометрия)
+  ram_disk_buffer[0] = 0xEB; ram_disk_buffer[1] = 0x3C; ram_disk_buffer[2] = 0x90; 
+  memcpy(&ram_disk_buffer[3], "MSDOS5.0", 8);                                     
+  ram_disk_buffer[11] = (uint8_t)(SECTOR_SIZE & 0xFF);         
+  ram_disk_buffer[12] = (uint8_t)((SECTOR_SIZE >> 8) & 0xFF);  
+  ram_disk_buffer[13] = 1;                                     
+  ram_disk_buffer[14] = 1;                                     
   ram_disk_buffer[15] = 0;
-  ram_disk_buffer[16] = 1;                                     // Number of FATs (1)
-  ram_disk_buffer[17] = 16;                                    // Max root directory entries (16)
+  ram_disk_buffer[16] = 1;                                     
+  ram_disk_buffer[17] = 16;                                    
   ram_disk_buffer[18] = 0;
-  ram_disk_buffer[19] = (uint8_t)(SECTOR_COUNT & 0xFF);        // Total sectors - Low (0x00)
-  ram_disk_buffer[20] = (uint8_t)((SECTOR_COUNT >> 8) & 0xFF); // Total sectors - High (0x01)
-  ram_disk_buffer[21] = 0xF8;                                  // Media descriptor (Fixed Disk)
-  ram_disk_buffer[22] = 1;                                     // Sectors per FAT (1)
+  ram_disk_buffer[19] = (uint8_t)(SECTOR_COUNT & 0xFF);        
+  ram_disk_buffer[20] = (uint8_t)((SECTOR_COUNT >> 8) & 0xFF); 
+  ram_disk_buffer[21] = 0xF8;                                  
+  ram_disk_buffer[22] = 1;                                     
   ram_disk_buffer[23] = 0;
-  
-  ram_disk_buffer[24] = 0x01; ram_disk_buffer[25] = 0x00;     // Sectors per track (1)
-  ram_disk_buffer[26] = 0x01; ram_disk_buffer[27] = 0x00;     // Number of heads (1)
-  ram_disk_buffer[28] = 0x00; ram_disk_buffer[29] = 0x00;     // Hidden sectors (0)
+  ram_disk_buffer[24] = 0x01; ram_disk_buffer[25] = 0x00;     
+  ram_disk_buffer[26] = 0x01; ram_disk_buffer[27] = 0x00;     
+  ram_disk_buffer[28] = 0x00; ram_disk_buffer[29] = 0x00;     
   ram_disk_buffer[30] = 0x00; ram_disk_buffer[31] = 0x00;     
-  ram_disk_buffer[32] = 0x00; ram_disk_buffer[33] = 0x00;     // Large total sectors (0)
+  ram_disk_buffer[32] = 0x00; ram_disk_buffer[33] = 0x00;     
   ram_disk_buffer[34] = 0x00; ram_disk_buffer[35] = 0x00;
+  ram_disk_buffer[36] = 0x80;                                  
+  ram_disk_buffer[37] = 0x00;                                  
+  ram_disk_buffer[38] = 0x29;                                  
+  ram_disk_buffer[39] = 0xDE; ram_disk_buffer[40] = 0xAD; ram_disk_buffer[41] = 0xBE; ram_disk_buffer[42] = 0xEF;
+  memcpy(&ram_disk_buffer[43], "PICO DRIVE ", 11);               
+  memcpy(&ram_disk_buffer[54], "FAT12   ", 8);                 
+  ram_disk_buffer[510] = 0x55; ram_disk_buffer[511] = 0xAA;
 
-  ram_disk_buffer[36] = 0x80;                                  // Physical drive number
-  ram_disk_buffer[37] = 0x00;                                  // Reserved
-  ram_disk_buffer[38] = 0x29;                                  // Extended boot signature
-  ram_disk_buffer[39] = 0xDE; ram_disk_buffer[40] = 0xAD;      // Volume Serial Number
-  ram_disk_buffer[41] = 0xBE; ram_disk_buffer[42] = 0xEF;
-  memcpy(&ram_disk_buffer[43], "PICO DRIVE ", 11);               // Volume Label (11 байт)
-  memcpy(&ram_disk_buffer[54], "FAT12   ", 8);                 // File System Type (8 байт)
-  
-  // Сигнатура исправного загрузочного сектора на самом конце (Байты 510 и 511)
-  ram_disk_buffer[510] = 0x55; 
-  ram_disk_buffer[511] = 0xAA;
-
-
-  // -------------------------------------------------------------------------
-  // СЕКТОР 1: Таблица FAT12 (ИСПРАВЛЕНО под 2 файла)
-  // -------------------------------------------------------------------------
+  // СЕКТОР 1: Автоматический расчет динамической таблицы FAT12
   uint32_t fat_offset = SECTOR_SIZE * 1;
-  ram_disk_buffer[fat_offset + 0] = 0xF8; // Media descriptor
-  ram_disk_buffer[fat_offset + 1] = 0xFF; // Клаузура заполнения FAT
-  ram_disk_buffer[fat_offset + 2] = 0xFF; // Кластеры 0 и 1 зарезервированы
-  
-  // Кластер 2 (Сектор 3) отдан под INFO.TXT
-  ram_disk_buffer[fat_offset + 3] = 0xFF; 
-  ram_disk_buffer[fat_offset + 4] = 0x0F; 
+  ram_disk_buffer[fat_offset + 0] = 0xF8; 
+  ram_disk_buffer[fat_offset + 1] = 0xFF; 
+  ram_disk_buffer[fat_offset + 2] = 0xFF; 
 
-  // НОВОЕ: Выделяем Кластер 3 (Сектор 4) под LOG.TXT. Он тоже финальный (0xFFF):
-  // В FAT12 каждые два кластера упаковываются в 3 байта (3 и 4 байты FAT)
-  ram_disk_buffer[fat_offset + 4] |= 0xF0; // Накладываем маску для Кластера 3
-  ram_disk_buffer[fat_offset + 5] = 0xFF;  // Получили итоговый маркер конца файла 0xFFF
+  // Динамически связываем цепочку кластеров для INFO.TXT
+  for (uint16_t i = INFO_FIRST_CLUSTER; i < (INFO_FIRST_CLUSTER + INFO_CLUSTERS - 1); i++) {
+    set_fat12_entry(fat_offset, i, i + 1); 
+  }
+  set_fat12_entry(fat_offset, (INFO_FIRST_CLUSTER + INFO_CLUSTERS - 1), 0xFFF); 
 
-  // -------------------------------------------------------------------------
-  // СЕКТОР 2: Корневой каталог (ИСПРАВЛЕНО: добавлена вторая запись)
-  // -------------------------------------------------------------------------
+  // Динамически связываем цепочку кластеров для LOG.TXT
+  for (uint16_t i = LOG_FIRST_CLUSTER; i < (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1); i++) {
+    set_fat12_entry(fat_offset, i, i + 1);
+  }
+  set_fat12_entry(fat_offset, (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1), 0xFFF); 
+
+  // СЕКТОР 2: Корневой каталог
   uint32_t root_offset = SECTOR_SIZE * 2;
 
-  // Запись №1: файл INFO.TXT (Смещение 0)
-  memcpy(&ram_disk_buffer[root_offset + 0], "INFO    ", 8);  // Имя файла
-  memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       // Расширение
-  ram_disk_buffer[root_offset + 11] = 0x00;                 // Атрибуты (Обычный файл)
-  ram_disk_buffer[root_offset + 26] = 0x02;                 // Стартовый кластер файла = 2 (Low)
-  ram_disk_buffer[root_offset + 27] = 0x00;                 // Стартовый кластер файла (High)
+  // Запись файла INFO.TXT
+  memcpy(&ram_disk_buffer[root_offset + 0], "INFO    ", 8);  
+  memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       
+  ram_disk_buffer[root_offset + 11] = 0x00;                 
+  ram_disk_buffer[root_offset + 26] = INFO_FIRST_CLUSTER;    
+  ram_disk_buffer[root_offset + 27] = 0x00;                 
 
+  // === БЛОК ДАННЫХ ДЕФОЛТНОГО КОНФИГА ===
   const char* default_content = 
     "[CALL]=RU0AOG\r\n"
     "[QTH]=NO66FC\r\n"
@@ -217,38 +221,31 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[root_offset + 28] = (uint8_t)(text_len & 0xFF);
   ram_disk_buffer[root_offset + 29] = (uint8_t)((text_len >> 8) & 0xFF);
 
-  // НОВОЕ: Запись №2: файл LOG.TXT (Смещение ровно 32 байта от начала каталога)
+  // Запись файла LOG.TXT (Смещение 32)
   uint32_t log_entry_offset = root_offset + 32;
-  memcpy(&ram_disk_buffer[log_entry_offset + 0], "LOG     ", 8); // Имя файла
-  memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      // Расширение
-  ram_disk_buffer[log_entry_offset + 11] = 0x00;                // Обычный архивный файл
-  ram_disk_buffer[log_entry_offset + 26] = 0x03;                // Стартовый кластер = 3!
+  memcpy(&ram_disk_buffer[log_entry_offset + 0], "LOG     ", 8); 
+  memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      
+  ram_disk_buffer[log_entry_offset + 11] = 0x00;                
+  ram_disk_buffer[log_entry_offset + 26] = LOG_FIRST_CLUSTER;   // Указывает на кластер 22
   ram_disk_buffer[log_entry_offset + 27] = 0x00;
 
-  const char* default_log_content = 
-    "=== SYSTEM LOG START ===\r\n"
-    "Beacon firmware v2.10.3 initialized ok.\r\n";
-  
+  const char* default_log_content = "=== SYSTEM LOG START ===\r\nBeacon ПО v2.10.3 запустилось корректно.\r\n";
   uint32_t log_len = strlen(default_log_content);
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(log_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((log_len >> 8) & 0xFF);
 
-  // -------------------------------------------------------------------------
-  // СЕКТОР 3: Область данных (Кластер 2)
-  // -------------------------------------------------------------------------
+  // СЕКТОР 3: Область данных INFO.TXT
   uint32_t data_offset = SECTOR_SIZE * 3;
   memcpy(&ram_disk_buffer[data_offset], default_content, text_len);
 
-  // -------------------------------------------------------------------------
-  // СЕКТОР 4: Область данных LOG.TXT (Кластер 3) - НОВОЕ!
-  // -------------------------------------------------------------------------
-  uint32_t log_data_offset = SECTOR_SIZE * 4;
+  // СЕКТОР 23: Область данных LOG.TXT (1 + 1 + 1 + 20)
+  uint32_t log_data_offset = SECTOR_SIZE * (1 + 1 + 1 + INFO_CLUSTERS); 
   memcpy(&ram_disk_buffer[log_data_offset], default_log_content, log_len);
 
-  // Синхронизируем собранную структуру двух файлов во Flash-память RP2040
   save_ram_to_flash();
-  Serial.println("[Система] Диск успешно переразмечен. Файлы info.txt и log.txt готовы!");
+  Serial.println("[Система] Структура диска обновлена: INFO (10Кб) и LOG (50Кб) готовы!");
 }
+
 
 
 // Внутренняя функция побайтового разбора маркеров
@@ -538,36 +535,28 @@ void update_info_config_from_console(String marker, String new_value) {
 // Функция очистки (стирания) файла LOG.TXT
 // -------------------------------------------------------------------------
 void log_file_clear() {
-  uint32_t root_offset = SECTOR_SIZE * 2;         // Сектор 2: Корневой каталог
-  uint32_t log_entry_offset = root_offset + 32;   // Смещение 32 байта: запись LOG.TXT
-  uint32_t log_data_offset = SECTOR_SIZE * 4;     // Сектор 4: данные LOG.TXT (Кластер 3)
+  uint32_t root_offset = SECTOR_SIZE * 2;         
+  uint32_t log_entry_offset = root_offset + 32;   
+  uint32_t log_data_offset = SECTOR_SIZE * (1 + 1 + 1 + INFO_CLUSTERS); // Автовычисление: Сектор 23
 
-  // 1. Полностью очищаем сектор данных файла LOG.TXT в ОЗУ
-  memset(&ram_disk_buffer[log_data_offset], 0, SECTOR_SIZE);
+  // Стираем полностью все 100 секторов журнала в ОЗУ
+  memset(&ram_disk_buffer[log_data_offset], 0, LOG_MAX_BYTES);
 
-  // 2. Записываем чистый маркер начала в файл
-  const char* header = "=== LOG РАБОТЫ МАЯКА ===\r\n";
+  const char* header = "=== ЖУРНАЛ РАБОТЫ МАЯКА ===\r\n";
   uint32_t header_len = strlen(header);
   memcpy(&ram_disk_buffer[log_data_offset], header, header_len);
 
-  // 3. Записываем новый точный размер файла в структуру корневого каталога FAT12 (байты 28-31)
+  // Запись полного 4-байтного размера файла для FAT
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(header_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((header_len >> 8) & 0xFF);
   ram_disk_buffer[log_entry_offset + 30] = 0x00;
   ram_disk_buffer[log_entry_offset + 31] = 0x00;
 
-  // 4. Энергонезависимое сохранение во Flash-память RP2040
-  //save_ram_to_flash();
-  Serial.println("[Журнал] Файл LOG.TXT успешно очищен.");
+  save_ram_to_flash();
+  Serial.println("[Журнал] Большой файл LOG.TXT успешно очищен.");
 
-  // --- ОБНОВЛЯЕМ ФАЙЛЫ ДЛЯ ПК ---
-  usb_msc.setUnitReady(false); // Имитируем извлечение флешки для Windows
-  delay(1500);                 // Короткая пауза, чтобы ПК успел сбросить кэш секторов
-  usb_msc.setUnitReady(true);  // Имитируем повторное вставление исправного диска
+  usb_msc.setUnitReady(false); delay(200); usb_msc.setUnitReady(true);  
 }
-
-
-
 
 // -------------------------------------------------------------------------
 // Функция дозаписи текстовой строки в конец файла LOG.TXT
@@ -575,43 +564,41 @@ void log_file_clear() {
 void log_file_write_line(String message) {
   uint32_t root_offset = SECTOR_SIZE * 2;
   uint32_t log_entry_offset = root_offset + 32;
-  uint32_t log_data_offset = SECTOR_SIZE * 4;
+  uint32_t log_data_offset = SECTOR_SIZE * (1 + 1 + 1 + INFO_CLUSTERS); // Сектор 23
 
-  // 1. Считываем текущий физический размер файла из каталога FAT12
+  // Чтение полного 4-байтного значения размера файла из дескриптора
   uint32_t current_size = ram_disk_buffer[log_entry_offset + 28] | 
-                         (ram_disk_buffer[log_entry_offset + 29] << 8);
+                         (ram_disk_buffer[log_entry_offset + 29] << 8) |
+                         (ram_disk_buffer[log_entry_offset + 30] << 16) |
+                         (ram_disk_buffer[log_entry_offset + 31] << 24);
 
-  // Подготавливаем строку: добавляем обязательные для Windows переводы каретки
   String formatted_msg = message + "\r\n";
   uint32_t msg_len = formatted_msg.length();
 
-  // 2. Проверяем лимиты безопасности, чтобы лог не вылез за границы одного сектора (512 байт)
-  // Для простого буфера маяка 512 байт — это около 15-20 текстовых записей
-  if (current_size + msg_len >= (SECTOR_SIZE - 1)) {
-    Serial.println("[Журнал] Предупреждение: LOG.TXT заполнен! Автоматическая очистка...");
-    log_file_clear(); // Если места нет — очищаем файл, сбрасывая старый хвост
-    current_size = ram_disk_buffer[log_entry_offset + 28] | 
-                   (ram_disk_buffer[log_entry_offset + 29] << 8);
+  // Сравнение с новым лимитом в 50 Килобайт
+  if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {
+    Serial.println("[Журнал] Предупреждение: Лог 50 Кб заполнен! Автоматическая очистка...");
+    log_file_clear(); 
+    current_size = ram_disk_buffer[log_entry_offset + 28] | (ram_disk_buffer[log_entry_offset + 29] << 8);
   }
 
-  // 3. Физически копируем строку в ОЗУ-буфер со смещением, где кончался старый текст
   uint8_t* write_pointer = &ram_disk_buffer[log_data_offset + current_size];
   memcpy(write_pointer, formatted_msg.c_str(), msg_len);
 
-  // 4. Рассчитываем и обновляем новый итоговый размер файла в FAT12
   uint32_t new_size = current_size + msg_len;
+  // Обновление всех 4-х байт размера в оглавлении FAT
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(new_size & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((new_size >> 8) & 0xFF);
+  ram_disk_buffer[log_entry_offset + 30] = (uint8_t)((new_size >> 16) & 0xFF);
+  ram_disk_buffer[log_entry_offset + 31] = (uint8_t)((new_size >> 24) & 0xFF);
 
-  // 5. Синхронизируем изменения с физической Flash-памятью микроконтроллера
   save_ram_to_flash();
-  Serial.print("[Журнал] Строка успешно добавлена. Новый размер лога: "); 
-  Serial.print(new_size); Serial.println(" байт.");
+  Serial.print("[Журнал] Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
-  // --- ОБНОВЛЯЕМ ФАЙЛЫ ДЛЯ ПК ---
-  usb_msc.setUnitReady(false); // Имитируем извлечение флешки для Windows
-  delay(1500);                 // Короткая пауза, чтобы ПК успел сбросить кэш секторов
-  usb_msc.setUnitReady(true);  // Имитируем повторное вставление исправного диска
+  if (!is_transmitting) {
+    usb_msc.setUnitReady(false); delay(200); usb_msc.setUnitReady(true);  
+  }
 }
+
 
 

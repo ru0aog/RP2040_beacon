@@ -68,9 +68,6 @@ static MTK2_STATE current_reg = LAT;
 #define MTK2_FIG 0x1B 
 #define MTK2_RUS 0x00
 
-static uint32_t RTTY_space_hz;
-static uint32_t RTTY_mark_hz;
-
 // Таблицы кодировки МТК-2
 const mtk2_map_t table_lat[] PROGMEM = {
     {"A", 0x03}, {"B", 0x19}, {"C", 0x0E}, {"D", 0x09}, {"E", 0x01}, 

@@ -555,7 +555,9 @@ void log_file_clear() {
   save_ram_to_flash();
   Serial.println("[Журнал] Большой файл LOG.TXT успешно очищен.");
 
-  usb_msc.setUnitReady(false); delay(200); usb_msc.setUnitReady(true);  
+  usb_msc.setUnitReady(false); 
+  delay(1500); 
+  usb_msc.setUnitReady(true);  
 }
 
 // -------------------------------------------------------------------------
@@ -595,9 +597,10 @@ void log_file_write_line(String message) {
   save_ram_to_flash();
   Serial.print("[Журнал] Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
-  if (!is_transmitting) {
-    usb_msc.setUnitReady(false); delay(200); usb_msc.setUnitReady(true);  
-  }
+  usb_msc.setUnitReady(false); 
+  delay(1500); 
+  usb_msc.setUnitReady(true);  
+
 }
 
 

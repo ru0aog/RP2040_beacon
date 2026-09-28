@@ -38,8 +38,9 @@ extern String my_text_variable;
 extern String my_rtty_variable;
 extern String my_ifkp_variable;
 extern String my_freq_ifkp_var;
-extern String my_rtty_space_var;
-extern String my_rtty_mark_var;
+extern String my_rtty_mark_var;    // Базовая частота MARK
+extern String my_rtty_shift_var;   // Расстояние между частотами (Гц)
+extern String my_rtty_invert_var;  // Флаг инверсии частот RTTY (0 или 1)
 extern String my_cw_variable;      // Строка минут запуска (например, "15:22,17:22")
 extern String my_freq_cw_var;      // Строка частоты несущей (например, "3601000")
 extern String my_rtty_baud_var;
@@ -53,5 +54,11 @@ void init_file_manager();
 void check_and_handle_pc_changes();
 void print_current_settings();
 void read_file_to_variable();
+
+// API для работы с журналом LOG.TXT
+void log_file_clear();
+void log_file_write_line(String message);
+
+extern bool is_transmitting; // Ссылка на флаг занятости эфира из главного скетча
 
 #endif

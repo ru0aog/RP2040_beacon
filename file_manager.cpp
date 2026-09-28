@@ -63,13 +63,14 @@ String my_text_variable = "";
 String my_rtty_variable = "";
 String my_ifkp_variable = "";
 String my_cw_variable   = "";
-String my_freq_ifkp_var = "";
 String my_freq_cw_var   = "";
-String my_rtty_space_var = "";
+String my_cw_wpm_var    = "";
+String my_rtty_baud_var = "";
 String my_rtty_mark_var = "";
-String my_rtty_baud_var = ""; 
-String my_cw_wpm_var = "";
-uint32_t CW_DOT_TIME_MS = 60;            // Время точки в мс (по умолчанию ~20 WPM)
+String my_rtty_shift_var = ""; 
+String my_rtty_invert_var = "";
+String my_freq_ifkp_var  = "";
+uint32_t CW_DOT_TIME_MS  = 60;            // Время точки в мс (по умолчанию ~20 WPM)
 volatile uint32_t RTTY_BIT_TIME_US = 22000; // Время одного бита RTTY в мкс (по умолчанию 45.45 Бод)
 String my_FAT = "";
 
@@ -144,7 +145,6 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[22] = 1;                                     // Sectors per FAT (1)
   ram_disk_buffer[23] = 0;
   
-  // СТРОГО ПО КАРТЕ МЕСТА: Геометрия диска для Windows (Байты 24 - 35)
   ram_disk_buffer[24] = 0x01; ram_disk_buffer[25] = 0x00;     // Sectors per track (1)
   ram_disk_buffer[26] = 0x01; ram_disk_buffer[27] = 0x00;     // Number of heads (1)
   ram_disk_buffer[28] = 0x00; ram_disk_buffer[29] = 0x00;     // Hidden sectors (0)
@@ -152,7 +152,6 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[32] = 0x00; ram_disk_buffer[33] = 0x00;     // Large total sectors (0)
   ram_disk_buffer[34] = 0x00; ram_disk_buffer[35] = 0x00;
 
-  // Тот самый Extended BPB (Байты 36 - 61)
   ram_disk_buffer[36] = 0x80;                                  // Physical drive number
   ram_disk_buffer[37] = 0x00;                                  // Reserved
   ram_disk_buffer[38] = 0x29;                                  // Extended boot signature
@@ -167,21 +166,28 @@ static void create_default_fat_with_info_file() {
 
 
   // -------------------------------------------------------------------------
-  // СЕКТОР 1: Таблица FAT12 (Размер: 1 сектор)
+  // СЕКТОР 1: Таблица FAT12 (ИСПРАВЛЕНО под 2 файла)
   // -------------------------------------------------------------------------
   uint32_t fat_offset = SECTOR_SIZE * 1;
   ram_disk_buffer[fat_offset + 0] = 0xF8; // Media descriptor
   ram_disk_buffer[fat_offset + 1] = 0xFF; // Клаузура заполнения FAT
   ram_disk_buffer[fat_offset + 2] = 0xFF; // Кластеры 0 и 1 зарезервированы
   
-  // Данные нашего файла INFO.TXT займут Кластер 2 (Сектор 3)
+  // Кластер 2 (Сектор 3) отдан под INFO.TXT
   ram_disk_buffer[fat_offset + 3] = 0xFF; 
   ram_disk_buffer[fat_offset + 4] = 0x0F; 
 
+  // НОВОЕ: Выделяем Кластер 3 (Сектор 4) под LOG.TXT. Он тоже финальный (0xFFF):
+  // В FAT12 каждые два кластера упаковываются в 3 байта (3 и 4 байты FAT)
+  ram_disk_buffer[fat_offset + 4] |= 0xF0; // Накладываем маску для Кластера 3
+  ram_disk_buffer[fat_offset + 5] = 0xFF;  // Получили итоговый маркер конца файла 0xFFF
+
   // -------------------------------------------------------------------------
-  // СЕКТОР 2: Корневой каталог (Размер: 1 сектор)
+  // СЕКТОР 2: Корневой каталог (ИСПРАВЛЕНО: добавлена вторая запись)
   // -------------------------------------------------------------------------
   uint32_t root_offset = SECTOR_SIZE * 2;
+
+  // Запись №1: файл INFO.TXT (Смещение 0)
   memcpy(&ram_disk_buffer[root_offset + 0], "INFO    ", 8);  // Имя файла
   memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       // Расширение
   ram_disk_buffer[root_offset + 11] = 0x00;                 // Атрибуты (Обычный файл)
@@ -201,8 +207,9 @@ static void create_default_fat_with_info_file() {
     "[RTTY_SPEED]=45\r\n"
     "\r\n"
     "[FREQ_CW   ]=3601500\r\n"
-    "[RTTY_SPACE]=3601415\r\n"
     "[RTTY_MARK ]=3601585\r\n"
+    "[RTTY_SHIFT]=170\r\n"
+    "[RTTY_INVERT]=0\r\n"
     "[FREQ_IFKP ]=3601307\r\n"
     "[EOF]";
   
@@ -210,15 +217,37 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[root_offset + 28] = (uint8_t)(text_len & 0xFF);
   ram_disk_buffer[root_offset + 29] = (uint8_t)((text_len >> 8) & 0xFF);
 
+  // НОВОЕ: Запись №2: файл LOG.TXT (Смещение ровно 32 байта от начала каталога)
+  uint32_t log_entry_offset = root_offset + 32;
+  memcpy(&ram_disk_buffer[log_entry_offset + 0], "LOG     ", 8); // Имя файла
+  memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      // Расширение
+  ram_disk_buffer[log_entry_offset + 11] = 0x00;                // Обычный архивный файл
+  ram_disk_buffer[log_entry_offset + 26] = 0x03;                // Стартовый кластер = 3!
+  ram_disk_buffer[log_entry_offset + 27] = 0x00;
+
+  const char* default_log_content = 
+    "=== SYSTEM LOG START ===\r\n"
+    "Beacon firmware v2.10.3 initialized ok.\r\n";
+  
+  uint32_t log_len = strlen(default_log_content);
+  ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(log_len & 0xFF);
+  ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((log_len >> 8) & 0xFF);
+
   // -------------------------------------------------------------------------
   // СЕКТОР 3: Область данных (Кластер 2)
   // -------------------------------------------------------------------------
   uint32_t data_offset = SECTOR_SIZE * 3;
   memcpy(&ram_disk_buffer[data_offset], default_content, text_len);
 
-  // Сохраняем свежесгенерированную структуру во Flash-память RP2040
+  // -------------------------------------------------------------------------
+  // СЕКТОР 4: Область данных LOG.TXT (Кластер 3) - НОВОЕ!
+  // -------------------------------------------------------------------------
+  uint32_t log_data_offset = SECTOR_SIZE * 4;
+  memcpy(&ram_disk_buffer[log_data_offset], default_log_content, log_len);
+
+  // Синхронизируем собранную структуру двух файлов во Flash-память RP2040
   save_ram_to_flash();
-  Serial.println("[Система] Новый шаблон info.txt успешно создан!");
+  Serial.println("[Система] Диск успешно переразмечен. Файлы info.txt и log.txt готовы!");
 }
 
 
@@ -230,8 +259,10 @@ void read_file_to_variable() {
   my_call_variable = "";  my_qth_variable  = "";
   my_text_variable = "";
   my_rtty_variable = "";  my_ifkp_variable = "";
-  my_freq_ifkp_var = "";  my_rtty_space_var = ""; my_rtty_mark_var = "";
-  my_cw_variable = "";    my_freq_cw_var = ""; my_cw_wpm_var    = "";
+  my_freq_ifkp_var = "";  my_rtty_mark_var = "";
+  my_rtty_shift_var = ""; my_rtty_invert_var = ""; // Новые
+  my_cw_variable = "";    my_freq_cw_var = "";
+  my_cw_wpm_var    = "";
   my_rtty_baud_var = "";
 
   for (uint32_t i = 0; i < DISK_SIZE_BYTES - 15; i++) {
@@ -280,11 +311,14 @@ void read_file_to_variable() {
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "FREQ_CW   ]", 11) == 0) {
         start_idx = i + 12; target_str = &my_freq_cw_var;
       }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_SPACE]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_rtty_space_var;
-      }
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_MARK ]", 11) == 0) {
         start_idx = i + 12; target_str = &my_rtty_mark_var;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_SHIFT]", 11) == 0) {
+        start_idx = i + 12; target_str = &my_rtty_shift_var;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_INVERT]", 12) == 0) {
+        start_idx = i + 13; target_str = &my_rtty_invert_var;
       }
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "FREQ_IFKP ]", 11) == 0) {
         start_idx = i + 12; target_str = &my_freq_ifkp_var;
@@ -309,7 +343,8 @@ void read_file_to_variable() {
           }
 
           // Фильтрация данных по типам переменных
-          if (target_str == &my_freq_ifkp_var || target_str == &my_rtty_space_var || target_str == &my_rtty_mark_var || target_str == &my_freq_cw_var) {
+          if (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || 
+          target_str == &my_rtty_shift_var || target_str == &my_rtty_invert_var || target_str == &my_freq_cw_var) {
             if (c >= '0' && c <= '9') {
               *target_str += c;
             }
@@ -365,8 +400,10 @@ void print_current_settings() {
   Serial.print("Скорость  CW [CW_WPM]: "); Serial.print(my_cw_wpm_var.length() > 0 ? my_cw_wpm_var : "20"); Serial.print(" WPM (Длина точки: "); Serial.print(CW_DOT_TIME_MS); Serial.println(" ms)");
   Serial.print("Скорость [RTTY_SPEED]: "); Serial.print(my_rtty_baud_var.length() > 0 ? my_rtty_baud_var : "45.45"); Serial.print(" Baud (Длина бита: "); Serial.print(RTTY_BIT_TIME_US/1000); Serial.println(" ms)");
   Serial.print("Частота  [FREQ_CW   ]: "); Serial.print(my_freq_cw_var.length() > 0 ? my_freq_cw_var : "3601000 (Резерв)"); Serial.println(" Hz");
-  Serial.print("Частота  [RTTY_SPACE]: "); Serial.print(my_rtty_space_var); Serial.println(" Hz");
   Serial.print("Частота  [RTTY_MARK ]: "); Serial.print(my_rtty_mark_var); Serial.println(" Hz");
+  Serial.print("Сдвиг    [RTTY_SHIFT]: "); Serial.print(my_rtty_shift_var.length() > 0 ? my_rtty_shift_var : "170"); Serial.println(" Hz");
+  Serial.print("Инверсия [RTTY_INVERT]: "); Serial.println(my_rtty_invert_var == "1" ? "ВКЛЮЧЕНА (Mark < Space)" : "ВЫКЛЮЧЕНА (Mark > Space)");
+  Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
   Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
   Serial.println("=====================================");
 }
@@ -402,7 +439,7 @@ void check_and_handle_pc_changes() {
     read_file_to_variable();
 
     usb_msc.setUnitReady(false); 
-    delay(200);                  
+    delay(1500);                  
     usb_msc.setUnitReady(true);
     
     print_current_settings();
@@ -495,3 +532,86 @@ void update_info_config_from_console(String marker, String new_value) {
     Serial.print("[Ошибка] Маркер ["); Serial.print(marker); Serial.println("] не найден.");
   }
 }
+
+
+// -------------------------------------------------------------------------
+// Функция очистки (стирания) файла LOG.TXT
+// -------------------------------------------------------------------------
+void log_file_clear() {
+  uint32_t root_offset = SECTOR_SIZE * 2;         // Сектор 2: Корневой каталог
+  uint32_t log_entry_offset = root_offset + 32;   // Смещение 32 байта: запись LOG.TXT
+  uint32_t log_data_offset = SECTOR_SIZE * 4;     // Сектор 4: данные LOG.TXT (Кластер 3)
+
+  // 1. Полностью очищаем сектор данных файла LOG.TXT в ОЗУ
+  memset(&ram_disk_buffer[log_data_offset], 0, SECTOR_SIZE);
+
+  // 2. Записываем чистый маркер начала в файл
+  const char* header = "=== LOG РАБОТЫ МАЯКА ===\r\n";
+  uint32_t header_len = strlen(header);
+  memcpy(&ram_disk_buffer[log_data_offset], header, header_len);
+
+  // 3. Записываем новый точный размер файла в структуру корневого каталога FAT12 (байты 28-31)
+  ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(header_len & 0xFF);
+  ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((header_len >> 8) & 0xFF);
+  ram_disk_buffer[log_entry_offset + 30] = 0x00;
+  ram_disk_buffer[log_entry_offset + 31] = 0x00;
+
+  // 4. Энергонезависимое сохранение во Flash-память RP2040
+  //save_ram_to_flash();
+  Serial.println("[Журнал] Файл LOG.TXT успешно очищен.");
+
+  // --- ОБНОВЛЯЕМ ФАЙЛЫ ДЛЯ ПК ---
+  usb_msc.setUnitReady(false); // Имитируем извлечение флешки для Windows
+  delay(1500);                 // Короткая пауза, чтобы ПК успел сбросить кэш секторов
+  usb_msc.setUnitReady(true);  // Имитируем повторное вставление исправного диска
+}
+
+
+
+
+// -------------------------------------------------------------------------
+// Функция дозаписи текстовой строки в конец файла LOG.TXT
+// -------------------------------------------------------------------------
+void log_file_write_line(String message) {
+  uint32_t root_offset = SECTOR_SIZE * 2;
+  uint32_t log_entry_offset = root_offset + 32;
+  uint32_t log_data_offset = SECTOR_SIZE * 4;
+
+  // 1. Считываем текущий физический размер файла из каталога FAT12
+  uint32_t current_size = ram_disk_buffer[log_entry_offset + 28] | 
+                         (ram_disk_buffer[log_entry_offset + 29] << 8);
+
+  // Подготавливаем строку: добавляем обязательные для Windows переводы каретки
+  String formatted_msg = message + "\r\n";
+  uint32_t msg_len = formatted_msg.length();
+
+  // 2. Проверяем лимиты безопасности, чтобы лог не вылез за границы одного сектора (512 байт)
+  // Для простого буфера маяка 512 байт — это около 15-20 текстовых записей
+  if (current_size + msg_len >= (SECTOR_SIZE - 1)) {
+    Serial.println("[Журнал] Предупреждение: LOG.TXT заполнен! Автоматическая очистка...");
+    log_file_clear(); // Если места нет — очищаем файл, сбрасывая старый хвост
+    current_size = ram_disk_buffer[log_entry_offset + 28] | 
+                   (ram_disk_buffer[log_entry_offset + 29] << 8);
+  }
+
+  // 3. Физически копируем строку в ОЗУ-буфер со смещением, где кончался старый текст
+  uint8_t* write_pointer = &ram_disk_buffer[log_data_offset + current_size];
+  memcpy(write_pointer, formatted_msg.c_str(), msg_len);
+
+  // 4. Рассчитываем и обновляем новый итоговый размер файла в FAT12
+  uint32_t new_size = current_size + msg_len;
+  ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(new_size & 0xFF);
+  ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((new_size >> 8) & 0xFF);
+
+  // 5. Синхронизируем изменения с физической Flash-памятью микроконтроллера
+  save_ram_to_flash();
+  Serial.print("[Журнал] Строка успешно добавлена. Новый размер лога: "); 
+  Serial.print(new_size); Serial.println(" байт.");
+
+  // --- ОБНОВЛЯЕМ ФАЙЛЫ ДЛЯ ПК ---
+  usb_msc.setUnitReady(false); // Имитируем извлечение флешки для Windows
+  delay(1500);                 // Короткая пауза, чтобы ПК успел сбросить кэш секторов
+  usb_msc.setUnitReady(true);  // Имитируем повторное вставление исправного диска
+}
+
+

@@ -533,6 +533,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // === ИСТИННЫЙ ДИАГНОСТИЧЕСКИЙ ВЫВОД ПАРАМЕТРОВ БАЗОВОГО ТОНА В SERIAL ===
     VfoParameters real_base_params = ifkp_tones[0]; // Берем параметры CW несущей из рантайм-таблицы
     
+/*
     Serial.printf("\n--- VFO Runtime Diagnostics (True Target) ---\n");
     Serial.printf("Target Freq: %u Hz (Grid Freq: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);
     Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz);
@@ -553,7 +554,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     #endif
 #endif
     Serial.printf("---------------------------------------------\n");
-
+*/
     vfo_set_tone_instant(0);
 
 

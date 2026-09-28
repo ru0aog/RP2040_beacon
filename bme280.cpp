@@ -486,12 +486,12 @@ void get_BME_data() {
 
       int32_t adc_H = 0;
       // Если датчик BME280, дочитываем оставшиеся 2 байта влажности
-      if (detectedSensor == TYPE_BME280) {
+      // Читаем влажность только если она физически есть в буфере приема
+      if (detectedSensor == TYPE_BME280 && pWire->available() >= 2) {
         uint32_t h_msb  = pWire->read();
         uint32_t h_lsb  = pWire->read();
         adc_H = (h_msb << 8) | h_lsb;
       }
-      // [ИСПРАВЛЕНО]: Скобка перенесена сюда. Буфер I2C гарантированно пуст и закрыт!
 
       // Вычисление реальных физических величин
       float temperature = compensateTemperature(adc_T);

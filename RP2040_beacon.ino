@@ -66,8 +66,8 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-#define BCN_VER 2.10
-#define BCN_DAT "2026-09-26"
+#define BCN_VER "2.10.3"
+#define BCN_DAT "2026-09-28"
 
 bool dev_TX_state  = false;
 extern const uint8_t PIN_dev_TX = 15;
@@ -91,13 +91,27 @@ String device_BM_name = "BME280 Барометр";
 String device_AT_name = "EEPROM AT24C";
 String device_DL_name = "дисплей LCD1602/1604";
 
-const uint8_t BME_POWER_PIN = 11;
-const uint8_t SI_POWER_PIN  = 12;
-const uint8_t DS_POWER_PIN  = 13;
-
 bool force_cw_transmission   = false; // Флаг ручного запуска CW
 bool force_rtty_transmission = false; // Флаг ручного запуска RTTY
 bool force_ifkp_transmission = false; // Флаг ручного запуска IFKP
+
+// --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
+const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
+
+enum UsrChainState {
+  USR_IDLE,          // Ожидание нажатия кнопки
+  USR_START_CW,      // Запуск и выполнение сеанса CW
+  USR_WAIT_FOR_RTTY, // 15-секундная пауза перед RTTY
+  USR_START_RTTY,    // Запуск и выполнение сеанса RTTY
+  USR_WAIT_FOR_IFKP, // 15-секундная пауза перед IFKP
+  USR_START_IFKP,    // Запуск и выполнение сеанса IFKP
+  USR_CLOSE_CHAIN    // Финальная стадия освобождения шины после IFKP
+};
+
+UsrChainState usr_chain_state = USR_IDLE;  // Текущий статус автомата последовательности
+uint32_t usr_timer_ms = 0;                 // Таймер неблокирующей паузы
+bool old_button_state = HIGH;              // Предыдущее состояние кнопки для отслеживания клика
+
 
 bool soft_restart_flag = false;
 extern bool pc_activity_detected; 
@@ -189,6 +203,8 @@ void check_serial_commands() {
             SI_POWER_OFF();
             Serial.println(F("***"));
             Serial.println(F(""));
+            // Пишем в файл на виртуальную флешку историю работы
+            log_file_write_line(get_current_time() + " рестарт процессора");
             delay(500);
             watchdog_reboot(0, 0, 0);
           }
@@ -233,6 +249,23 @@ void check_serial_commands() {
               force_ifkp_transmission = true;
             }
           }
+          // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---
+          else if (command.equalsIgnoreCase("clear log")) {
+            if (is_transmitting) {
+              Serial.println(F("[Ошибка] Нельзя стирать журнал во время активной передачи в эфир!"));
+            } else {
+              Serial.println(F("[Система] Запрос принят. Стираем LOG.TXT..."));
+              LCD_init(true);
+              LCD_print("CLEARING LOG...", 0, 0);
+              
+              log_file_clear(); // Вызов нашей новой функции очистки ОЗУ и Flash
+              
+              LCD_print("LOG FILE BLANK", 0, 0);
+              Serial.println(F("[Система] Журнал успешно очищен!"));
+              // Пишем в файл на виртуальную флешку историю работы
+              log_file_write_line(get_current_time() + " очистка лога");
+            }
+          }
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();
@@ -264,6 +297,7 @@ void check_serial_commands() {
           Serial.println(F("start cw        - Немедленно запустить внеочередной сеанс CW"));
           Serial.println(F("start rtty      - Немедленно запустить внеочередной сеанс RTTY"));
           Serial.println(F("start ifkp      - Немедленно запустить внеочередной сеанс IFKP"));
+          Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
           Serial.println(F("stop            - Экстренная остановка передачи маяка"));
           Serial.println(F("restart         - Мягкий виртуальный перезапуск маяка"));
           Serial.println(F("reset           - Жесткий аппаратный сброс процессора RP2040"));
@@ -285,6 +319,10 @@ void check_serial_commands() {
 void setup() {
   adc_init();
   init_file_manager();  // инициализировать флэш-диск
+
+  pinMode(PIN_USR_BUTTON, INPUT_PULLUP); 
+  delay(20);                                      // Даем Pull-up надежно поднять линию до +3.3 В
+  old_button_state = digitalRead(PIN_USR_BUTTON); // Фиксируем РЕАЛЬНОЕ стартовое состояние (HIGH)
 
   // запуск виртуального СОМ-порта через USB
   Serial.begin(115200);
@@ -351,16 +389,111 @@ void loop() {
   // =========================================================================
   if (soft_restart_flag) {
     soft_restart_flag = false; 
-    current_tone = 0; 
+    current_tone = 0;
+    usr_chain_state = USR_IDLE;
     delay(100);
-
-    Serial.println("\r\nПоследовательное соединение: OK");
-
     read_file_to_variable(); // Извлекаем чистые маркеры
     pc_file_written = false;
-    print_current_settings();
+    Serial.println("Рестарт: OK");
+    //print_current_settings();
     return; // Сразу уходим на новый виток loop, сбрасывая старые флаги
   }
+
+
+
+  // =========================================================================
+  // СИСТЕМНЫЙ АВТОМАТ ПОСЛЕДОВАТЕЛЬНОЙ ПЕРЕДАЧИ ПО КНОПКЕ USR (С БЛОКИРОВКОЙ)
+  // =========================================================================
+  bool current_button_state = digitalRead(PIN_USR_BUTTON);
+  
+  // Отслеживаем клик (переход из HIGH в LOW). 
+  // Запуск возможен только из режима ожидания (USR_IDLE) и если станция абсолютно свободна (!is_transmitting)
+  if (current_button_state == LOW && old_button_state == HIGH && !is_transmitting && usr_chain_state == USR_IDLE && millis() > 1000) {
+    Serial.println(F("[Кнопка] Нажата кнопка USR! Запуск цепочки с блокировкой планировщика..."));
+    LCD_init(true);
+    LCD_print("USR CHAIN ACTIVE", 0, 0);
+    is_transmitting = true;         // Включаем глобальную блокировку планировщика
+    usr_chain_state = USR_START_CW; // Переводим автомат на первый шаг
+  }
+  old_button_state = current_button_state;
+
+  // Отработка шагов автомата
+  switch (usr_chain_state) {
+    case USR_START_CW:
+      // Передаем управление модулю CW. Флаг is_transmitting уже равен true, планировщик заблокирован
+      Serial.println(F("[Автомат] Шаг 1: Запуск внеочередной передачи CW."));
+      force_cw_transmission = true; 
+      usr_chain_state = USR_WAIT_FOR_RTTY;
+      break;
+
+    case USR_WAIT_FOR_RTTY:
+      // Ждем, пока внутренний модулятор CW отработает.
+      // В конце своего сеанса модулятор CW сбросит force_cw_transmission в false.
+      // ВНИМАНИЕ: Родной блок CW в конце сеанса выполнит "is_transmitting = false". 
+      // Мы перехватываем этот момент, возвращаем true для удержания блокировки во время паузы.
+      if (!force_cw_transmission && !is_transmitting) {
+        Serial.println(F("[Автомат] Передача CW завершена. Блокировка удержана. Пауза 15 сек перед RTTY..."));
+        is_transmitting = true;   // Восстанавливаем блокировку на время тишины!
+        usr_timer_ms = millis();  // Засекаем 15 секунд паузы между модами
+        usr_chain_state = USR_START_RTTY;
+      }
+      break;
+
+    case USR_START_RTTY:
+      // Удерживаем блокировку, пока тикают 15 секунд
+      if (millis() - usr_timer_ms >= 15000) {
+        if (pc_file_written || soft_restart_flag) { is_transmitting = false; usr_chain_state = USR_IDLE; break; }
+        Serial.println(F("[Автомат] Шаг 2: Время вышло. Запуск передачи RTTY."));
+        force_rtty_transmission = true; 
+        usr_chain_state = USR_WAIT_FOR_IFKP;
+      } else {
+        is_transmitting = true;   // Защитное удержание флага занятости во время тиканья таймера
+      }
+      break;
+
+    case USR_WAIT_FOR_IFKP:
+      // Ждем окончания сеанса RTTY (когда модулятор RTTY сбросит свой force-флаг)
+      if (!force_rtty_transmission && !is_transmitting) {
+        Serial.println(F("[Автомат] Передача RTTY завершена. Блокировка удержана. Пауза 15 сек перед IFKP..."));
+        is_transmitting = true;   // Снова принудительно держим флаг занятости передатчика
+        usr_timer_ms = millis();  // Засекаем вторые 15 секунд тишины
+        usr_chain_state = USR_START_IFKP;
+      }
+      break;
+
+    case USR_START_IFKP:
+      // Удерживаем блокировку во время второй паузы
+      if (millis() - usr_timer_ms >= 15000) {
+        if (pc_file_written || soft_restart_flag) { is_transmitting = false; usr_chain_state = USR_IDLE; break; }
+        Serial.println(F("[Автомат] Шаг 3: Время вышло. Запуск передачи IFKP."));
+        force_ifkp_transmission = true; 
+        usr_chain_state = USR_CLOSE_CHAIN; // Переходим к финальной стадии освобождения шины
+      } else {
+        is_transmitting = true;
+      }
+      break;
+
+    case USR_CLOSE_CHAIN:
+      // Финальный шаг: ждем, пока отработает IFKP модулятор
+      if (!force_ifkp_transmission && !is_transmitting) {
+        Serial.println(F("[Автомат] Передача IFKP завершена. Вся цепочка выполнена успешно. Снимаем блокировку."));
+        LCD_init(true);
+        LCD_print("CHAIN DONE! READY", 0, 0);
+        usr_chain_state = USR_IDLE; // Полное обнуление автомата, is_transmitting теперь честно равен false
+      }
+      break;
+
+    case USR_IDLE:
+    default:
+      break;
+  }
+
+  // Аварийный останов всей ручной цепочки и сброс блокировок, если ПК подключился к диску
+  if (pc_file_written) {
+    is_transmitting = false;
+    usr_chain_state = USR_IDLE;
+  }
+
 
   // =========================================================================
   // 2. СИСТЕМНЫЙ ТАКТ И ПЛАНИРОВЩИК (250 мс)
@@ -423,7 +556,7 @@ void loop() {
   // =========================================================================
   // РЕЖИМ 0. СЕАНС СВЯЗИ IFKP
   // =========================================================================
-  if ((is_time_to_transmit(0) || force_ifkp_transmission) && !pc_file_written && !soft_restart_flag) {
+  if (( (is_time_to_transmit(0) && !is_transmitting) || force_ifkp_transmission) && !pc_file_written && !soft_restart_flag) {
     force_ifkp_transmission = false;
     is_transmitting = true;
     
@@ -501,6 +634,8 @@ void loop() {
           char end_buf[128];
           snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс IFKP завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ifkp_session_duration_sec);
           Serial.println(end_buf);
+          // Пишем в файл на виртуальную флешку историю работы
+          log_file_write_line(get_current_time() + " - Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
         }
       } 
       
@@ -518,7 +653,7 @@ void loop() {
   // =========================================================================
   // РЕЖИМ 1. СЕАНС СВЯЗИ RTTY
   // =========================================================================
-  if ((is_time_to_transmit(1) || force_rtty_transmission) && !pc_file_written && !soft_restart_flag) {
+  if (( (is_time_to_transmit(1) && !is_transmitting) || force_rtty_transmission) && !pc_file_written && !soft_restart_flag) {
     force_rtty_transmission = false;
     is_transmitting = true; 
     
@@ -535,12 +670,18 @@ void loop() {
       SI_POWER_ON();
       
       if (!pc_file_written && !soft_restart_flag) {
-        uint32_t rtty_space_hz = strtoul(my_rtty_space_var.c_str(), NULL, 10);
-        if (rtty_space_hz == 0) rtty_space_hz = 3601000; 
-        uint32_t rtty_mark_hz  = strtoul(my_rtty_mark_var.c_str(), NULL, 10);
-        if (rtty_mark_hz == 0)  rtty_mark_hz = 3601170;  
+        // --- НОВАЯ КОРРЕКТИРОВКА РАСЧЕТА ЧАСТОТ RTTY ---
+        uint32_t rtty_mark_hz = strtoul(my_rtty_mark_var.c_str(), NULL, 10);
+        if (rtty_mark_hz == 0)  rtty_mark_hz = 3601585; // Дефолтная частота MARK
+
+        uint32_t rtty_shift_hz = strtoul(my_rtty_shift_var.c_str(), NULL, 10);
+        if (rtty_shift_hz == 0) rtty_shift_hz = 170;    // Дефолтный сдвиг 170 Гц
+
+        bool rtty_invert = (my_rtty_invert_var == "1"); // Флаг инверсии
         
-        prepare_rtty_frequencies(rtty_space_hz, rtty_mark_hz);
+        // Вызов обновленной функции модема
+        prepare_rtty_frequencies(rtty_mark_hz, rtty_shift_hz, rtty_invert);
+        
         Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.print(F(" БОД, "));
         Serial.print(F("длительность бита ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));
         
@@ -576,13 +717,16 @@ void loop() {
           send_rtty_string("OVER.\r\n\r\n");
         }
         
-        // Строка лога выводится СТРОГО при штатном завершении сеанса (нет флага прерывания)
+        // Строка лога выводится СТРОГО при штатном завершении сеанса
         if (!pc_file_written && !soft_restart_flag) {
           uint32_t rtty_session_duration_sec = (millis() - rtty_session_start_ms) / 1000;
           update_scheduler();
           char end_buf[128];
           snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс RTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, rtty_session_duration_sec);
           Serial.println(end_buf);
+        
+        // Пишем в файл на виртуальную флешку историю работы
+        log_file_write_line(get_current_time() + " - Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
         }
       } 
       
@@ -590,17 +734,18 @@ void loop() {
       is_transmitting = false;
       SI_POWER_OFF();
       dev_TX_state = false;
-      update_scheduler(); // Гарантированно сдвигаем планировщик, чтобы избежать зацикливания
+      update_scheduler(); 
       Serial.println("");
     } 
   }
 
 
 
+
   // =========================================================================
   // РЕЖИМ 2. СЕАНС СВЯЗИ CW
   // =========================================================================
-  if ((is_time_to_transmit(2) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
+  if (( (is_time_to_transmit(2) && !is_transmitting) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
     force_cw_transmission = false;
     is_transmitting = true; 
     
@@ -666,6 +811,9 @@ void loop() {
         char end_buf[128];
         snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс CW завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, cw_session_duration_sec);
         Serial.println(end_buf);
+
+        // Пишем в файл на виртуальную флешку историю работы
+        log_file_write_line(get_current_time() + " - Сеанс CW завершен. Длительность: " + String(cw_session_duration_sec) + " сек.");
       } 
       
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
@@ -682,12 +830,6 @@ void loop() {
 }
 
 void I2C_Scanner() {
-//  int BME_POWER_PIN = 13;
-//  pinMode(DS_POWER_PIN, OUTPUT);
-//  digitalWrite(DS_POWER_PIN, HIGH);
-//  pinMode(BME_POWER_PIN, OUTPUT);
-//  digitalWrite(BME_POWER_PIN, HIGH);
-//  delay(100); // Даем чипам время на аппаратный старт
   
   scanRP2040Ports();
 

@@ -53,8 +53,9 @@ struct mtk2_map_t {
 };
 
 // Прототипы функций модуля RTTY
-void prepare_rtty_frequencies(uint32_t space_hz, uint32_t mark_hz);
+void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert);
 void send_rtty_string(const char* s);
-void send_rtty_string(String str); // Перегрузка для удобной отправки объектов String
+void send_rtty_string(String str); 
+
 
 #endif

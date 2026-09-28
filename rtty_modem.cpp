@@ -134,34 +134,41 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
     return false;
 }
 
-// Подготовка сетки частот (совместимо с 144 МГц УКВ)
-void prepare_rtty_frequencies(uint32_t space_hz, uint32_t mark_hz) {
+// Подготовка сетки частот на основе MARK, SHIFT и флага INVERT
+void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) {
+  uint32_t space_hz;
+
+  // Расчет частоты SPACE на основе флага инверсии
+  if (invert) {
+    space_hz = mark_hz + shift_hz; // Инверсный режим: Space выше Mark
+  } else {
+    space_hz = mark_hz - shift_hz; // Нормальный режим: Space ниже Mark
+  }
+
   if (device_SI[0]) {
     uint64_t space_mHz = (uint64_t)space_hz * 1000ULL;
     uint64_t mark_mHz  = (uint64_t)mark_hz * 1000ULL;
     calculate_freq_bytes_mHz(space_mHz, rtty_reg_space);
     calculate_freq_bytes_mHz(mark_mHz,  rtty_reg_mark);
-    Serial.println("[RTTY_ГОТОВ] Сетка частот RTTY готова."); 
-    Serial.print("            F_MARK : "); Serial.print(mark_hz); Serial.println(" Hz");
-    Serial.print("            F_SPACE: "); Serial.print(space_hz); Serial.println(" Hz");
+    Serial.println(F("[RTTY_ГОТОВ] Сетка частот RTTY для Si5351 готова.")); 
+    Serial.print(F("            F_MARK : ")); Serial.print(mark_hz); Serial.println(F(" Hz"));
+    Serial.print(F("            F_SPACE: ")); Serial.print(space_hz); Serial.println(F(" Hz"));
   }
   else {
-    //RTTY_mark_hz = mark_hz;
-    //set_pio_sdr_freq(mark_hz);
-    //Serial.println("[RTTY_ГОТОВ] Сетка частот RTTY готова."); 
-    //Serial.print("            F_MARK : "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
-    //RTTY_space_hz = space_hz;
-    //set_pio_sdr_freq(space_hz);
-    //Serial.print("            F_SPACE: "); Serial.print(fractGen_get_real_frequency()); Serial.println(" Hz");
-    //fractGen_OFF();
-    double rtty_shift = (double)mark_hz - (double)space_hz;
+    // Для аппаратного VFO RP2040:
+    // Так как vfo_hardware_init(base, shift) принимает базовую частоту и ВЧ-сдвиг между тонами 0 и 1:
+    // Настраиваем фазонепрерывную сетку, учитывая знак инверсии.
+    double rtty_shift = invert ? -(double)shift_hz : (double)shift_hz;
+    
     vfo_hardware_init(mark_hz, rtty_shift);
     vfo_set_tone_instant(1);
-    //vfo_set_cw_key(false);
     vfo_set_cw_key(true);
     Serial.println(F("[RTTY_ГОТОВ]: Аппаратный VFO RTTY инициализирован!"));
+    Serial.print(F("            F_MARK : ")); Serial.print(mark_hz); Serial.println(F(" Hz"));
+    Serial.print(F("            F_SPACE: ")); Serial.print(space_hz); Serial.println(F(" Hz"));
   }
 }
+
 
 // Передача бита на чип Si5351 (8-байтный пакет + команда старта)
 static void send_rtty_bit(TransmitterState state) {

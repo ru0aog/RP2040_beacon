@@ -51,6 +51,7 @@ extern uint8_t  rtc_sec;
 extern uint16_t rtc_year;
 extern uint8_t  rtc_month;
 extern uint8_t  rtc_day;
+extern uint8_t  rtc_dotw; // Изолированная переменная дня недели (1=Пн ... 7=Вс)
 
 extern uint8_t device_DS[5];
 // Тип активного источника времени (реализация в scheduler.cpp)  

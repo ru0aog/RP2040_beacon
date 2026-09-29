@@ -884,7 +884,7 @@ void I2C_Scanner() {
 
   // Записываем результат и обновляем файл на диске
   save_hardware_settings_to_file(results);
-  Serial.print(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
+  Serial.println(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
 }
 
 

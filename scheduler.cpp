@@ -71,6 +71,8 @@ RtcType activeRtc = RTC_NONE;
 
 datetime_t currentTime;
 
+
+
 // Глобальные переменные для хранения текущего времени
 uint8_t  rtc_hour  = 0;
 uint8_t  rtc_min   = 0;
@@ -78,6 +80,8 @@ uint8_t  rtc_sec   = 0;
 uint16_t rtc_year  = 0;
 uint8_t  rtc_month = 0;
 uint8_t  rtc_day   = 0;
+// Выделение памяти под независимый день недели
+uint8_t rtc_dotw = 1;
 
 // Переменные для предотвращения повторных запусков в одну и ту же минуту
 static uint32_t last_ifkp_minute = 9999; 
@@ -244,37 +248,34 @@ void update_scheduler() {
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     
     pWire->beginTransmission(RTC_I2C_ADDRESS);
-    pWire->write(0x00); // Стартуем с регистра 0х00 (Секунды)
+    pWire->write(0x00); 
     pWire->endTransmission();
     
-    pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)7); // Запрашиваем 7 байт времени
+    pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)7); 
     if (pWire->available() >= 7) {
       rtc_sec   = bcd2bin(pWire->read() & 0x7F);
       rtc_min   = bcd2bin(pWire->read());
-      rtc_hour  = bcd2bin(pWire->read() & 0x3F); // 24-часовой формат
-      
-      // ПРАВКА: Читаем BCD регистр дня недели и сохраняем его в таблицу приборов
-      device_DS[4] = bcd2bin(pWire->read() & 0x07); 
-      
+      rtc_hour  = bcd2bin(pWire->read() & 0x3F); 
       rtc_day   = bcd2bin(pWire->read());
+      rtc_dotw  = bcd2bin(pWire->read() & 0x07); 
       rtc_month = bcd2bin(pWire->read() & 0x1F);
       rtc_year  = bcd2bin(pWire->read()) + 2000;
     }
   }
   else {
     if (rtc_get_datetime(&currentTime)) {
-      rtc_year  = currentTime.year;
-      rtc_month = currentTime.month;
-      rtc_day   = currentTime.day;
-      rtc_hour  = currentTime.hour;
-      rtc_min   = currentTime.min;
-      rtc_sec   = currentTime.sec;
-      // В Pico SDK дни считаются от 0 (вс) до 6 (сб), сдвигаем к нашей логике 1 (пн) .. 7 (вс)
       uint8_t dotw = currentTime.dotw;
-      device_DS[4] = (dotw == 0) ? 7 : dotw; // Сохраним день недели в неиспользуемый байт адреса таблицы
+      rtc_sec   = currentTime.sec;
+      rtc_min   = currentTime.min;
+      rtc_hour  = currentTime.hour;
+      rtc_day   = currentTime.day;
+      rtc_dotw = (dotw == 0) ? 7 : dotw;
+      rtc_month = currentTime.month;
+      rtc_year  = currentTime.year;
     }
   }
 }
+
 
 void print_current_time() {
   update_scheduler();
@@ -306,67 +307,46 @@ String get_current_date() {
 }
 
 // Автоматический парсер текстового расписания
-// ПРАВКА: Интеллектуальная проверка времени запуска с защитой от наложения планов
-// ПРАВКА: Новая интеллектуальная проверка времени старта задач с маской дней, периодов и защитой от наложения
+// ПРАВКА: Новая высокоскоростная побитовая проверка расписания с защитой от наложений
 bool is_time_to_transmit(uint8_t mode) {
-  extern bool is_transmitting;         // Глобальный флаг занятости передатчика из главного INO-файла
-  uint8_t current_dotw = device_DS[4]; // Считанный из регистра 0x03 часов день недели (1..7)
-
-  // Переводим текущее системное время в абсолютные минуты от начала суток
+  extern bool is_transmitting;         
   uint32_t cur_abs_min = rtc_hour * 60 + rtc_min;
 
-  // Охранная маска минут для исключения повторного запуска задачи внутри одной и той же минуты
   if (mode == 0 && cur_abs_min == last_ifkp_minute) return false;
   if (mode == 1 && cur_abs_min == last_rtty_minute) return false;
   if (mode == 2 && cur_abs_min == last_cw_minute)   return false;
 
-  // Бежим по всей считанной из INFO.TXT таблице расписания в ОЗУ
   for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {
     TaskItem& task = beacon_schedule[i];
     if (!task.active || task.mode != mode) continue;
 
-    // 1. Проверяем маску разрешенных дней недели (например, Пн=1, Ср=3, Пт=5 -> "135")
+    // 1. ИСПРАВЛЕНО: Сверхбыстрая проверка дня недели через наложение битовой маски
     if (task.days > 0) {
-      String days_str = String(task.days);
-      if (days_str.indexOf(String(current_dotw)) == -1) continue; // Сегодня не день этой задачи
+      if ((task.days & (1 << rtc_dotw)) == 0) continue; // Если бит текущего дня не взведен — пропускаем
     }
 
-    // Переводим временные границы задачи в абсолютные минуты от начала суток
     uint32_t start_abs = task.start_hour * 60 + task.start_min;
     uint32_t end_abs   = task.end_hour * 60 + task.end_min;
 
-    // 2. Логика проверки временной сетки запуска
     if (task.interval_min == 0) {
-      // Тип 1: Одиночная задача (Fixed Time)
       if (cur_abs_min == start_abs) {
-        
-        // КРИТИЧЕСКАЯ ЗАЩИТА: Если предыдущий сеанс еще вещает в эфире — ПЛАН ИГНОРИРУЕТСЯ
         if (is_transmitting) {
-          Serial.println(F("[Планировщик] ВНИМАНИЕ: Наложение интервалов! Одиночная задача пропущена."));
+          Serial.println(F("[Планировщик] ВНИМАНИЕ: Наложение интервалов! Задача пропущена."));
           return false;
         }
-        
-        // Фиксируем запуск, чтобы предотвратить дребезг на этой минуте
         if (mode == 0) last_ifkp_minute = cur_abs_min;
         if (mode == 1) last_rtty_minute = cur_abs_min;
         if (mode == 2) last_cw_minute   = cur_abs_min;
         return true;
       }
     } else {
-      // Тип 2: Периодическая циклическая задача (Interval Time)
       if (cur_abs_min >= start_abs && cur_abs_min <= end_abs) {
         uint32_t elapsed = cur_abs_min - start_abs;
-        
-        // Проверяем, кратно ли прошедшее со старта время заданному интервалу (шагу)
         if (elapsed % task.interval_min == 0) {
-          
-          // КРИТИЧЕСКАЯ ЗАЩИТА: Если предыдущий сеанс связи затянулся и залез на новый шаг — ИГНОРИРУЕМ
           if (is_transmitting) {
-            Serial.println(F("[Планировщик] ВНИМАНИЕ: Предыдущий сеанс не успел завершиться! Цикл пропущен."));
+            Serial.println(F("[Планировщик] ВНИМАНИЕ: Предыдущий сеанс занял шину! Шаг пропущен."));
             return false;
           }
-
-          // Фиксируем запуск
           if (mode == 0) last_ifkp_minute = cur_abs_min;
           if (mode == 1) last_rtty_minute = cur_abs_min;
           if (mode == 2) last_cw_minute   = cur_abs_min;
@@ -377,6 +357,7 @@ bool is_time_to_transmit(uint8_t mode) {
   }
   return false;
 }
+
 
 
 

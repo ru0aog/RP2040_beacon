@@ -123,17 +123,19 @@ bool is_pin_excluded_from_scan(int pin);
 #define MODE_IFKP  2
 #define MODE_SEQ   3 // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
 
+// Структура задачи с использованием битовой маски под дни недели (1 байт)
 struct TaskItem {
-    uint8_t  days;         // Маска дней (0=Каждый день, или биты: 1=Пн, 2=Вт ... 7=Вс)
-    uint8_t  start_hour;   // Час старта (0..23)
-    uint8_t  start_min;    // Минута старта (0..59)
-    uint8_t  end_hour;     // Час окончания периода
-    uint8_t  end_min;      // Минута окончания периода
-    uint8_t  interval_min; // Интервал в минутах (0 = Одиночный запуск)
-    uint32_t freq_hz;      // Рабочая частота в Гц
-    uint8_t  mode;         // Мода (MODE_CW, MODE_RTTY, MODE_IFKP, MODE_SEQ)
-    bool     active;       // Флаг заполненности слота
+    uint8_t  days;         // Битовая маска дней: 0=Каждый день, бит 1=Пн, бит 2=Вт ... бит 7=Вс
+    uint8_t  start_hour;   
+    uint8_t  start_min;    
+    uint8_t  end_hour;     
+    uint8_t  end_min;      
+    uint8_t  interval_min; 
+    uint32_t freq_hz;      
+    uint8_t  mode;         
+    bool     active;       
 };
+
 
 #define MAX_SCHEDULE_TASKS 32
 extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];

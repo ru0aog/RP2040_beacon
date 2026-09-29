@@ -449,7 +449,18 @@ void read_file_to_variable() {
             s_days.trim(); s_time.trim(); s_freq.trim(); s_mode.trim();
 
             TaskItem& task = beacon_schedule[task_counter];
-            task.days = (s_days.equals("0")) ? 0 : s_days.toInt();
+            task.days = 0; // Изначально обнуляем маску
+            
+            if (!s_days.equals("0")) {
+              // Посимвольно разбираем строку (например, "12345") и взводим биты
+              for (size_t ch = 0; ch < s_days.length(); ch++) {
+                char d_char = s_days[ch];
+                if (d_char >= '1' && d_char <= '7') {
+                  uint8_t day_num = d_char - '0';
+                  task.days |= (1 << day_num); // Взводим нужный бит (1..7)
+                }
+              }
+            }
             task.freq_hz = strtoul(s_freq.c_str(), NULL, 10);
 
             if (s_mode.equalsIgnoreCase("CW"))        task.mode = MODE_CW;

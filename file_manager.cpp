@@ -169,9 +169,9 @@ static void set_fat12_entry(uint32_t fat_start_bytes, uint16_t cluster, uint16_t
 
 
 
-// Внутренняя функция генерации расширенной структуры диска FAT12 под 3 файла
+// Генерация диска FAT12 с 48 записями каталога и сдвигом данных на Сектор 5
 static void create_default_fat_with_info_file() {
-  Serial.println("[Система] Генерируем расширенный диск FAT12 (INFO, SET, LOG)...");
+  Serial.println("[Система] Генерируем расширенный диск FAT12 (Каталог: 48 записей)...");
   memset(ram_disk_buffer, 0, DISK_SIZE_BYTES);
 
   // СЕКТОР 0: Загрузочный сектор (геометрия)
@@ -183,7 +183,7 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[14] = 1;                                     
   ram_disk_buffer[15] = 0;
   ram_disk_buffer[16] = 1;                                     
-  ram_disk_buffer[17] = 48; // Увеличено количество записей в каталоге до 48 (для 3 файлов с запасом)                         
+  ram_disk_buffer[17] = 48; // 48 записей каталога = 3 сектора (Секторы 2, 3, 4)                        
   ram_disk_buffer[18] = 0;
   ram_disk_buffer[19] = (uint8_t)(SECTOR_COUNT & 0xFF);        
   ram_disk_buffer[20] = (uint8_t)((SECTOR_COUNT >> 8) & 0xFF); 
@@ -192,43 +192,49 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[23] = 0;
   ram_disk_buffer[24] = 0x01; ram_disk_buffer[25] = 0x00;     
   ram_disk_buffer[26] = 0x01; ram_disk_buffer[27] = 0x00;     
+  ram_disk_buffer[28] = 0x00; ram_disk_buffer[29] = 0x00;     
+  ram_disk_buffer[30] = 0x00; ram_disk_buffer[31] = 0x00;     
+  ram_disk_buffer[32] = 0x00; ram_disk_buffer[33] = 0x00;     
+  ram_disk_buffer[34] = 0x00; ram_disk_buffer[35] = 0x00;
   ram_disk_buffer[36] = 0x80;                                  
+  ram_disk_buffer[37] = 0x00;                                  
   ram_disk_buffer[38] = 0x29;                                  
   ram_disk_buffer[39] = 0xDE; ram_disk_buffer[40] = 0xAD; ram_disk_buffer[41] = 0xBE; ram_disk_buffer[42] = 0xEF;
   memcpy(&ram_disk_buffer[43], "PICO DRIVE ", 11);               
   memcpy(&ram_disk_buffer[54], "FAT12   ", 8);                 
   ram_disk_buffer[510] = 0x55; ram_disk_buffer[511] = 0xAA;
 
-  // СЕКТОР 1: Автоматический расчет динамической таблицы FAT12
+  // СЕКТОР 1: Автоматический расчет таблицы FAT12
   uint32_t fat_offset = SECTOR_SIZE * 1;
   ram_disk_buffer[fat_offset + 0] = 0xF8; 
   ram_disk_buffer[fat_offset + 1] = 0xFF; 
   ram_disk_buffer[fat_offset + 2] = 0xFF; 
 
-  // Динамически связываем цепочку кластеров для INFO.TXT (кластеры 2..21)
+  // Динамически связываем цепочку кластеров для INFO.TXT
   for (uint16_t i = INFO_FIRST_CLUSTER; i < (INFO_FIRST_CLUSTER + INFO_CLUSTERS - 1); i++) {
     set_fat12_entry(fat_offset, i, i + 1); 
   }
   set_fat12_entry(fat_offset, (INFO_FIRST_CLUSTER + INFO_CLUSTERS - 1), 0xFFF); 
 
-  // Динамически связываем цепочку кластеров для SET.TXT (кластеры 22..41)
+  // Динамически связываем цепочку кластеров для SET.TXT
   for (uint16_t i = SET_FIRST_CLUSTER; i < (SET_FIRST_CLUSTER + SET_CLUSTERS - 1); i++) {
     set_fat12_entry(fat_offset, i, i + 1); 
   }
   set_fat12_entry(fat_offset, (SET_FIRST_CLUSTER + SET_CLUSTERS - 1), 0xFFF); 
 
-  // Динамически связываем цепочку кластеров для LOG.TXT (кластеры 42..241)
+  // Динамически связываем цепочку кластеров для LOG.TXT
   for (uint16_t i = LOG_FIRST_CLUSTER; i < (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1); i++) {
     set_fat12_entry(fat_offset, i, i + 1);
   }
   set_fat12_entry(fat_offset, (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1), 0xFFF); 
 
-  // СЕКТОР 2: Корневой каталог (Записи по 32 байта)
+  // СЕКТОР 2: Корневой каталог (3 сектора, файлы лежат в начале сектора 2)
   uint32_t root_offset = SECTOR_SIZE * 2;
 
-  // 1. Запись для INFO.TXT (Смещение 0)
+  // 1. Запись для INFO.TXT
   memcpy(&ram_disk_buffer[root_offset + 0], "INFO    ", 8);  
   memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       
+  ram_disk_buffer[root_offset + 11] = 0x00;                 
   ram_disk_buffer[root_offset + 26] = INFO_FIRST_CLUSTER;    
 
   const char* default_info_content = 
@@ -246,6 +252,7 @@ static void create_default_fat_with_info_file() {
   uint32_t set_entry_offset = root_offset + 32;
   memcpy(&ram_disk_buffer[set_entry_offset + 0], "SET     ", 8);  
   memcpy(&ram_disk_buffer[set_entry_offset + 8], "TXT", 3);       
+  ram_disk_buffer[set_entry_offset + 11] = 0x00;                 
   ram_disk_buffer[set_entry_offset + 26] = SET_FIRST_CLUSTER;    
 
   const char* default_set_content = 
@@ -277,6 +284,7 @@ static void create_default_fat_with_info_file() {
   uint32_t log_entry_offset = root_offset + 64;
   memcpy(&ram_disk_buffer[log_entry_offset + 0], "LOG     ", 8); 
   memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      
+  ram_disk_buffer[log_entry_offset + 11] = 0x00;                
   ram_disk_buffer[log_entry_offset + 26] = LOG_FIRST_CLUSTER;   
 
   const char* default_log_content = "=== SYSTEM LOG START ===\r\nBeacon ПО запустилось корректно.\r\n";
@@ -284,22 +292,23 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(log_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((log_len >> 8) & 0xFF);
 
-  // ЗАПИСЬ ДАННЫХ В СЕКТОРЫ ОБЛАСТИ ДАННЫХ RAM-ДИСКА
-  // Сектор 3: Данные INFO.TXT
-  uint32_t info_data_offset = SECTOR_SIZE * 3;
+  // === ВЫЧИСЛЕНИЕ ФИЗИЧЕСКИХ СМЕЩЕНИЙ ОБЛАСТИ ДАННЫХ (ОТ СЕКТОРА 5) ===
+  // Сектор 5: Данные INFO.TXT (1 бут + 1 фат + 3 каталог = 5)
+  uint32_t info_data_offset = SECTOR_SIZE * 5;
   memcpy(&ram_disk_buffer[info_data_offset], default_info_content, info_len);
 
-  // Сектор 23: Данные SET.TXT (3 + INFO_CLUSTERS = 3 + 20 = 23)
-  uint32_t set_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS);
+  // Сектор 25: Данные SET.TXT (5 + 20)
+  uint32_t set_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS);
   memcpy(&ram_disk_buffer[set_data_offset], default_set_content, set_len);
 
-  // Сектор 43: Данные LOG.TXT (3 + INFO_CLUSTERS + SET_CLUSTERS = 3 + 20 + 20 = 43)
-  uint32_t log_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS + SET_CLUSTERS); 
+  // Сектор 45: Данные LOG.TXT (5 + 20 + 20)
+  uint32_t log_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS); 
   memcpy(&ram_disk_buffer[log_data_offset], default_log_content, log_len);
 
   save_ram_to_flash();
-  Serial.println("[Система] Структура диска обновлена: INFO (10Кб), SET (10Кб) и LOG (100Кб) готовы!");
+  Serial.println("[Система] Структура диска обновлена: INFO (10Кб), SET (10Кб) и LOG (100Кб) готовы на Секторе 5!");
 }
+
 
 
 
@@ -492,7 +501,10 @@ void init_file_manager() {
     uint8_t sig_low = *(const uint8_t*)(boot_sig_offset_abs);
     uint8_t sig_high = *(const uint8_t*)(boot_sig_offset_abs + 1);
 
-    if (checked_meta.magic == SLOT_MAGIC && sig_low == 0x55 && sig_high == 0xAA) {
+    // Дополнительная проверка: количество записей в каталоге (смещение 17 в BPB) должно быть равно 48
+    uint8_t root_entries_count = *(const uint8_t*)(flash_addr_abs + 17);
+
+    if (checked_meta.magic == SLOT_MAGIC && sig_low == 0x55 && sig_high == 0xAA && root_entries_count == 48) {
       // Находим слот с наибольшим номером версии (seq)
       if (checked_meta.seq >= current_max_seq) {
         current_max_seq = checked_meta.seq;
@@ -634,41 +646,36 @@ void update_info_config_from_console(String marker, String new_value) {
 // -------------------------------------------------------------------------
 // Функция очистки (стирания) файла LOG.TXT
 // -------------------------------------------------------------------------
+// ПРАВКА: Очистка лога на Секторе 45 БЕЗ передёргивания шины USB
 void log_file_clear() {
   uint32_t root_offset = SECTOR_SIZE * 2;         
-  uint32_t log_entry_offset = root_offset + 64;   // ПРАВКА: Теперь третья запись в FAT каталоге
-  uint32_t log_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS + SET_CLUSTERS); // ПРАВКА: Сектор 43
+  uint32_t log_entry_offset = root_offset + 64;   
+  uint32_t log_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS); // ИСПРАВЛЕНО: Сектор 45
 
-  // Стираем полностью все 100 секторов журнала в ОЗУ
   memset(&ram_disk_buffer[log_data_offset], 0, LOG_MAX_BYTES);
 
   const char* header = "=== ЖУРНАЛ РАБОТЫ МАЯКА ===\r\n";
   uint32_t header_len = strlen(header);
   memcpy(&ram_disk_buffer[log_data_offset], header, header_len);
 
-  // Запись полного 4-байтного размера файла для FAT
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(header_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((header_len >> 8) & 0xFF);
   ram_disk_buffer[log_entry_offset + 30] = 0x00;
   ram_disk_buffer[log_entry_offset + 31] = 0x00;
 
   save_ram_to_flash();
-  Serial.println("[Журнал]  Большой файл LOG.TXT успешно очищен.");
-
-  usb_msc.setUnitReady(false); 
-  delay(1500); 
-  usb_msc.setUnitReady(true);  
+  Serial.println("[Журнал] Большой файл LOG.TXT успешно очищен.");
 }
 
 // -------------------------------------------------------------------------
 // Функция дозаписи текстовой строки в конец файла LOG.TXT
 // -------------------------------------------------------------------------
+// ПРАВКА: Дозапись лога на Секторе 45 БЕЗ передёргивания шины USB
 void log_file_write_line(String message) {
-  uint32_t root_offset = SECTOR_SIZE * 2;         
-  uint32_t log_entry_offset = root_offset + 64;   // ПРАВКА: Теперь третья запись в FAT каталоге
-  uint32_t log_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS + SET_CLUSTERS); // ПРАВКА: Сектор 43
+  uint32_t root_offset = SECTOR_SIZE * 2;
+  uint32_t log_entry_offset = root_offset + 64;
+  uint32_t log_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS); // ИСПРАВЛЕНО: Сектор 45
 
-  // Чтение полного 4-байтного значения размера файла из дескриптора
   uint32_t current_size = ram_disk_buffer[log_entry_offset + 28] | 
                          (ram_disk_buffer[log_entry_offset + 29] << 8) |
                          (ram_disk_buffer[log_entry_offset + 30] << 16) |
@@ -677,9 +684,8 @@ void log_file_write_line(String message) {
   String formatted_msg = message + "\r\n";
   uint32_t msg_len = formatted_msg.length();
 
-  // Сравнение с новым лимитом в 50 Килобайт
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {
-    Serial.println("[Журнал]  Предупреждение: Лог 50 Кб заполнен! Автоматическая очистка...");
+    Serial.println("[Журнал] Предупреждение: Лог 100 Кб заполнен! Автоматическая очистка...");
     log_file_clear(); 
     current_size = ram_disk_buffer[log_entry_offset + 28] | (ram_disk_buffer[log_entry_offset + 29] << 8);
   }
@@ -688,19 +694,13 @@ void log_file_write_line(String message) {
   memcpy(write_pointer, formatted_msg.c_str(), msg_len);
 
   uint32_t new_size = current_size + msg_len;
-  // Обновление всех 4-х байт размера в оглавлении FAT
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(new_size & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((new_size >> 8) & 0xFF);
   ram_disk_buffer[log_entry_offset + 30] = (uint8_t)((new_size >> 16) & 0xFF);
   ram_disk_buffer[log_entry_offset + 31] = (uint8_t)((new_size >> 24) & 0xFF);
 
   save_ram_to_flash();
-  Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
-
-  usb_msc.setUnitReady(false); 
-  delay(1500); 
-  usb_msc.setUnitReady(true);  
-
+  Serial.print("[Журнал] Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 }
 
 
@@ -800,18 +800,17 @@ void read_hardware_settings() {
 }
 
 
-// ПРАВКА: Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
+// Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
+// Сохранение настроек железа на Сектор 25 БЕЗ циклического перезапуска USB-тома
 void save_hardware_settings_to_file(String scan_results) {
   uint32_t root_offset = SECTOR_SIZE * 2;
-  uint32_t set_entry_offset = root_offset + 32; // Смещение записи SET.TXT в корневом каталоге
-  uint32_t set_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS); // Начальный сектор данных файла (Сектор 23)
+  uint32_t set_entry_offset = root_offset + 32; 
+  uint32_t set_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS); // ИСПРАВЛЕНО: Сектор 25 (5 + 20)
 
-  // Вспомогательный лямбда-перевод числового пина в строку для конфигурации
   auto pin_to_str = [](int p) -> String {
     return (p == -1) ? "NC" : String(p);
   };
 
-  // Динамически воссоздаем текстовое тело файла со свежими данными
   String content = "";
   content.reserve(512);
   content += "=== ENGINEERING HARDWARE SETTINGS ===\r\n";
@@ -835,29 +834,20 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[EOF]";
 
   uint32_t total_len = content.length();
-  
-  // Защита от переполнения выделенного буфера в 10 КБ
   if (total_len >= SET_MAX_BYTES) {
     content = content.substring(0, SET_MAX_BYTES - 10) + "\r\n[EOF]";
     total_len = content.length();
   }
 
-  // Очищаем старые секторы файла в ОЗУ и записываем новые данные
   memset(&ram_disk_buffer[set_data_offset], 0, SET_MAX_BYTES);
   memcpy(&ram_disk_buffer[set_data_offset], content.c_str(), total_len);
 
-  // Пересчитываем и обновляем 4-байтный размер файла внутри оглавления FAT12
   ram_disk_buffer[set_entry_offset + 28] = (uint8_t)(total_len & 0xFF);
   ram_disk_buffer[set_entry_offset + 29] = (uint8_t)((total_len >> 8) & 0xFF);
   ram_disk_buffer[set_entry_offset + 30] = 0x00;
   ram_disk_buffer[set_entry_offset + 31] = 0x00;
 
-  // Сбрасываем обновлённую структуру диска во флеш-память (с Wear Leveling)
   save_ram_to_flash();
-
-  // Передёргиваем логический том TinyUSB, чтобы ПК мгновенно увидел изменения в SET.TXT
-  usb_msc.setUnitReady(false);
-  delay(1500);
-  usb_msc.setUnitReady(true);
+  // ИСПРАВЛЕНО: Строки usb_msc.setUnitReady убраны, чтобы исключить ложное мигание диска при автосохранении
 }
 

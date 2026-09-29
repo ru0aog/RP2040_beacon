@@ -73,6 +73,18 @@ String my_freq_ifkp_var  = "";
 uint32_t CW_DOT_TIME_MS  = 60;            // Время точки в мс (по умолчанию ~20 WPM)
 volatile uint32_t RTTY_BIT_TIME_US = 22000; // Время одного бита RTTY в мкс (по умолчанию 45.45 Бод)
 String my_FAT = "";
+// Физическое выделение памяти под инженерные переменные железа
+int pin_freq_out = 14;  // Значения по умолчанию, если теги не найдены
+int pin_amp_act  = 15;
+int subband_pins[4] = {2, 3, 4, 5};
+int pin_pwr_si   = -1;  // -1 означает NC (Не назначен / Not Connected)
+int pin_pwr_ds   = -1;
+int pin_pwr_bm   = -1;
+int pin_pwr_dl   = -1;
+String scan_exclude_list = "";
+String scan_result_data  = "";
+
+
 // Переменные трекинга текущего состояния Wear Leveling
 int32_t current_active_slot = -1;
 uint32_t current_max_seq = 0;
@@ -157,9 +169,9 @@ static void set_fat12_entry(uint32_t fat_start_bytes, uint16_t cluster, uint16_t
 
 
 
-// Внутренняя функция генерации FAT структуры по умолчанию (Совместимо с Windows 10/11)
+// Внутренняя функция генерации расширенной структуры диска FAT12 под 3 файла
 static void create_default_fat_with_info_file() {
-  Serial.println("[Система] Файлы отсутствуют. Генерируем расширенный диск FAT12...");
+  Serial.println("[Система] Генерируем расширенный диск FAT12 (INFO, SET, LOG)...");
   memset(ram_disk_buffer, 0, DISK_SIZE_BYTES);
 
   // СЕКТОР 0: Загрузочный сектор (геометрия)
@@ -171,7 +183,7 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[14] = 1;                                     
   ram_disk_buffer[15] = 0;
   ram_disk_buffer[16] = 1;                                     
-  ram_disk_buffer[17] = 16;                                    
+  ram_disk_buffer[17] = 48; // Увеличено количество записей в каталоге до 48 (для 3 файлов с запасом)                         
   ram_disk_buffer[18] = 0;
   ram_disk_buffer[19] = (uint8_t)(SECTOR_COUNT & 0xFF);        
   ram_disk_buffer[20] = (uint8_t)((SECTOR_COUNT >> 8) & 0xFF); 
@@ -180,12 +192,7 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[23] = 0;
   ram_disk_buffer[24] = 0x01; ram_disk_buffer[25] = 0x00;     
   ram_disk_buffer[26] = 0x01; ram_disk_buffer[27] = 0x00;     
-  ram_disk_buffer[28] = 0x00; ram_disk_buffer[29] = 0x00;     
-  ram_disk_buffer[30] = 0x00; ram_disk_buffer[31] = 0x00;     
-  ram_disk_buffer[32] = 0x00; ram_disk_buffer[33] = 0x00;     
-  ram_disk_buffer[34] = 0x00; ram_disk_buffer[35] = 0x00;
   ram_disk_buffer[36] = 0x80;                                  
-  ram_disk_buffer[37] = 0x00;                                  
   ram_disk_buffer[38] = 0x29;                                  
   ram_disk_buffer[39] = 0xDE; ram_disk_buffer[40] = 0xAD; ram_disk_buffer[41] = 0xBE; ram_disk_buffer[42] = 0xEF;
   memcpy(&ram_disk_buffer[43], "PICO DRIVE ", 11);               
@@ -198,76 +205,102 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[fat_offset + 1] = 0xFF; 
   ram_disk_buffer[fat_offset + 2] = 0xFF; 
 
-  // Динамически связываем цепочку кластеров для INFO.TXT
+  // Динамически связываем цепочку кластеров для INFO.TXT (кластеры 2..21)
   for (uint16_t i = INFO_FIRST_CLUSTER; i < (INFO_FIRST_CLUSTER + INFO_CLUSTERS - 1); i++) {
     set_fat12_entry(fat_offset, i, i + 1); 
   }
   set_fat12_entry(fat_offset, (INFO_FIRST_CLUSTER + INFO_CLUSTERS - 1), 0xFFF); 
 
-  // Динамически связываем цепочку кластеров для LOG.TXT
+  // Динамически связываем цепочку кластеров для SET.TXT (кластеры 22..41)
+  for (uint16_t i = SET_FIRST_CLUSTER; i < (SET_FIRST_CLUSTER + SET_CLUSTERS - 1); i++) {
+    set_fat12_entry(fat_offset, i, i + 1); 
+  }
+  set_fat12_entry(fat_offset, (SET_FIRST_CLUSTER + SET_CLUSTERS - 1), 0xFFF); 
+
+  // Динамически связываем цепочку кластеров для LOG.TXT (кластеры 42..241)
   for (uint16_t i = LOG_FIRST_CLUSTER; i < (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1); i++) {
     set_fat12_entry(fat_offset, i, i + 1);
   }
   set_fat12_entry(fat_offset, (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1), 0xFFF); 
 
-  // СЕКТОР 2: Корневой каталог
+  // СЕКТОР 2: Корневой каталог (Записи по 32 байта)
   uint32_t root_offset = SECTOR_SIZE * 2;
 
-  // Запись файла INFO.TXT
+  // 1. Запись для INFO.TXT (Смещение 0)
   memcpy(&ram_disk_buffer[root_offset + 0], "INFO    ", 8);  
   memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       
-  ram_disk_buffer[root_offset + 11] = 0x00;                 
   ram_disk_buffer[root_offset + 26] = INFO_FIRST_CLUSTER;    
-  ram_disk_buffer[root_offset + 27] = 0x00;                 
 
-  // === БЛОК ДАННЫХ ДЕФОЛТНОГО КОНФИГА ===
-  const char* default_content = 
-    "[CALL]=RU0AOG\r\n"
-    "[QTH]=NO66FC\r\n"
-    "[TEXT]=TESTING BEACON\r\n"
-    "\r\n"
-    "[START_CW  ]=15:15,17:15,19:15\r\n"
-    "[START_RTTY]=15:18,17:18,19:18\r\n"
-    "[START_IFKP]=15:20,17:20,19:20\r\n"
-    "\r\n"
-    "[CW_WPM    ]=20\r\n"
-    "[RTTY_SPEED]=45\r\n"
-    "\r\n"
-    "[FREQ_CW   ]=3601500\r\n"
-    "[RTTY_MARK ]=3601585\r\n"
-    "[RTTY_SHIFT]=170\r\n"
-    "[RTTY_INVERT]=0\r\n"
-    "[FREQ_IFKP ]=3601307\r\n"
+  const char* default_info_content = 
+    "[CALL]=RU0AOG\r\n[QTH]=NO66FC\r\n[TEXT]=TESTING BEACON\r\n\r\n"
+    "[START_CW  ]=15:15,17:15\r\n[START_RTTY]=15:18,17:18\r\n[START_IFKP]=15:20,17:20\r\n\r\n"
+    "[CW_WPM    ]=20\r\n[RTTY_SPEED]=45\r\n\r\n"
+    "[FREQ_CW   ]=3601500\r\n[RTTY_MARK ]=3601585\r\n[RTTY_SHIFT]=170\r\n"
+    "[RTTY_INVERT]=0\r\n[FREQ_IFKP ]=3601307\r\n[EOF]";
+  
+  uint32_t info_len = strlen(default_info_content);
+  ram_disk_buffer[root_offset + 28] = (uint8_t)(info_len & 0xFF);
+  ram_disk_buffer[root_offset + 29] = (uint8_t)((info_len >> 8) & 0xFF);
+
+  // 2. Запись для SET.TXT (Смещение 32)
+  uint32_t set_entry_offset = root_offset + 32;
+  memcpy(&ram_disk_buffer[set_entry_offset + 0], "SET     ", 8);  
+  memcpy(&ram_disk_buffer[set_entry_offset + 8], "TXT", 3);       
+  ram_disk_buffer[set_entry_offset + 26] = SET_FIRST_CLUSTER;    
+
+  const char* default_set_content = 
+    "=== ENGINEERING HARDWARE SETTINGS ===\r\n"
+    "[PIN_FREQ_OUT ]=14\r\n"
+    "[PIN_AMP_ACT  ]=15\r\n\r\n"
+    "// Пины кода поддиапазона (4 пина)\r\n"
+    "[SUBBAND_PIN_0]=2\r\n"
+    "[SUBBAND_PIN_1]=3\r\n"
+    "[SUBBAND_PIN_2]=4\r\n"
+    "[SUBBAND_PIN_3]=5\r\n\r\n"
+    "// Пины питания шины (NC если не назначены)\r\n"
+    "[BUS_PWR_SI   ]=6\r\n"
+    "[BUS_PWR_DS   ]=7\r\n"
+    "[BUS_PWR_BM   ]=NC\r\n"
+    "[BUS_PWR_DL   ]=NC\r\n\r\n"
+    "// Исключения из сканирования шин\r\n"
+    "[SCAN_EXCLUDE ]=14,15\r\n\r\n"
+    "=== BUS SCAN DATA ===\r\n"
+    "[SCAN_RESULT  ]=No scan performed yet.\r\n"
+    "[LAST_SCAN_TS ]=0\r\n"
     "[EOF]";
   
-  uint32_t text_len = strlen(default_content);
-  ram_disk_buffer[root_offset + 28] = (uint8_t)(text_len & 0xFF);
-  ram_disk_buffer[root_offset + 29] = (uint8_t)((text_len >> 8) & 0xFF);
+  uint32_t set_len = strlen(default_set_content);
+  ram_disk_buffer[set_entry_offset + 28] = (uint8_t)(set_len & 0xFF);
+  ram_disk_buffer[set_entry_offset + 29] = (uint8_t)((set_len >> 8) & 0xFF);
 
-  // Запись файла LOG.TXT (Смещение 32)
-  uint32_t log_entry_offset = root_offset + 32;
+  // 3. Запись для LOG.TXT (Смещение 64)
+  uint32_t log_entry_offset = root_offset + 64;
   memcpy(&ram_disk_buffer[log_entry_offset + 0], "LOG     ", 8); 
   memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      
-  ram_disk_buffer[log_entry_offset + 11] = 0x00;                
-  ram_disk_buffer[log_entry_offset + 26] = LOG_FIRST_CLUSTER;   // Указывает на кластер 22
-  ram_disk_buffer[log_entry_offset + 27] = 0x00;
+  ram_disk_buffer[log_entry_offset + 26] = LOG_FIRST_CLUSTER;   
 
-  const char* default_log_content = "=== SYSTEM LOG START ===\r\nBeacon ПО v2.10.3 запустилось корректно.\r\n";
+  const char* default_log_content = "=== SYSTEM LOG START ===\r\nBeacon ПО запустилось корректно.\r\n";
   uint32_t log_len = strlen(default_log_content);
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(log_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((log_len >> 8) & 0xFF);
 
-  // СЕКТОР 3: Область данных INFO.TXT
-  uint32_t data_offset = SECTOR_SIZE * 3;
-  memcpy(&ram_disk_buffer[data_offset], default_content, text_len);
+  // ЗАПИСЬ ДАННЫХ В СЕКТОРЫ ОБЛАСТИ ДАННЫХ RAM-ДИСКА
+  // Сектор 3: Данные INFO.TXT
+  uint32_t info_data_offset = SECTOR_SIZE * 3;
+  memcpy(&ram_disk_buffer[info_data_offset], default_info_content, info_len);
 
-  // СЕКТОР 23: Область данных LOG.TXT (1 + 1 + 1 + 20)
-  uint32_t log_data_offset = SECTOR_SIZE * (1 + 1 + 1 + INFO_CLUSTERS); 
+  // Сектор 23: Данные SET.TXT (3 + INFO_CLUSTERS = 3 + 20 = 23)
+  uint32_t set_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS);
+  memcpy(&ram_disk_buffer[set_data_offset], default_set_content, set_len);
+
+  // Сектор 43: Данные LOG.TXT (3 + INFO_CLUSTERS + SET_CLUSTERS = 3 + 20 + 20 = 43)
+  uint32_t log_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS + SET_CLUSTERS); 
   memcpy(&ram_disk_buffer[log_data_offset], default_log_content, log_len);
 
   save_ram_to_flash();
-  Serial.println("[Система] Структура диска обновлена: INFO (10Кб) и LOG (50Кб) готовы!");
+  Serial.println("[Система] Структура диска обновлена: INFO (10Кб), SET (10Кб) и LOG (100Кб) готовы!");
 }
+
 
 
 
@@ -486,6 +519,7 @@ void init_file_manager() {
   usb_msc.begin();
   usb_msc.setUnitReady(true);
   read_file_to_variable();
+  read_hardware_settings(); // Инициализация пинов железа при старте
   Serial.flush();                
 }
 
@@ -499,6 +533,7 @@ void check_and_handle_pc_changes() {
     
     save_ram_to_flash();
     read_file_to_variable();
+    read_hardware_settings(); // Перечитываем пины, если оператор изменил SET.TXT
 
     usb_msc.setUnitReady(false); 
     delay(1500);                  
@@ -601,8 +636,8 @@ void update_info_config_from_console(String marker, String new_value) {
 // -------------------------------------------------------------------------
 void log_file_clear() {
   uint32_t root_offset = SECTOR_SIZE * 2;         
-  uint32_t log_entry_offset = root_offset + 32;   
-  uint32_t log_data_offset = SECTOR_SIZE * (1 + 1 + 1 + INFO_CLUSTERS); // Автовычисление: Сектор 23
+  uint32_t log_entry_offset = root_offset + 64;   // ПРАВКА: Теперь третья запись в FAT каталоге
+  uint32_t log_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS + SET_CLUSTERS); // ПРАВКА: Сектор 43
 
   // Стираем полностью все 100 секторов журнала в ОЗУ
   memset(&ram_disk_buffer[log_data_offset], 0, LOG_MAX_BYTES);
@@ -618,7 +653,7 @@ void log_file_clear() {
   ram_disk_buffer[log_entry_offset + 31] = 0x00;
 
   save_ram_to_flash();
-  Serial.println("[Журнал] Большой файл LOG.TXT успешно очищен.");
+  Serial.println("[Журнал]  Большой файл LOG.TXT успешно очищен.");
 
   usb_msc.setUnitReady(false); 
   delay(1500); 
@@ -629,9 +664,9 @@ void log_file_clear() {
 // Функция дозаписи текстовой строки в конец файла LOG.TXT
 // -------------------------------------------------------------------------
 void log_file_write_line(String message) {
-  uint32_t root_offset = SECTOR_SIZE * 2;
-  uint32_t log_entry_offset = root_offset + 32;
-  uint32_t log_data_offset = SECTOR_SIZE * (1 + 1 + 1 + INFO_CLUSTERS); // Сектор 23
+  uint32_t root_offset = SECTOR_SIZE * 2;         
+  uint32_t log_entry_offset = root_offset + 64;   // ПРАВКА: Теперь третья запись в FAT каталоге
+  uint32_t log_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS + SET_CLUSTERS); // ПРАВКА: Сектор 43
 
   // Чтение полного 4-байтного значения размера файла из дескриптора
   uint32_t current_size = ram_disk_buffer[log_entry_offset + 28] | 
@@ -644,7 +679,7 @@ void log_file_write_line(String message) {
 
   // Сравнение с новым лимитом в 50 Килобайт
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {
-    Serial.println("[Журнал] Предупреждение: Лог 50 Кб заполнен! Автоматическая очистка...");
+    Serial.println("[Журнал]  Предупреждение: Лог 50 Кб заполнен! Автоматическая очистка...");
     log_file_clear(); 
     current_size = ram_disk_buffer[log_entry_offset + 28] | (ram_disk_buffer[log_entry_offset + 29] << 8);
   }
@@ -660,7 +695,7 @@ void log_file_write_line(String message) {
   ram_disk_buffer[log_entry_offset + 31] = (uint8_t)((new_size >> 24) & 0xFF);
 
   save_ram_to_flash();
-  Serial.print("[Журнал] Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
+  Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
   usb_msc.setUnitReady(false); 
   delay(1500); 
@@ -669,4 +704,160 @@ void log_file_write_line(String message) {
 }
 
 
+
+// Вспомогательный инлайн для обработки значений пинов (парсит числа или возвращает -1 для NC)
+static inline int parse_pin_value(const String& val) {
+  String tmp = val;
+  tmp.trim();
+  if (tmp.equalsIgnoreCase("NC") || tmp.length() == 0) return -1;
+  return tmp.toInt();
+}
+
+// ПРАВКА: Функция побайтового разбора маркеров файла SET.TXT
+void read_hardware_settings() {
+  flash_flush_cache();
+  
+  // Временные строки для буферизации значений из парсера
+  String s_freq_out = "", s_amp_act = "";
+  String s_subband[4] = {"", "", "", ""};
+  String s_pwr_si = "", s_pwr_ds = "", s_pwr_bm = "", s_pwr_dl = "";
+  scan_exclude_list = "";
+  scan_result_data  = "";
+
+  for (uint32_t i = 0; i < DISK_SIZE_BYTES - 15; i++) {
+    if (ram_disk_buffer[i] == '[') {
+      int32_t start_idx = -1;
+      String* target_str = nullptr;
+
+      // Посимвольное сравнение ключевых маркеров файла SET.TXT
+      if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_FREQ_OUT ", 12) == 0) {
+        start_idx = i + 14; target_str = &s_freq_out;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_AMP_ACT  ", 12) == 0) {
+        start_idx = i + 14; target_str = &s_amp_act;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_0", 13) == 0) {
+        start_idx = i + 15; target_str = &s_subband[0];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_1", 13) == 0) {
+        start_idx = i + 15; target_str = &s_subband[1];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_2", 13) == 0) {
+        start_idx = i + 15; target_str = &s_subband[2];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_3", 13) == 0) {
+        start_idx = i + 15; target_str = &s_subband[3];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_SI   ", 12) == 0) {
+        start_idx = i + 14; target_str = &s_pwr_si;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DS   ", 12) == 0) {
+        start_idx = i + 14; target_str = &s_pwr_ds;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_BM   ", 12) == 0) {
+        start_idx = i + 14; target_str = &s_pwr_bm;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DL   ", 12) == 0) {
+        start_idx = i + 14; target_str = &s_pwr_dl;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE ", 12) == 0) {
+        start_idx = i + 14; target_str = &scan_exclude_list;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_RESULT  ", 12) == 0) {
+        start_idx = i + 14; target_str = &scan_result_data;
+      }
+
+      // Если маркер обнаружен, вытаскиваем его значение до конца строки
+      if (start_idx != -1 && target_str != nullptr) {
+        target_str->reserve(64);
+        if (ram_disk_buffer[start_idx] == '=') start_idx++;
+
+        for (uint32_t j = start_idx; j < DISK_SIZE_BYTES; j++) {
+          char c = (char)ram_disk_buffer[j];
+          if (c == '\n' || c == '\r' || c == '[') {
+            i = j - 1;
+            break;
+          }
+          if (c >= 32) *target_str += c;
+        }
+        target_str->trim();
+      }
+    }
+  }
+
+  // Конвертируем считанные строки в аппаратные int-переменные
+  if (s_freq_out.length() > 0) pin_freq_out = parse_pin_value(s_freq_out);
+  if (s_amp_act.length()  > 0) pin_amp_act  = parse_pin_value(s_amp_act);
+  
+  for (int k = 0; k < 4; k++) {
+    if (s_subband[k].length() > 0) subband_pins[k] = parse_pin_value(s_subband[k]);
+  }
+  
+  if (s_pwr_si.length() > 0) pin_pwr_si = parse_pin_value(s_pwr_si);
+  if (s_pwr_ds.length() > 0) pin_pwr_ds = parse_pin_value(s_pwr_ds);
+  if (s_pwr_bm.length() > 0) pin_pwr_bm = parse_pin_value(s_pwr_bm);
+  if (s_pwr_dl.length() > 0) pin_pwr_dl = parse_pin_value(s_pwr_dl);
+}
+
+
+// ПРАВКА: Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
+void save_hardware_settings_to_file(String scan_results) {
+  uint32_t root_offset = SECTOR_SIZE * 2;
+  uint32_t set_entry_offset = root_offset + 32; // Смещение записи SET.TXT в корневом каталоге
+  uint32_t set_data_offset = SECTOR_SIZE * (3 + INFO_CLUSTERS); // Начальный сектор данных файла (Сектор 23)
+
+  // Вспомогательный лямбда-перевод числового пина в строку для конфигурации
+  auto pin_to_str = [](int p) -> String {
+    return (p == -1) ? "NC" : String(p);
+  };
+
+  // Динамически воссоздаем текстовое тело файла со свежими данными
+  String content = "";
+  content.reserve(512);
+  content += "=== ENGINEERING HARDWARE SETTINGS ===\r\n";
+  content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
+  content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
+  content += "// Пины кода поддиапазона (4 пина)\r\n";
+  content += "[SUBBAND_PIN_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
+  content += "[SUBBAND_PIN_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
+  content += "[SUBBAND_PIN_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
+  content += "[SUBBAND_PIN_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
+  content += "// Пины питания шины (NC если не назначены)\r\n";
+  content += "[BUS_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
+  content += "[BUS_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
+  content += "[BUS_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
+  content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
+  content += "// Исключения из сканирования шин\r\n";
+  content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
+  content += "=== BUS SCAN DATA ===\r\n";
+  content += "[SCAN_RESULT  ]=" + scan_results + "\r\n";
+  content += "[LAST_SCAN_TS ]=" + String(millis() / 1000) + "\r\n";
+  content += "[EOF]";
+
+  uint32_t total_len = content.length();
+  
+  // Защита от переполнения выделенного буфера в 10 КБ
+  if (total_len >= SET_MAX_BYTES) {
+    content = content.substring(0, SET_MAX_BYTES - 10) + "\r\n[EOF]";
+    total_len = content.length();
+  }
+
+  // Очищаем старые секторы файла в ОЗУ и записываем новые данные
+  memset(&ram_disk_buffer[set_data_offset], 0, SET_MAX_BYTES);
+  memcpy(&ram_disk_buffer[set_data_offset], content.c_str(), total_len);
+
+  // Пересчитываем и обновляем 4-байтный размер файла внутри оглавления FAT12
+  ram_disk_buffer[set_entry_offset + 28] = (uint8_t)(total_len & 0xFF);
+  ram_disk_buffer[set_entry_offset + 29] = (uint8_t)((total_len >> 8) & 0xFF);
+  ram_disk_buffer[set_entry_offset + 30] = 0x00;
+  ram_disk_buffer[set_entry_offset + 31] = 0x00;
+
+  // Сбрасываем обновлённую структуру диска во флеш-память (с Wear Leveling)
+  save_ram_to_flash();
+
+  // Передёргиваем логический том TinyUSB, чтобы ПК мгновенно увидел изменения в SET.TXT
+  usb_msc.setUnitReady(false);
+  delay(1500);
+  usb_msc.setUnitReady(true);
+}
 

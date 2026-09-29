@@ -60,14 +60,21 @@ void log_file_clear();
 void log_file_write_line(String message);
 extern bool is_transmitting; // Ссылка на флаг занятости эфира из главного скетча
 
-// ГЕОМЕТРИЯ И ЛИМИТЫ ФАЙЛОВОЙ СИСТЕМЫ МАЯКА
+// ============================================================================
+// Геометрия диска 128 КБ под 3 файла + Служебный резерв FAT12
+// ============================================================================
 #define INFO_FIRST_CLUSTER   2
 #define INFO_CLUSTERS        20    // 20 секторов = 10 КБ под конфигурацию
 #define INFO_MAX_BYTES       (INFO_CLUSTERS * 512)
 
-#define LOG_FIRST_CLUSTER    22    // Идет сразу за INFO (2 + 20)
-#define LOG_CLUSTERS         100   // 100 секторов = 50 КБ под логи работы
+#define SET_FIRST_CLUSTER    22    // Идет сразу за INFO (2 + 20)
+#define SET_CLUSTERS         20    // 20 секторов = 10 КБ под инженерные настройки
+#define SET_MAX_BYTES        (SET_CLUSTERS * 512)
+
+#define LOG_FIRST_CLUSTER    42    // Идет сразу за SET (22 + 20)
+#define LOG_CLUSTERS         200   // 200 секторов = 100 КБ под логи работы
 #define LOG_MAX_BYTES        (LOG_CLUSTERS * 512)
+
 
 // ============================================================================
 // Константы и метаданные для циклического выравнивания износа (Wear Leveling)
@@ -83,6 +90,26 @@ struct __attribute__((packed)) SlotMeta {
 
 extern int32_t current_active_slot;
 extern uint32_t current_max_seq;
+
+
+// ============================================================================
+// ПРАВКА: Глобальные переменные инженерных пинов и результатов сканирования
+// ============================================================================
+extern int pin_freq_out;
+extern int pin_amp_act;
+extern int subband_pins[4];
+extern int pin_pwr_si;
+extern int pin_pwr_ds;
+extern int pin_pwr_bm;
+extern int pin_pwr_dl;
+extern String scan_exclude_list;
+extern String scan_result_data;
+
+// Прототип новой функции парсинга
+void read_hardware_settings();
+
+// Функция экспорта результатов сканирования I2C и пинов обратно в SET.TXT
+void save_hardware_settings_to_file(String scan_results);
 
 
 #endif

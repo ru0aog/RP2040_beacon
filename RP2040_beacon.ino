@@ -1,7 +1,7 @@
 ﻿/**
  * ============================================================================  
  *  beacon_v2_10.ino — Автоматический радиомаяк на RP2040 (главный скетч)  
- *  Версия 2.10 от 2026-09-26, автор RU0AOG  
+ *  Версия 2.10.3 от 2026-09-29, автор RU0AOG  
  * ============================================================================  
  *  
  *  НАЗНАЧЕНИЕ  
@@ -829,11 +829,30 @@ void loop() {
   delay(1); 
 }
 
+// ПРАВКА: Сбор результатов сканирования шин и их экспорт в файл конфигурации железа
 void I2C_Scanner() {
-  
+  // Первично производим аппаратный обход портов I2C
   scanRP2040Ports();
 
+  // На основе глобальных массивов устройств формируем строку отчёта для SET.TXT
+  String results = "";
+  if (device_SI[0] == 1) results += "SI5351(0x60) ";
+  if (device_DS[0] == 1) results += "RTC-" + rtc_chip_name + "(0x68) ";
+  if (device_AT[0] == 1) results += "EEPROM(0x50-0x57) ";
+  if (device_BM[0] == 1) results += "BME/BMP(0x76/0x77) ";
+  if (device_DL[0] == 1) results += "LCD(0x27) ";
+  
+  results.trim();
+  if (results.length() == 0) {
+    results = "No devices detected on I2C buses.";
+  }
+
+  // Записываем результат и обновляем файл на диске
+  save_hardware_settings_to_file(results);
+  Serial.print(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT: "));
+  Serial.println(results);
 }
+
 
 void scanRP2040Ports() {
   // Serial.println(F("\n=== ЗАПУСК ПОЛНОГО СКАНИРОВАНИЯ РАЗРЕШЕННЫХ ПОРТОВ RP2040-ZERO ==="));

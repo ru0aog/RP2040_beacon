@@ -831,6 +831,16 @@ void loop() {
     } 
   }
 
+  // =========================================================================
+  // РЕЖИМ 3. ЦЕПОЧКА
+  // =========================================================================
+  // Проверка запуска трехмодовой цепочки из расписания
+  if (is_time_to_transmit(3) && !is_transmitting) {
+       Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
+       is_transmitting = true;
+       usr_chain_state = USR_START_CW; // Толкаем ваш штатный автомат, он всё сделает сам!
+  }
+
 
   delay(1); 
 }
@@ -841,22 +851,30 @@ void I2C_Scanner() {
   scanRP2040Ports();
   printDeviceTable();
 
-  // Формируем строку отчёта с пинами для SET.TXT
+  // Формируем строку отчёта. Каждое устройство пишется с новой строки (\r\n)
   String results = "";
+  
   if (device_SI[0] == 1) {
-    results += "SI5351(0x60,SDA:" + String(device_SI[2]) + ",SCL:" + String(device_SI[3]) + ") ";
+    if (results.length() > 0) results += "\r\n";
+    results += "SI5351(0x60,SDA:" + String(device_SI[2]) + ",SCL:" + String(device_SI[3]) + ")";
   }
   if (device_DS[0] == 1) {
-    results += rtc_chip_name + "(0x68,SDA:" + String(device_DS[2]) + ",SCL:" + String(device_DS[3]) + ") ";
+    if (results.length() > 0) results += "\r\n";
+    results += rtc_chip_name + "(0x68,SDA:" + String(device_DS[2]) + ",SCL:" + String(device_DS[3]) + ")";
   }
   if (device_AT[0] == 1) {
-    results += "EEPROM(SDA:" + String(device_AT[2]) + ",SCL:" + String(device_AT[3]) + ") ";
+    if (results.length() > 0) results += "\r\n";
+    char addr_buf[8];
+    snprintf(addr_buf, sizeof(addr_buf), "0x%02X", device_AT[4]);
+    results += "EEPROM(" + String(addr_buf) + ",SDA:" + String(device_AT[2]) + ",SCL:" + String(device_AT[3]) + ")";
   }
   if (device_BM[0] == 1) {
-    results += "BME/BMP(0x76/0x77,SDA:" + String(device_BM[2]) + ",SCL:" + String(device_BM[3]) + ") ";
+    if (results.length() > 0) results += "\r\n";
+    results += "BME/BMP(0x76/0x77,SDA:" + String(device_BM[2]) + ",SCL:" + String(device_BM[3]) + ")";
   }
   if (device_DL[0] == 1) {
-    results += "LCD(0x27,SDA:" + String(device_DL[2]) + ",SCL:" + String(device_DL[3]) + ") ";
+    if (results.length() > 0) results += "\r\n";
+    results += "LCD(0x27,SDA:" + String(device_DL[2]) + ",SCL:" + String(device_DL[3]) + ")";
   }
   
   results.trim();
@@ -866,8 +884,9 @@ void I2C_Scanner() {
 
   // Записываем результат и обновляем файл на диске
   save_hardware_settings_to_file(results);
-  Serial.println(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
+  Serial.print(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
 }
+
 
 
 
@@ -885,13 +904,13 @@ void scanRP2040Ports() {
     uint8_t scl = sda + 1;
     
     // ИСКЛЮЧЕНИЯ ДЛЯ RP2040-ZERO:
-    if (sda == 16 || scl == 16) continue;
-    if (sda >= 23 && sda <= 25) continue;
-    if (scl >= 23 && scl <= 25) continue;
+    //if (sda == 16 || scl == 16) continue;
+    //if (sda >= 23 && sda <= 25) continue;
+    //if (scl >= 23 && scl <= 25) continue;
 
     // Проверяем кастомный список исключений из SET.TXT
     if (is_pin_excluded_from_scan(sda) || is_pin_excluded_from_scan(scl)) {
-      Serial.print(F("[Сканер] Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
+      Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
       continue;
     }
     I2C_Scan_module(0, sda, scl, false); 
@@ -908,7 +927,7 @@ void scanRP2040Ports() {
   for (uint8_t sda = 2; sda <= 26; sda += 4) {
     uint8_t scl = sda + 1;
     if (is_pin_excluded_from_scan(sda) || is_pin_excluded_from_scan(scl)) {
-      Serial.print(F("[Сканер] Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
+      Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
       continue;
     }
     I2C_Scan_module(1, sda, scl, false); 

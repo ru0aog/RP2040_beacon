@@ -84,6 +84,8 @@ int pin_pwr_dl   = -1;
 String scan_exclude_list = "";
 String scan_result_data  = "";
 
+// Выделение ОЗУ под таблицу расписания задач
+TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
 
 // Переменные трекинга текущего состояния Wear Leveling
 int32_t current_active_slot = -1;
@@ -236,12 +238,43 @@ static void create_default_fat_with_info_file() {
   memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       
   ram_disk_buffer[root_offset + 26] = INFO_FIRST_CLUSTER;    
 
+  // Обновленный дефолтный шаблон INFO.TXT под матричное расписание задач
   const char* default_info_content = 
-    "[CALL]=RU0AOG\r\n[QTH]=NO66FC\r\n[TEXT]=TESTING BEACON\r\n\r\n"
-    "[START_CW  ]=15:15,17:15\r\n[START_RTTY]=15:18,17:18\r\n[START_IFKP]=15:20,17:20\r\n\r\n"
-    "[CW_WPM    ]=20\r\n[RTTY_SPEED]=45.45\r\n\r\n"
-    "[FREQ_CW   ]=3601500\r\n[RTTY_MARK ]=3601585\r\n[RTTY_SHIFT]=170\r\n"
-    "[RTTY_INVERT]=0\r\n[FREQ_IFKP ]=3601307\r\n[EOF]";
+    "[CALL]=RU0AOG\r\n"
+    "[QTH]=NO66FC\r\n"
+    "[TEXT]=TESTING BEACON\r\n\r\n"
+    "[CW_WPM    ]=20\r\n"
+    "[RTTY_SPEED]=45.45\r\n\r\n"
+    "[FREQ_CW   ]=3601500\r\n"
+    "[RTTY_MARK ]=3601585\r\n"
+    "[RTTY_SHIFT]=170\r\n"
+    "[RTTY_INVERT]=0\r\n"
+    "[FREQ_IFKP ]=3601307\r\n\r\n"
+    "=== МАТРИЦА РАСПИСАНИЯ ПЕРЕДАЧ ===\r\n"
+    "// ДНИ: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс, 0=Каждый день\r\n"
+    "// МОДЫ: CW, RTTY, IFKP, SEQ (Сквозной цикл CW->RTTY->IFKP)\r\n"
+    "// Формат одиночной:     [TASK_01]=ДНИ,ЧЧ:ММ,ЧАСТОТА_ГЦ,МОДА\r\n"
+    "// Формат периодической: [TASK_01]=ДНИ,ЧЧ:ММ_СТАРТ/ЧЧ:ММ_КОНЕЦ/ИНТЕРВАЛ,ЧАСТОТА_ГЦ,МОДА\r\n"
+    " \r\n"
+    "// Базовое расписание (Ежедневно) ---\r\n"
+    "[TASK_01]=0,15:15,3601500,CW\r\n"
+    "[TASK_02]=0,15:18,3601585,RTTY\r\n"
+    "[TASK_03]=0,15:20,3601307,IFKP\r\n"
+    " \r\n"
+    "// Вечерний плотный цикл каждые 5 минут (с 17:00 до 22:00 ежедневно) ---\r\n"
+    "[TASK_04]=0,17:00/22:00/5,3601500,CW\r\n"
+    " \r\n"
+    "// Утренний сквозной трехмодовый цикл каждые 15 минут по будням (Пн-Пт) ---\r\n"
+    "[TASK_05]=12345,08:00/11:30/15,3601000,SEQ\r\n"
+    " \r\n"
+    "// Дневная работа на ВЧ-диапазоне 20м (14 МГц) строго по выходным (Сб, Вс) ---\r\n"
+    "[TASK_06]=67,12:00/16:00/30,14095000,IFKP\r\n"
+    " \r\n"
+    "// Одиночные ночные запуски в разные дни недели на разных частотах ---\r\n"
+    "[TASK_07]=135,01:30,3601307,IFKP\r\n"
+    "[TASK_08]=246,03:45,7015000,CW\r\n"
+    "[TASK_09]=7,23:59,3601585,RTTY\r\n"
+    "[EOF]";
   
   uint32_t info_len = strlen(default_info_content);
   ram_disk_buffer[root_offset + 28] = (uint8_t)(info_len & 0xFF);
@@ -263,17 +296,17 @@ static void create_default_fat_with_info_file() {
     "[SUBBAND_PIN_2]=4\r\n"
     "[SUBBAND_PIN_3]=5\r\n\r\n"
     "// Пины питания шины (NC если не назначены)\r\n"
-    "[BUS_PWR_SI   ]=6\r\n"
-    "[BUS_PWR_DS   ]=7\r\n"
+    "[BUS_PWR_SI   ]=NC\r\n"
+    "[BUS_PWR_DS   ]=NC\r\n"
     "[BUS_PWR_BM   ]=NC\r\n"
     "[BUS_PWR_DL   ]=NC\r\n\r\n"
-    "// Исключения из сканирования шин\r\n"
-    "[SCAN_EXCLUDE ]=14,15\r\n\r\n"
+    "// Дополнительные исключения из сканирования шин\r\n"
+    "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n"
     "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n"
     "[FLASH_SLOT   ]=0\r\n"
     "[FLASH_SEQ    ]=1\r\n\r\n"
     "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n"
-    "[SCAN_RESULT  ]=Сканирование не проводилось.\r\n"
+    "[SCAN_RESULT]\r\nСканирование не проводилось.\r\n\r\n"
     "[EOF]";
   
   uint32_t set_len = strlen(default_set_content);
@@ -314,58 +347,41 @@ static void create_default_fat_with_info_file() {
 
 
 // Внутренняя функция побайтового разбора маркеров
+// ПРАВКА: Полный парсер INFO.TXT, изолированный на Секторах 5..24 со сбором всех переменных и расписания
 void read_file_to_variable() {
   flash_flush_cache();
   
-  // 1. Обязательно полностью обнуляем ВСЕ строки перед чтением
-  my_call_variable = "";  my_qth_variable  = "";
-  my_text_variable = "";
-  my_rtty_variable = "";  my_ifkp_variable = "";
-  my_freq_ifkp_var = "";  my_rtty_mark_var = "";
-  my_rtty_shift_var = ""; my_rtty_invert_var = ""; // Новые
-  my_cw_variable = "";    my_freq_cw_var = "";
-  my_cw_wpm_var    = "";
-  my_rtty_baud_var = "";
+  // 1. Полностью обнуляем ВСЕ строки перед чтением
+  my_call_variable = "";  my_qth_variable  = "";  my_text_variable = "";
+  my_rtty_variable = "";  my_ifkp_variable = "";  my_cw_variable = "";    
+  my_freq_cw_var = "";    my_freq_ifkp_var = "";  my_rtty_mark_var = "";  
+  my_rtty_shift_var = ""; my_rtty_invert_var = ""; my_cw_wpm_var = "";    my_rtty_baud_var = "";
 
+  // Обнуляем старый массив матричного расписания задач
+  for (int t = 0; t < MAX_SCHEDULE_TASKS; t++) {
+    beacon_schedule[t].active = false;
+  }
+
+  // Границы сканирования файла INFO.TXT (Секторы 5..24)
   uint32_t scan_start = 5 * SECTOR_SIZE;
   uint32_t scan_end   = scan_start + (INFO_CLUSTERS * SECTOR_SIZE);
+  int task_counter = 0;
 
   for (uint32_t i = scan_start; i < scan_end - 15; i++) {
     if (ram_disk_buffer[i] == '[') {
       int32_t start_idx = -1;
       String* target_str = nullptr;
+      bool is_task_line = false;
 
-      // Точный посимвольный расчет смещений (индекс конца закрывающей скобки ']')
-      // CALL
+      // --- БЛОК А: Сборка одиночных текстовых и частотных маркеров ---
       if (ram_disk_buffer[i+1] == 'C' && ram_disk_buffer[i+2] == 'A' && ram_disk_buffer[i+3] == 'L' && ram_disk_buffer[i+4] == 'L' && ram_disk_buffer[i+5] == ']') {
         start_idx = i + 6; target_str = &my_call_variable;
       }
-      // QTH
       else if (ram_disk_buffer[i+1] == 'Q' && ram_disk_buffer[i+2] == 'T' && ram_disk_buffer[i+3] == 'H' && ram_disk_buffer[i+4] == ']') {
         start_idx = i + 5; target_str = &my_qth_variable;
       }
-      // TEXT
       else if (ram_disk_buffer[i+1] == 'T' && ram_disk_buffer[i+2] == 'E' && ram_disk_buffer[i+3] == 'X' && ram_disk_buffer[i+4] == 'T' && ram_disk_buffer[i+5] == ']') {
         start_idx = i + 6; target_str = &my_text_variable;
-      }
-      // START_CW
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "START_CW", 8) == 0) {
-        for(uint32_t k = i; k < i + 15; k++) {
-          if(ram_disk_buffer[k] == ']') { start_idx = k + 1; break; }
-        }
-        target_str = &my_cw_variable;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "START_RTTY", 10) == 0) {
-        for(uint32_t k = i; k < i + 15; k++) {
-          if(ram_disk_buffer[k] == ']') { start_idx = k + 1; break; }
-        }
-        target_str = &my_rtty_variable;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "START_IFKP", 10) == 0) {
-        for(uint32_t k = i; k < i + 15; k++) {
-          if(ram_disk_buffer[k] == ']') { start_idx = k + 1; break; }
-        }
-        target_str = &my_ifkp_variable;
       }
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "CW_WPM    ]", 11) == 0) {
         start_idx = i + 12; target_str = &my_cw_wpm_var;
@@ -388,69 +404,118 @@ void read_file_to_variable() {
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "FREQ_IFKP ]", 11) == 0) {
         start_idx = i + 12; target_str = &my_freq_ifkp_var;
       }
-
-      // 2. Если маркер найден, считываем значение строго до конца строки
-      if (start_idx != -1 && target_str != nullptr) {
-        target_str->reserve(32);
-        
-        // Если сразу после скобки идет знак '=', перешагиваем его
-        if (ram_disk_buffer[start_idx] == '=') {
-          start_idx++;
+      // --- БЛОК Б: Определение новой матрицы расписания [TASK_XX] ---
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "TASK_", 5) == 0) {
+        uint32_t close_bracket = i;
+        while (close_bracket < scan_end && ram_disk_buffer[close_bracket] != ']') close_bracket++;
+        if (ram_disk_buffer[close_bracket] == ']') {
+          start_idx = close_bracket + 1;
+          is_task_line = true;
         }
+      }
+
+      // 2. Выкусываем значение тега строго до конца строки
+      if (start_idx != -1) {
+        if (ram_disk_buffer[start_idx] == '=') start_idx++;
+
+        String value = "";
+        value.reserve(64);
 
         for (uint32_t j = start_idx; j < scan_end; j++) {
           char c = (char)ram_disk_buffer[j];
-
-          // ЖЕСТКИЙ ОСТАНОВ: Если дошли до конца строки или встретили начало нового тега '['
-          if (c == '\n' || c == '\r' || c == '[') {
-            i = j - 1; // Корректируем индекс, чтобы не пропустить следующий тег
-            break;
-          }
-
-          // Фильтрация данных по типам переменных
-          if (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || 
-          target_str == &my_rtty_shift_var || target_str == &my_rtty_invert_var || target_str == &my_freq_cw_var) {
-            if (c >= '0' && c <= '9') {
-              *target_str += c;
-            }
+          if (c == '\n' || c == '\r' || c == '[') { i = j - 1; break; }
+          
+          if (!is_task_line && (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || 
+              target_str == &my_rtty_shift_var || target_str == &my_rtty_invert_var || target_str == &my_freq_cw_var)) {
+            if (c >= '0' && c <= '9') value += c;
           } else {
-            if (c >= 32) { // Для текста и таймеров берем все печатные символы
-              *target_str += c;
-            }
+            if (c >= 32) value += c;
           }
         }
-        target_str->trim(); // Удаляем случайные пробелы на концах
+        value.trim();
+
+        // Распределяем собранную строку
+        if (is_task_line) {
+          // Выполняем CSV-парсинг строки задачи: ДНИ,ВРЕМЯ,ЧАСТОТА,МОДА
+          int comma1 = value.indexOf(',');
+          int comma2 = value.indexOf(',', comma1 + 1);
+          int comma3 = value.indexOf(',', comma2 + 1);
+          
+          if (comma1 != -1 && comma2 != -1 && comma3 != -1 && task_counter < MAX_SCHEDULE_TASKS) {
+            String s_days = value.substring(0, comma1);
+            String s_time = value.substring(comma1 + 1, comma2);
+            String s_freq = value.substring(comma2 + 1, comma3);
+            String s_mode = value.substring(comma3 + 1);
+            s_days.trim(); s_time.trim(); s_freq.trim(); s_mode.trim();
+
+            TaskItem& task = beacon_schedule[task_counter];
+            task.days = (s_days.equals("0")) ? 0 : s_days.toInt();
+            task.freq_hz = strtoul(s_freq.c_str(), NULL, 10);
+
+            if (s_mode.equalsIgnoreCase("CW"))        task.mode = MODE_CW;
+            else if (s_mode.equalsIgnoreCase("RTTY"))  task.mode = MODE_RTTY;
+            else if (s_mode.equalsIgnoreCase("IFKP"))  task.mode = MODE_IFKP;
+            else if (s_mode.equalsIgnoreCase("SEQ"))   task.mode = MODE_SEQ;
+            else continue;
+
+            int slash1 = s_time.indexOf('/');
+            if (slash1 == -1) { // Одиночная задача "15:15"
+              int colon = s_time.indexOf(':');
+              if (colon != -1) {
+                task.start_hour = s_time.substring(0, colon).toInt();
+                task.start_min  = s_time.substring(colon + 1).toInt();
+                task.end_hour   = task.start_hour;
+                task.end_min    = task.start_min;
+                task.interval_min = 0;
+              }
+            } else { // Периодическая задача "17:00/22:00/5"
+              int slash2 = s_time.indexOf('/', slash1 + 1);
+              if (slash2 != -1) {
+                String s_start = s_time.substring(0, slash1);
+                String s_end   = s_time.substring(slash1 + 1, slash2);
+                task.interval_min = s_time.substring(slash2 + 1).toInt();
+
+                int colon1 = s_start.indexOf(':');
+                int colon2 = s_end.indexOf(':');
+                if (colon1 != -1 && colon2 != -1) {
+                  task.start_hour = s_start.substring(0, colon1).toInt();
+                  task.start_min  = s_start.substring(colon1 + 1).toInt();
+                  task.end_hour   = s_end.substring(0, colon2).toInt();
+                  task.end_min    = s_end.substring(colon2 + 1).toInt();
+                }
+              }
+            }
+            task.active = true;
+            task_counter++;
+          }
+        } else if (target_str != nullptr) {
+          *target_str = value;
+        }
       }
     }
   }
   
-  // Пересчет WPM в миллисекунды для точки
+  // Рассчитываем длительность точки CW из WPM
   if (my_cw_wpm_var.length() > 0) {
     int wpm = my_cw_wpm_var.toInt();
-    
-    // Применяем жесткие ограничения безопасности
-    if (wpm < 5)   wpm = 5;   
+    if (wpm < 5)  wpm = 5;   
     if (wpm > 50) wpm = 50; 
-    
-    // СИНХРОНИЗАЦИЯ: Обновляем строковую переменную реальным значением
     my_cw_wpm_var = String(wpm); 
-    
-    // Рассчитываем длительность точки
     CW_DOT_TIME_MS = 1200 / wpm; 
   } else {
-    CW_DOT_TIME_MS = 60; // Дефолт (20 WPM), если тег пустой
-    my_cw_wpm_var = "20"; // Записываем дефолт и в строку тоже
+    CW_DOT_TIME_MS = 60; 
+    my_cw_wpm_var = "20"; 
   }
 
-  // Расчет длительности бита для RTTY модема
+  // Расчет длительности бита RTTY
   if (my_rtty_baud_var.length() > 0) {
-    float baud = my_rtty_baud_var.toFloat(); // Радиолюбительское значение может быть 45.45
+    float baud = my_rtty_baud_var.toFloat(); 
     if (baud > 0.0f) {
-      // Точная формула перевода Бод в микросекунды: 1 000 000 / Скорость
       RTTY_BIT_TIME_US = (uint32_t)(1000000.0f / baud);
     }
   }
 }
+
 
 
 // Функция вывода текущих настроек
@@ -490,7 +555,14 @@ void print_current_settings() {
   print_pwr_pin("DS", pin_pwr_ds);
   print_pwr_pin("BM", pin_pwr_bm);
   print_pwr_pin("DL", pin_pwr_dl);
-  Serial.print("Исключения сканера шины   : "); Serial.println(scan_exclude_list.length() > 0 ? scan_exclude_list : "Нет");
+  // Корректное распознавание флага NC (Not Connected) для списка исключений
+  Serial.print("Исключения сканера шины   : "); 
+  if (scan_exclude_list.length() == 0 || scan_exclude_list.equalsIgnoreCase("NC")) {
+    Serial.println("NC (Не назначены)");
+  } else {
+    Serial.println(scan_exclude_list);
+  }
+
 
   // Диагностика износа ячеек и активных слотов памяти
   Serial.println("--- Статистика износа флеш-памяти ---");
@@ -544,14 +616,21 @@ void init_file_manager() {
     uint32_t final_flash_src = 0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE);
     memcpy(ram_disk_buffer, (const void*)final_flash_src, DISK_SIZE_BYTES);
     
-    // ПРАВКА: Проверяем первый байт имени первого файла в корневом каталоге (Сектор 2)
-    uint32_t first_file_name_byte = ram_disk_buffer[SECTOR_SIZE * 2];
+    // ИСПРАВЛЕНИЕ: Проверяем первые байты имён ВСЕХ трёх файлов в каталоге (Сектор 2)
+    uint8_t info_name_byte = ram_disk_buffer[SECTOR_SIZE * 2 + 0];  // Дескриптор INFO
+    uint8_t set_name_byte  = ram_disk_buffer[SECTOR_SIZE * 2 + 32]; // Дескриптор SET
+    uint8_t log_name_byte  = ram_disk_buffer[SECTOR_SIZE * 2 + 64]; // Дескриптор LOG
     
-    if (first_file_name_byte == 0x00 || first_file_name_byte == 0xE5) {
-      Serial.println(F("[Система] Диск валиден, но файлы удалены ПК. Перегенерация..."));
+    // Если хотя бы один файл был стёрт операционной системой ПК
+    if (info_name_byte == 0x00 || info_name_byte == 0xE5 || 
+        set_name_byte  == 0x00 || set_name_byte  == 0xE5 || 
+        log_name_byte  == 0x00 || log_name_byte  == 0xE5) {
+        
+      Serial.println(F("[Система] Обнаружена пропажа файлов! Принудительное восстановление..."));
       create_default_fat_with_info_file();
-      my_FAT = "Файлы диска были удалены. Успешно восстановлены по умолчанию.";
+      my_FAT = "Структура файлов была нарушена или удалена ПК. Всё восстановлено.";
     } else {
+
       my_FAT = "Файловая система флэш - корректна. Слот " + String(current_active_slot) + " (seq=" + String(current_max_seq) + ")";
     }
   } else {
@@ -818,9 +897,6 @@ void read_hardware_settings() {
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE", 12) == 0) {
         start_idx = close_bracket_idx + 1; target_str = &scan_exclude_list;
       }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_RESULT", 11) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &scan_result_data;
-      }
 
       // Выкусываем значение строго до конца строки
       if (start_idx != -1 && target_str != nullptr) {
@@ -884,12 +960,10 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
-  content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
-  content += "[FLASH_SLOT   ]=" + (current_active_slot != -1 ? String(current_active_slot) : "0") + "\r\n";
-  content += "[FLASH_SEQ    ]=" + String(current_max_seq) + "\r\n\r\n";
   content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
-  content += "[SCAN_RESULT  ]=" + scan_results + "\r\n";
+  content += "[SCAN_RESULT]\r\n" + scan_results + "\r\n\r\n"; 
   content += "[EOF]";
+
 
   uint32_t total_len = content.length();
   if (total_len >= SET_MAX_BYTES) {
@@ -914,8 +988,25 @@ void save_hardware_settings_to_file(String scan_results) {
 
 
 // Проверка, входит ли конкретный пин в список исключений SCAN_EXCLUDE
+// ПРАВКА: Автоматическое исключение ВСЕХ назначенных в системе пинов + ручного списка
 bool is_pin_excluded_from_scan(int pin) {
-  if (scan_exclude_list.length() == 0) return false;
+  // 1. АВТО-ИСКЛЮЧЕНИЕ: Защищаем пин ВЧ-выхода и пин активации УМ
+  if (pin == pin_freq_out) return true;
+  if (pin == pin_amp_act)  return true;
+
+  // 2. АВТО-ИСКЛЮЧЕНИЕ: Защищаем все 4 пина кода поддиапазона
+  for (int k = 0; k < 4; k++) {
+    if (pin == subband_pins[k]) return true;
+  }
+
+  // 3. АВТО-ИСКЛЮЧЕНИЕ: Защищаем пины питания устройств шины (если они назначены, т.е. не равны -1)
+  if (pin_pwr_si != -1 && pin == pin_pwr_si) return true;
+  if (pin_pwr_ds != -1 && pin == pin_pwr_ds) return true;
+  if (pin_pwr_bm != -1 && pin == pin_pwr_bm) return true;
+  if (pin_pwr_dl != -1 && pin == pin_pwr_dl) return true;
+
+  // 4. ТЕКСТОВЫЕ ИСКЛЮЧЕНИЯ: Проверяем ручной список SCAN_EXCLUDE (если там не написано "NC" или пусто)
+  if (scan_exclude_list.length() == 0 || scan_exclude_list.equalsIgnoreCase("NC")) return false;
   
   String target = String(pin);
   int start = 0;
@@ -931,5 +1022,6 @@ bool is_pin_excluded_from_scan(int pin) {
   }
   return false;
 }
+
 
 

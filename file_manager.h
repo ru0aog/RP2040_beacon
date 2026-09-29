@@ -95,7 +95,7 @@ extern uint32_t current_max_seq;
 
 
 // ============================================================================
-// ПРАВКА: Глобальные переменные инженерных пинов и результатов сканирования
+// Глобальные переменные инженерных пинов и результатов сканирования
 // ============================================================================
 extern int pin_freq_out;
 extern int pin_amp_act;
@@ -114,6 +114,29 @@ void read_hardware_settings();
 void save_hardware_settings_to_file(String scan_results);
 
 bool is_pin_excluded_from_scan(int pin);
+
+// ============================================================================
+// Структура планировщика задач нового поколения в ОЗУ
+// ============================================================================
+#define MODE_CW    0
+#define MODE_RTTY  1
+#define MODE_IFKP  2
+#define MODE_SEQ   3 // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
+
+struct TaskItem {
+    uint8_t  days;         // Маска дней (0=Каждый день, или биты: 1=Пн, 2=Вт ... 7=Вс)
+    uint8_t  start_hour;   // Час старта (0..23)
+    uint8_t  start_min;    // Минута старта (0..59)
+    uint8_t  end_hour;     // Час окончания периода
+    uint8_t  end_min;      // Минута окончания периода
+    uint8_t  interval_min; // Интервал в минутах (0 = Одиночный запуск)
+    uint32_t freq_hz;      // Рабочая частота в Гц
+    uint8_t  mode;         // Мода (MODE_CW, MODE_RTTY, MODE_IFKP, MODE_SEQ)
+    bool     active;       // Флаг заполненности слота
+};
+
+#define MAX_SCHEDULE_TASKS 32
+extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
 
 
 #endif

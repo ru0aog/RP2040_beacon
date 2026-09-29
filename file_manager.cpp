@@ -73,6 +73,9 @@ String my_freq_ifkp_var  = "";
 uint32_t CW_DOT_TIME_MS  = 60;            // Время точки в мс (по умолчанию ~20 WPM)
 volatile uint32_t RTTY_BIT_TIME_US = 22000; // Время одного бита RTTY в мкс (по умолчанию 45.45 Бод)
 String my_FAT = "";
+// Переменные трекинга текущего состояния Wear Leveling
+int32_t current_active_slot = -1;
+uint32_t current_max_seq = 0;
 
 volatile bool pc_file_written = false;
 
@@ -108,16 +111,36 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   return bufsize;
 }
 
-// Внутренняя функция сохранения ОЗУ во Flash
+// Внутренняя функция сохранения ОЗУ во Flash с ротацией по 8 слотам
 static void save_ram_to_flash() {
-  //Serial.println("[Система] Сохраняем конфигурацию во Flash-память...");
+  // Вычисляем индекс следующего слота по кругу и инкрементируем версию
+  int32_t next_slot = (current_active_slot + 1) % FLASH_SLOTS;
+  uint32_t next_seq = current_max_seq + 1;
+
+  if (current_active_slot == -1) {
+    next_slot = 0;
+    next_seq = 1;
+  }
+
+  uint32_t target_flash_addr = FLASH_TARGET_OFFSET + (next_slot * SLOT_SIZE);
+
+  // Внедряем метаданные износа в скрытые от FAT байты в самом конце буфера ОЗУ (Сектор 255)
+  SlotMeta* meta = (SlotMeta*)&ram_disk_buffer[DISK_SIZE_BYTES - sizeof(SlotMeta)];
+  meta->magic = SLOT_MAGIC;
+  meta->seq = next_seq;
+
+  // Выполняем физическую безопасную запись с отключением прерываний на Core 0
   uint32_t ints = save_and_disable_interrupts();
-  flash_range_erase(FLASH_TARGET_OFFSET, DISK_SIZE_BYTES);
-  flash_range_program(FLASH_TARGET_OFFSET, ram_disk_buffer, DISK_SIZE_BYTES);
+  flash_range_erase(target_flash_addr, SLOT_SIZE);
+  flash_range_program(target_flash_addr, ram_disk_buffer, DISK_SIZE_BYTES);
   restore_interrupts(ints);
   flash_flush_cache();
-  //Serial.println("[Система] Успешно сохранено!");
+
+  // Обновляем глобальное состояние менеджера только ПОСЛЕ успешного программирования
+  current_active_slot = next_slot;
+  current_max_seq = next_seq;
 }
+
 
 
 // Вспомогательная функция для записи 12-битной ячейки в таблицу FAT12
@@ -402,19 +425,59 @@ void print_current_settings() {
   Serial.print("Инверсия [RTTY_INVERT]: "); Serial.println(my_rtty_invert_var == "1" ? "ВКЛЮЧЕНА (Mark < Space)" : "ВЫКЛЮЧЕНА (Mark > Space)");
   Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
   Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
+  // Диагностика износа ячеек и активных слотов памяти
+  Serial.println("--- Статистика Wear Leveling ---");
+  Serial.print("Активный слот флеши : "); Serial.println(current_active_slot != -1 ? String(current_active_slot) : "Не определен");
+  Serial.print("Счетчик записей (seq): "); Serial.println(current_max_seq);
+  Serial.print("Физический адрес флеш: 0x"); Serial.println(0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE), HEX);
+
   Serial.println("=====================================");
 }
 
-// Глобальная инициализация файлового менеджера
+
+
+// Глобальная инициализация файлового менеджера со сканированием износа слотов
 void init_file_manager() {
   flash_flush_cache();
-  memcpy(ram_disk_buffer, (const void*)(0x10000000 + FLASH_TARGET_OFFSET), DISK_SIZE_BYTES);
 
-  if (ram_disk_buffer[510] != 0x55 || ram_disk_buffer[511] != 0xAA) {
-    create_default_fat_with_info_file();
-    my_FAT = "Файловая система флэш не обнаружена. Восстановлены настройки по умолчанию.";
+  current_active_slot = -1;
+  current_max_seq = 0;
+  bool slot_found = false;
+
+  SlotMeta checked_meta;
+
+  // Шаг 1: Сканируем все 8 слотов по 128 КБ в поисках максимального валидного seq
+  for (int i = 0; i < FLASH_SLOTS; i++) {
+    uint32_t flash_addr_abs = 0x10000000 + FLASH_TARGET_OFFSET + (i * SLOT_SIZE);
+    
+    // Считываем структуру метаданных из самого конца проверяемого слота
+    uint32_t meta_offset_abs = flash_addr_abs + DISK_SIZE_BYTES - sizeof(SlotMeta);
+    memcpy(&checked_meta, (const void*)meta_offset_abs, sizeof(SlotMeta));
+
+    // Проверяем валидность сигнатур FAT12 (0x55/0xAA) в конце 0-го сектора этого слота
+    uint32_t boot_sig_offset_abs = flash_addr_abs + 510;
+    uint8_t sig_low = *(const uint8_t*)(boot_sig_offset_abs);
+    uint8_t sig_high = *(const uint8_t*)(boot_sig_offset_abs + 1);
+
+    if (checked_meta.magic == SLOT_MAGIC && sig_low == 0x55 && sig_high == 0xAA) {
+      // Находим слот с наибольшим номером версии (seq)
+      if (checked_meta.seq >= current_max_seq) {
+        current_max_seq = checked_meta.seq;
+        current_active_slot = i;
+        slot_found = true;
+      }
+    }
+  }
+
+  // Шаг 2: Выгружаем данные в RAM на основе результатов сканирования
+  if (slot_found) {
+    uint32_t final_flash_src = 0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE);
+    memcpy(ram_disk_buffer, (const void*)final_flash_src, DISK_SIZE_BYTES);
+    my_FAT = "Файловая система флэш - корректна. Загружен слот " + String(current_active_slot) + " (seq=" + String(current_max_seq) + ")";
   } else {
-    my_FAT = "Файловая система флэш - корректна. Настройки загружены.";
+    // Если ни один слот не валиден, генерируем структуру диска по умолчанию
+    create_default_fat_with_info_file();
+    my_FAT = "Файловая система не найдена во всех слотах. Восстановлен дефолт.";
   }
 
   usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
@@ -423,8 +486,10 @@ void init_file_manager() {
   usb_msc.begin();
   usb_msc.setUnitReady(true);
   read_file_to_variable();
-  Serial.flush();                // Ждем, пока всё улетит в порт
+  Serial.flush();                
 }
+
+
 
 // Функция проверки изменений от ПК для loop()
 void check_and_handle_pc_changes() {

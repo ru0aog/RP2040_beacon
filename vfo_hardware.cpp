@@ -74,7 +74,9 @@ static const pio_program_t pio_square_program = {
     .pio_version = 0 
 };
 
-VfoParameters ifkp_tones[VFO_IFKP_TONES_COUNT];
+// Физическое размещение массива в RAM. Секция .time_critical гарантирует нахождение в ОЗУ
+VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
+
 static PIO lo_pio = pio0;
 static unsigned int lo_sm = 0;
 
@@ -112,15 +114,16 @@ static uint32_t current_clk_sys_hz = 120000000;
 
 /**
  * Быстрый генератор псевдослучайных чисел Xorshift32 в ОЗУ.
+ * Добавлен forced inline для полной безопасности конвейера на Core 1
  */
-static inline uint32_t __not_in_flash_func(vfo_xorshift32_raw)(uint32_t state) {
+static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xorshift32_raw)(uint32_t state) {
     state ^= state << 13;
     state ^= state >> 17;
     state ^= state << 5;
     return state;
 }
 
-static inline uint32_t __not_in_flash_func(vfo_xorshift32)() {
+static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xorshift32)() {
     uint32_t x = xorshift_state;
     x ^= x << 13;
     x ^= x >> 17;
@@ -128,6 +131,7 @@ static inline uint32_t __not_in_flash_func(vfo_xorshift32)() {
     xorshift_state = x;
     return x;
 }
+
 
 /**
  * Единичный атомарный шаг расчета дизеринга (Эталонная Си-версия).

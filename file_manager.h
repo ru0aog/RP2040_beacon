@@ -69,4 +69,20 @@ extern bool is_transmitting; // Ссылка на флаг занятости э
 #define LOG_CLUSTERS         100   // 100 секторов = 50 КБ под логи работы
 #define LOG_MAX_BYTES        (LOG_CLUSTERS * 512)
 
+// ============================================================================
+// Константы и метаданные для циклического выравнивания износа (Wear Leveling)
+// ============================================================================
+#define FLASH_SLOTS         8
+#define SLOT_SIZE           DISK_SIZE_BYTES // 128 КБ (кратно размеру стирания 4 КБ)
+#define SLOT_MAGIC          0xBEA1C011      // Уникальный маркер валидности слота
+
+struct __attribute__((packed)) SlotMeta {
+  uint32_t magic;
+  uint32_t seq;
+};
+
+extern int32_t current_active_slot;
+extern uint32_t current_max_seq;
+
+
 #endif

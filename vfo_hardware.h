@@ -101,7 +101,8 @@ struct VfoParameters {
     uint32_t target_freq_chz; // Частота в сантигерцах (0.01 Гц)
 };
 
-extern VfoParameters ifkp_tones[VFO_IFKP_TONES_COUNT];
+// Вынужденное размещение таблицы частот в ОЗУ для исключения XIP-обращений с Core 1
+extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
 
 // === НАБОР ФУНКЦИЙ УПРАВЛЕНИЯ ВЧ-ЭФИРОМ (Low-Level API) ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);

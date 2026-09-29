@@ -254,7 +254,7 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[set_entry_offset + 26] = SET_FIRST_CLUSTER;    
 
   const char* default_set_content = 
-    "=== ENGINEERING HARDWARE SETTINGS ===\r\n"
+    "=== ИНЖЕНЕРНЫЕ НАСТРОЙКИ МАЯКА ===\r\n"
     "[PIN_FREQ_OUT ]=14\r\n"
     "[PIN_AMP_ACT  ]=15\r\n\r\n"
     "// Пины кода поддиапазона (4 пина)\r\n"
@@ -269,9 +269,8 @@ static void create_default_fat_with_info_file() {
     "[BUS_PWR_DL   ]=NC\r\n\r\n"
     "// Исключения из сканирования шин\r\n"
     "[SCAN_EXCLUDE ]=14,15\r\n\r\n"
-    "=== BUS SCAN DATA ===\r\n"
-    "[SCAN_RESULT  ]=No scan performed yet.\r\n"
-    "[LAST_SCAN_TS ]=0\r\n"
+    "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n"
+    "[SCAN_RESULT  ]=Сканирование не проводилось.\r\n"
     "[EOF]";
   
   uint32_t set_len = strlen(default_set_content);
@@ -284,22 +283,22 @@ static void create_default_fat_with_info_file() {
   memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      
   ram_disk_buffer[log_entry_offset + 26] = LOG_FIRST_CLUSTER;   
 
-  const char* default_log_content = "=== SYSTEM LOG START ===\r\nBeacon ПО запустилось корректно.\r\n";
+  const char* default_log_content = "=== ЖУРНАЛ РАБОТЫ МАЯКА ===\r\n";
   uint32_t log_len = strlen(default_log_content);
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(log_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((log_len >> 8) & 0xFF);
 
   // === СМЕЩЕНИЕ ОБЛАСТИ ДАННЫХ НА СЕКТОР 5 ===
   // Сектор 5: Данные INFO.TXT
-  uint32_t info_data_offset = SECTOR_SIZE * 5;
+  uint32_t info_data_offset = SECTOR_SIZE * 5; // Сектор 5
   memcpy(&ram_disk_buffer[info_data_offset], default_info_content, info_len);
 
   // Сектор 25: Данные SET.TXT (5 + 20)
-  uint32_t set_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS);
+  uint32_t set_data_offset = SECTOR_SIZE * 25; // Сектор 25 (5 + 20)
   memcpy(&ram_disk_buffer[set_data_offset], default_set_content, set_len);
 
   // Сектор 45: Данные LOG.TXT (5 + 20 + 20)
-  uint32_t log_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS); 
+  uint32_t log_data_offset = SECTOR_SIZE * 45; // Сектор 45 (5 + 20 + 20)
   memcpy(&ram_disk_buffer[log_data_offset], default_log_content, log_len);
 
   save_ram_to_flash();
@@ -325,7 +324,10 @@ void read_file_to_variable() {
   my_cw_wpm_var    = "";
   my_rtty_baud_var = "";
 
-  for (uint32_t i = 0; i < DISK_SIZE_BYTES - 15; i++) {
+  uint32_t scan_start = 5 * SECTOR_SIZE;
+  uint32_t scan_end   = scan_start + (INFO_CLUSTERS * SECTOR_SIZE);
+
+  for (uint32_t i = scan_start; i < scan_end - 15; i++) {
     if (ram_disk_buffer[i] == '[') {
       int32_t start_idx = -1;
       String* target_str = nullptr;
@@ -393,7 +395,7 @@ void read_file_to_variable() {
           start_idx++;
         }
 
-        for (uint32_t j = start_idx; j < DISK_SIZE_BYTES; j++) {
+        for (uint32_t j = start_idx; j < scan_end; j++) {
           char c = (char)ram_disk_buffer[j];
 
           // ЖЕСТКИЙ ОСТАНОВ: Если дошли до конца строки или встретили начало нового тега '['
@@ -549,7 +551,7 @@ void check_and_handle_pc_changes() {
     delay(1500);                  
     usb_msc.setUnitReady(true);
     
-    print_current_settings();
+    //print_current_settings();
     pc_file_written = false; // Сбрасываем флаг только ПОСЛЕ обновления строк
   }
 }
@@ -559,7 +561,7 @@ void check_and_handle_pc_changes() {
 // Универсальное редактирование любого параметра в файле INFO.txt из консоли
 void update_info_config_from_console(String marker, String new_value) {
   uint32_t root_offset = SECTOR_SIZE * 2;
-  uint32_t data_offset = SECTOR_SIZE * 3;
+  uint32_t data_offset = SECTOR_SIZE * 5;
 
   if (new_value.length() > 32) {
     new_value = new_value.substring(0, 32);
@@ -644,7 +646,6 @@ void update_info_config_from_console(String marker, String new_value) {
 // -------------------------------------------------------------------------
 // Функция очистки (стирания) файла LOG.TXT
 // -------------------------------------------------------------------------
-// ПРАВКА: Очистка лога на Секторе 45 БЕЗ передёргивания шины USB
 void log_file_clear() {
   uint32_t root_offset = SECTOR_SIZE * 2;         
   uint32_t log_entry_offset = root_offset + 64;   
@@ -662,17 +663,20 @@ void log_file_clear() {
   ram_disk_buffer[log_entry_offset + 31] = 0x00;
 
   save_ram_to_flash();
-  Serial.println("[Журнал] Большой файл LOG.TXT успешно очищен.");
+  Serial.println("[Журнал]  Большой файл LOG.TXT успешно очищен.");
+  // Сообщаем ОС, что накопитель переподключен
+  usb_msc.setUnitReady(false); 
+  delay(1500); 
+  usb_msc.setUnitReady(true);
 }
 
 // -------------------------------------------------------------------------
 // Функция дозаписи текстовой строки в конец файла LOG.TXT
 // -------------------------------------------------------------------------
-// ПРАВКА: Дозапись лога на Секторе 45 БЕЗ передёргивания шины USB
 void log_file_write_line(String message) {
   uint32_t root_offset = SECTOR_SIZE * 2;
   uint32_t log_entry_offset = root_offset + 64;
-  uint32_t log_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS); // ИСПРАВЛЕНО: Сектор 45
+  uint32_t log_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS);
 
   uint32_t current_size = ram_disk_buffer[log_entry_offset + 28] | 
                          (ram_disk_buffer[log_entry_offset + 29] << 8) |
@@ -683,7 +687,7 @@ void log_file_write_line(String message) {
   uint32_t msg_len = formatted_msg.length();
 
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {
-    Serial.println("[Журнал] Предупреждение: Лог 100 Кб заполнен! Автоматическая очистка...");
+    Serial.println("[Журнал]  Предупреждение: Лог 100 Кб заполнен! Автоматическая очистка...");
     log_file_clear(); 
     current_size = ram_disk_buffer[log_entry_offset + 28] | (ram_disk_buffer[log_entry_offset + 29] << 8);
   }
@@ -698,7 +702,12 @@ void log_file_write_line(String message) {
   ram_disk_buffer[log_entry_offset + 31] = (uint8_t)((new_size >> 24) & 0xFF);
 
   save_ram_to_flash();
-  Serial.print("[Журнал] Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
+  Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
+
+  // Сообщаем ОС, что накопитель переподключен
+  usb_msc.setUnitReady(false); 
+  delay(1500); 
+  usb_msc.setUnitReady(true); 
 }
 
 
@@ -722,7 +731,10 @@ void read_hardware_settings() {
   scan_exclude_list = "";
   scan_result_data  = "";
 
-  for (uint32_t i = 0; i < DISK_SIZE_BYTES - 15; i++) {
+  uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
+  uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
+
+  for (uint32_t i = scan_start; i < scan_end - 15; i++) {
     if (ram_disk_buffer[i] == '[') {
       int32_t start_idx = -1;
       String* target_str = nullptr;
@@ -770,7 +782,7 @@ void read_hardware_settings() {
         target_str->reserve(64);
         if (ram_disk_buffer[start_idx] == '=') start_idx++;
 
-        for (uint32_t j = start_idx; j < DISK_SIZE_BYTES; j++) {
+        for (uint32_t j = start_idx; j < scan_end; j++) {
           char c = (char)ram_disk_buffer[j];
           if (c == '\n' || c == '\r' || c == '[') {
             i = j - 1;
@@ -799,11 +811,11 @@ void read_hardware_settings() {
 
 
 // Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
-// Сохранение настроек железа на Сектор 25 БЕЗ циклического перезапуска USB-тома
+// Сохранение настроек железа на Сектор 25
 void save_hardware_settings_to_file(String scan_results) {
   uint32_t root_offset = SECTOR_SIZE * 2;
   uint32_t set_entry_offset = root_offset + 32; 
-  uint32_t set_data_offset = SECTOR_SIZE * (5 + INFO_CLUSTERS); // ИСПРАВЛЕНО: Сектор 25 (5 + 20)
+  uint32_t set_data_offset = SECTOR_SIZE * 25; // ИСПРАВЛЕНО: Сектор 25
 
   auto pin_to_str = [](int p) -> String {
     return (p == -1) ? "NC" : String(p);
@@ -811,7 +823,7 @@ void save_hardware_settings_to_file(String scan_results) {
 
   String content = "";
   content.reserve(512);
-  content += "=== ENGINEERING HARDWARE SETTINGS ===\r\n";
+  content += "=== ИНЖЕНЕРНЫЕ НАСТРОЙКИ МАЯКА ===\r\n";
   content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
   content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
   content += "// Пины кода поддиапазона (4 пина)\r\n";
@@ -826,9 +838,8 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
-  content += "=== BUS SCAN DATA ===\r\n";
+  content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
   content += "[SCAN_RESULT  ]=" + scan_results + "\r\n";
-  content += "[LAST_SCAN_TS ]=" + String(millis() / 1000) + "\r\n";
   content += "[EOF]";
 
   uint32_t total_len = content.length();
@@ -846,6 +857,9 @@ void save_hardware_settings_to_file(String scan_results) {
   ram_disk_buffer[set_entry_offset + 31] = 0x00;
 
   save_ram_to_flash();
-  // ИСПРАВЛЕНО: Дёргание usb_msc.setUnitReady убрано, чтобы убрать «мигание» при автосканировании
+  // Сообщаем ОС, что накопитель переподключен
+  usb_msc.setUnitReady(false); 
+  delay(1500); 
+  usb_msc.setUnitReady(true); 
 }
 

@@ -354,7 +354,6 @@ void setup() {
 
   //Serial.print("[Система] Сканирование доступных устройств. \n");
   I2C_Scanner();
-  printDeviceTable();
   //Serial.print("[Система] Сканирование завершено.\n");
 
   init_BME();          // инициализировать bme280
@@ -829,22 +828,33 @@ void loop() {
   delay(1); 
 }
 
-// ПРАВКА: Сбор результатов сканирования шин и их экспорт в файл конфигурации железа
+// Сбор результатов сканирования с фиксацией физических пинов SDA/SCL и их экспорт в файл конфигурации железа
 void I2C_Scanner() {
   // Первично производим аппаратный обход портов I2C
   scanRP2040Ports();
+  printDeviceTable();
 
-  // На основе глобальных массивов устройств формируем строку отчёта для SET.TXT
+  // Формируем строку отчёта с пинами для SET.TXT
   String results = "";
-  if (device_SI[0] == 1) results += "SI5351(0x60) ";
-  if (device_DS[0] == 1) results += "RTC-" + rtc_chip_name + "(0x68) ";
-  if (device_AT[0] == 1) results += "EEPROM(0x50-0x57) ";
-  if (device_BM[0] == 1) results += "BME/BMP(0x76/0x77) ";
-  if (device_DL[0] == 1) results += "LCD(0x27) ";
+  if (device_SI[0] == 1) {
+    results += "SI5351(0x60,SDA:" + String(device_SI[2]) + ",SCL:" + String(device_SI[3]) + ") ";
+  }
+  if (device_DS[0] == 1) {
+    results += rtc_chip_name + "(0x68,SDA:" + String(device_DS[2]) + ",SCL:" + String(device_DS[3]) + ") ";
+  }
+  if (device_AT[0] == 1) {
+    results += "EEPROM(SDA:" + String(device_AT[2]) + ",SCL:" + String(device_AT[3]) + ") ";
+  }
+  if (device_BM[0] == 1) {
+    results += "BME/BMP(0x76/0x77,SDA:" + String(device_BM[2]) + ",SCL:" + String(device_BM[3]) + ") ";
+  }
+  if (device_DL[0] == 1) {
+    results += "LCD(0x27,SDA:" + String(device_DL[2]) + ",SCL:" + String(device_DL[3]) + ") ";
+  }
   
   results.trim();
   if (results.length() == 0) {
-    results = "No devices detected on I2C buses.";
+    results = "Устройства на шине I2C не обнаружены";
   }
 
   // Записываем результат и обновляем файл на диске
@@ -852,6 +862,7 @@ void I2C_Scanner() {
   Serial.print(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT: "));
   Serial.println(results);
 }
+
 
 
 void scanRP2040Ports() {

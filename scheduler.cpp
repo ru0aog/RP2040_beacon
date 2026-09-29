@@ -60,8 +60,8 @@
 #include "scheduler.h"
 #include "file_manager.h" // Доступ к константам и структуре TaskItem
 
-extern const uint8_t PIN_dev_TX; // пин управления усилителем
-extern bool dev_TX_state;        // состояние усилителя
+extern int pin_amp_act;          // Динамический пин активации УМ из file_manager.cpp
+extern bool dev_TX_state;        // Состояние усилителя (true = передача, false = прием)
 
 // Прямой проброс внешнего массива матричного расписания из ОЗУ
 extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
@@ -95,7 +95,7 @@ static uint8_t bin2bcd(uint8_t val) { return val + 6 * (val / 10); }
 void I2C_DS_restart() {
   // перезапуск шины Wire на линиях часов
   if (device_DS[4] == RTC_I2C_ADDRESS) {
-    // если датчик обнаружен
+    // если часы обнаружены
     // Выбираем нужный интерфейс Wire
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     // Настройка пинов и старт шины I2C
@@ -180,8 +180,10 @@ void init_scheduler() {
     Serial.println(get_current_date());
     return; // МГНОВЕННЫЙ ВЫХОД, к I2C больше не прикасаемся!
   } else {
+    // часы подключены
     device_DS[0] = 1;
-
+    activeRtc = RTC_DS3231;
+/*
     // Автоопределение типа чипа часов (DS3231 vs DS1307A)
     pWire->beginTransmission(RTC_I2C_ADDRESS);
     pWire->write(0x0F);
@@ -230,7 +232,7 @@ void init_scheduler() {
         }
       }
     }
-
+*/
     update_scheduler();
     char buf[34];
     snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
@@ -238,13 +240,21 @@ void init_scheduler() {
     snprintf(buf, sizeof(buf), " - время     : %02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
     Serial.println(buf);
   }
+
+// Serial.println("Прямой тест памяти: H=" + String(rtc_hour) + " M=" + String(rtc_min) + " S=" + String(rtc_sec));
 }
 
 
 // Обновление переменных времени из регистров BCD
 void update_scheduler() {
-  digitalWrite(PIN_dev_TX, dev_TX_state);
+  // установить состояние пина управления УМ
+  // ПРАВКА: Циклический фоновый контроль состояния УМ на динамическом пине из SET.TXT
+  if (pin_amp_act != -1) {
+    gpio_put(pin_amp_act, dev_TX_state);
+  }
+
   if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
+    // если часы подключены
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     
     pWire->beginTransmission(RTC_I2C_ADDRESS);
@@ -253,14 +263,16 @@ void update_scheduler() {
     
     pWire->requestFrom(RTC_I2C_ADDRESS, (uint8_t)7); 
     if (pWire->available() >= 7) {
-      rtc_sec   = bcd2bin(pWire->read() & 0x7F);
-      rtc_min   = bcd2bin(pWire->read());
-      rtc_hour  = bcd2bin(pWire->read() & 0x3F); 
-      rtc_day   = bcd2bin(pWire->read());
-      rtc_dotw  = bcd2bin(pWire->read() & 0x07); 
-      rtc_month = bcd2bin(pWire->read() & 0x1F);
-      rtc_year  = bcd2bin(pWire->read()) + 2000;
+      rtc_sec   = bcd2bin(pWire->read() & 0x7F); // 0x00: Секунды
+      rtc_min   = bcd2bin(pWire->read());        // 0x01: Минуты
+      rtc_hour  = bcd2bin(pWire->read() & 0x3F); // 0x02: Часы
+      pWire->read(); // Пропускаем день недели (регистр 0x03)
+      //rtc_dotw  = bcd2bin(pWire->read() & 0x07); // 0x03: День недели (записываем сюда вместо пропуска!)
+      rtc_day   = bcd2bin(pWire->read());        // 0x04: День месяца (дата)
+      rtc_month = bcd2bin(pWire->read() & 0x1F); // 0x05: Месяц
+      rtc_year  = bcd2bin(pWire->read()) + 2000; // 0x06: Год
     }
+
   }
   else {
     if (rtc_get_datetime(&currentTime)) {

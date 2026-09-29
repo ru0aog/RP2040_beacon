@@ -46,6 +46,8 @@
 #include "vfo_hardware.h"
 #include "file_manager.h" // Обеспечиваем доступ к переменной pin_pwr_si
 
+extern bool dev_TX_state; 
+
 bool SI_FAIL = true;
 uint64_t Xtal_freq  = 25000000;
 extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
@@ -257,6 +259,8 @@ void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
 
 // Функция включения питания si5351
 void SI_POWER_ON() {
+  extern int pin_pwr_si;
+  extern int pin_amp_act; // Пробрасываем пин активации УМ из SET.TXT
   if (device_SI[0]) {
     // запуск питания
     if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, HIGH); // Включаем генератор
@@ -273,6 +277,7 @@ void SI_POWER_ON() {
     //03:активировать выходы
     si5351_write_reg(0x03, 0x00);
     Serial.println("[Питание] Si5351: ВКЛ");
+    dev_TX_state = true;
   }
   else {
     Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
@@ -282,6 +287,8 @@ void SI_POWER_ON() {
 
 // Функция выключения питания si5351
 void SI_POWER_OFF() {
+  extern int pin_pwr_si;
+  extern int pin_amp_act;
   if (device_SI[0]) {
     // перезапуск шины Wire на линиях генератора
     // Выбираем нужный интерфейс Wire

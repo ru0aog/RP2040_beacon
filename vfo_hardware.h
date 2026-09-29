@@ -71,7 +71,9 @@
 // === Оптимизация и профилирование цикла дизеринга ===
 #define VFO_DITHER_FAST          // Включить локализацию переменных, __builtin_add_overflow и Inline ASM
 //#define VFO_DITHER_PROFILE       // Вывод меандра частоты цикла на отладочный GPIO_PROFILE_PIN
-#define VFO_PROFILE_PIN      13  // Свободный пин для замера F_s_dither (половина частоты на осциллографе)
+extern int pin_amp_act;
+#define VFO_PROFILE_PIN      (13)  // Свободный пин для замера F_s_dither (половина частоты на осциллографе)
+// выше использование этого пина отключено, без необходимости не включать!
 
 // === Динамический автотюнинг PLL ===
 #define VFO_PLL_AUTOTUNE         // Адаптивный подбор clk_sys под целевую частоту для CW/IFKP/RTTY
@@ -86,7 +88,8 @@
 #define VFO_DITHER_INTERVAL_US 10 
 
 // === Аппаратная конфигурация физического уровня ===
-#define VFO_OUTPUT_PIN       14            // Пин для выхода сигнала радиочастоты 
+extern int pin_freq_out; 
+#define VFO_OUTPUT_PIN       (pin_freq_out)// Пин для выхода сигнала радиочастоты 
 #define VFO_IFKP_TONES_COUNT 33            // Количество фиксированных тонов в сетке
 #define VFO_TONE_NONE        255           // Флаг неопределенного тона
 

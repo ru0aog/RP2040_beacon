@@ -77,6 +77,9 @@ static const pio_program_t pio_square_program = {
 // Физическое размещение массива в RAM. Секция .time_critical гарантирует нахождение в ОЗУ
 VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
 
+// ПРАВКА: Доступ к глобальному состоянию усилителя мощности для манипуляции ключом CW
+extern bool dev_TX_state; 
+
 static PIO lo_pio = pio0;
 static unsigned int lo_sm = 0;
 
@@ -521,10 +524,10 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     
     pio_sm_config c = pio_get_default_sm_config();
     sm_config_set_wrap(&c, lo_offset + 0, lo_offset + 1);
-    sm_config_set_set_pins(&c, VFO_OUTPUT_PIN, 1);
+    sm_config_set_set_pins(&c, pin_freq_out, 1); // Прямое использование динамического пина выхода частоты
     
-    pio_gpio_init(lo_pio, VFO_OUTPUT_PIN); 
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, VFO_OUTPUT_PIN, 1, true); 
+    pio_gpio_init(lo_pio, pin_freq_out); 
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, true); 
     
     pio_sm_init(lo_pio, lo_sm, lo_offset, &c);
     pio_sm_set_enabled(lo_pio, lo_sm, true);
@@ -599,9 +602,24 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     current_active_tone = tone_index;
 }
 
+// Синхронное управление ключом PIO и усилителем мощности (УМ) из SET.TXT
 void __not_in_flash_func(vfo_set_cw_key)(bool key_down) {
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, VFO_OUTPUT_PIN, 1, key_down);
-    if (!key_down) {
+    extern int pin_amp_act; // Пробрасываем переменную пина активации УМ из file_manager.cpp
+
+    // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, key_down);
+    
+    // 2. Синхронно коммутируем питание оконечного каскада усилителя
+    if (key_down) {
+        // Нажатие: включаем реле/ключ питания УМ (выставляем HIGH, у вас это GPIO 17)
+        gpio_put(pin_amp_act, true);
+        dev_TX_state = true;
+    } else {
+        // Отпускание: мгновенно обесточиваем УМ во избежание перегрева и шума в паузе (LOW)
+        gpio_put(pin_amp_act, false);
+        dev_TX_state = false;
+        
         current_active_tone = VFO_TONE_NONE;
     }
 }
+

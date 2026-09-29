@@ -70,7 +70,6 @@
 #define BCN_DAT "2026-09-28"
 
 bool dev_TX_state  = false;
-extern const uint8_t PIN_dev_TX = 15;
 
 // таблица параметров устройств
 /*
@@ -344,9 +343,6 @@ void setup() {
   Serial.println(" сек");
   //Serial.println("...");
 
-  pinMode(PIN_dev_TX, OUTPUT);
-  digitalWrite(PIN_dev_TX, dev_TX_state);
-
   Serial.println("[Система] Питание маяка включено.");
   Serial.println("[Система] Последовательное соединение восстановлено.");
   pinMode(LED_BUILTIN, OUTPUT);
@@ -369,7 +365,11 @@ void setup() {
   if (pin_pwr_ds != -1) { pinMode(pin_pwr_ds, OUTPUT); digitalWrite(pin_pwr_ds, HIGH); } // Часы обычно всегда запитаны
   if (pin_pwr_bm != -1) { pinMode(pin_pwr_bm, OUTPUT); digitalWrite(pin_pwr_bm, LOW); }
   if (pin_pwr_dl != -1) { pinMode(pin_pwr_dl, OUTPUT); digitalWrite(pin_pwr_dl, LOW); }
-
+  // ПРАВКА: Инициализация динамического пина активации УМ из файла SET.TXT
+  if (pin_amp_act != -1) {
+    pinMode(pin_amp_act, OUTPUT);
+    digitalWrite(pin_amp_act, dev_TX_state);
+  }
 
   //Serial.println(F("\n================================================================"));
   Serial.println(F("  АВТОМАТИЧЕСКИЙ РАДИОМАЯК ЗАПУЩЕН"));

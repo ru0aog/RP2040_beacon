@@ -228,13 +228,12 @@ static void create_default_fat_with_info_file() {
   }
   set_fat12_entry(fat_offset, (LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1), 0xFFF); 
 
-  // СЕКТОР 2: Корневой каталог (3 сектора, файлы лежат в начале сектора 2)
+  // СЕКТОР 2: Корневой каталог (Записи по 32 байта)
   uint32_t root_offset = SECTOR_SIZE * 2;
 
   // 1. Запись для INFO.TXT
   memcpy(&ram_disk_buffer[root_offset + 0], "INFO    ", 8);  
   memcpy(&ram_disk_buffer[root_offset + 8], "TXT", 3);       
-  ram_disk_buffer[root_offset + 11] = 0x00;                 
   ram_disk_buffer[root_offset + 26] = INFO_FIRST_CLUSTER;    
 
   const char* default_info_content = 
@@ -252,7 +251,6 @@ static void create_default_fat_with_info_file() {
   uint32_t set_entry_offset = root_offset + 32;
   memcpy(&ram_disk_buffer[set_entry_offset + 0], "SET     ", 8);  
   memcpy(&ram_disk_buffer[set_entry_offset + 8], "TXT", 3);       
-  ram_disk_buffer[set_entry_offset + 11] = 0x00;                 
   ram_disk_buffer[set_entry_offset + 26] = SET_FIRST_CLUSTER;    
 
   const char* default_set_content = 
@@ -284,7 +282,6 @@ static void create_default_fat_with_info_file() {
   uint32_t log_entry_offset = root_offset + 64;
   memcpy(&ram_disk_buffer[log_entry_offset + 0], "LOG     ", 8); 
   memcpy(&ram_disk_buffer[log_entry_offset + 8], "TXT", 3);      
-  ram_disk_buffer[log_entry_offset + 11] = 0x00;                
   ram_disk_buffer[log_entry_offset + 26] = LOG_FIRST_CLUSTER;   
 
   const char* default_log_content = "=== SYSTEM LOG START ===\r\nBeacon ПО запустилось корректно.\r\n";
@@ -292,8 +289,8 @@ static void create_default_fat_with_info_file() {
   ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(log_len & 0xFF);
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((log_len >> 8) & 0xFF);
 
-  // === ВЫЧИСЛЕНИЕ ФИЗИЧЕСКИХ СМЕЩЕНИЙ ОБЛАСТИ ДАННЫХ (ОТ СЕКТОРА 5) ===
-  // Сектор 5: Данные INFO.TXT (1 бут + 1 фат + 3 каталог = 5)
+  // === СМЕЩЕНИЕ ОБЛАСТИ ДАННЫХ НА СЕКТОР 5 ===
+  // Сектор 5: Данные INFO.TXT
   uint32_t info_data_offset = SECTOR_SIZE * 5;
   memcpy(&ram_disk_buffer[info_data_offset], default_info_content, info_len);
 
@@ -308,6 +305,7 @@ static void create_default_fat_with_info_file() {
   save_ram_to_flash();
   Serial.println("[Система] Структура диска обновлена: INFO (10Кб), SET (10Кб) и LOG (100Кб) готовы на Секторе 5!");
 }
+
 
 
 
@@ -501,17 +499,17 @@ void init_file_manager() {
     uint8_t sig_low = *(const uint8_t*)(boot_sig_offset_abs);
     uint8_t sig_high = *(const uint8_t*)(boot_sig_offset_abs + 1);
 
-    // Дополнительная проверка: количество записей в каталоге (смещение 17 в BPB) должно быть равно 48
+    // ПРАВКА: Проверка количества записей в каталоге (смещение 17 в бут-секторе BPB)
     uint8_t root_entries_count = *(const uint8_t*)(flash_addr_abs + 17);
 
     if (checked_meta.magic == SLOT_MAGIC && sig_low == 0x55 && sig_high == 0xAA && root_entries_count == 48) {
-      // Находим слот с наибольшим номером версии (seq)
       if (checked_meta.seq >= current_max_seq) {
         current_max_seq = checked_meta.seq;
         current_active_slot = i;
         slot_found = true;
       }
     }
+
   }
 
   // Шаг 2: Выгружаем данные в RAM на основе результатов сканирования
@@ -848,6 +846,6 @@ void save_hardware_settings_to_file(String scan_results) {
   ram_disk_buffer[set_entry_offset + 31] = 0x00;
 
   save_ram_to_flash();
-  // ИСПРАВЛЕНО: Строки usb_msc.setUnitReady убраны, чтобы исключить ложное мигание диска при автосохранении
+  // ИСПРАВЛЕНО: Дёргание usb_msc.setUnitReady убрано, чтобы убрать «мигание» при автосканировании
 }
 

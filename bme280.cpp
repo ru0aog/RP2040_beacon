@@ -52,6 +52,7 @@
 
 #include "bme280.h"
 #include <Wire.h>
+#include "file_manager.h" // Обеспечиваем доступ к переменной pin_pwr_bm
 
 // Перечисление для типов датчиков
 enum SensorType { TYPE_UNKNOWN, TYPE_BMP280, TYPE_BME280, TYPE_BMP180 };
@@ -226,8 +227,10 @@ void readCalibrationDataBMP180() {
 // Инициализация и настройка BME280/BMP280/BMP180
 bool initBME280() {
   uint8_t addr = device_BM[4];
+  // если датчик давления обнаружен
+  if (pin_pwr_bm != -1) digitalWrite(pin_pwr_bm, HIGH); // Включаем датчики погоды для снятия телеметрии
+  delay(50); // Небольшая пауза на стабилизацию питания перед инициализацией чипов
   if (addr == BME280_ADDRESS || addr == BMP180_ADDRESS) {
-    // если датчик давления обнаружен
     // Выбираем нужный интерфейс Wire
     TwoWire *pWire = (device_BM[1] == 1) ? &Wire1 : &Wire;
 

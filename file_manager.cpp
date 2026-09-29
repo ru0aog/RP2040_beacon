@@ -239,7 +239,7 @@ static void create_default_fat_with_info_file() {
   const char* default_info_content = 
     "[CALL]=RU0AOG\r\n[QTH]=NO66FC\r\n[TEXT]=TESTING BEACON\r\n\r\n"
     "[START_CW  ]=15:15,17:15\r\n[START_RTTY]=15:18,17:18\r\n[START_IFKP]=15:20,17:20\r\n\r\n"
-    "[CW_WPM    ]=20\r\n[RTTY_SPEED]=45\r\n\r\n"
+    "[CW_WPM    ]=20\r\n[RTTY_SPEED]=45.45\r\n\r\n"
     "[FREQ_CW   ]=3601500\r\n[RTTY_MARK ]=3601585\r\n[RTTY_SHIFT]=170\r\n"
     "[RTTY_INVERT]=0\r\n[FREQ_IFKP ]=3601307\r\n[EOF]";
   
@@ -269,6 +269,9 @@ static void create_default_fat_with_info_file() {
     "[BUS_PWR_DL   ]=NC\r\n\r\n"
     "// Исключения из сканирования шин\r\n"
     "[SCAN_EXCLUDE ]=14,15\r\n\r\n"
+    "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n"
+    "[FLASH_SLOT   ]=0\r\n"
+    "[FLASH_SEQ    ]=1\r\n\r\n"
     "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n"
     "[SCAN_RESULT  ]=Сканирование не проводилось.\r\n"
     "[EOF]";
@@ -464,12 +467,34 @@ void print_current_settings() {
   Serial.print("Частота  [FREQ_CW   ]: "); Serial.print(my_freq_cw_var.length() > 0 ? my_freq_cw_var : "3601000 (Резерв)"); Serial.println(" Hz");
   Serial.print("Частота  [RTTY_MARK ]: "); Serial.print(my_rtty_mark_var); Serial.println(" Hz");
   Serial.print("Сдвиг    [RTTY_SHIFT]: "); Serial.print(my_rtty_shift_var.length() > 0 ? my_rtty_shift_var : "170"); Serial.println(" Hz");
-  Serial.print("Инверсия [RTTY_INVERT]: "); Serial.println(my_rtty_invert_var == "1" ? "ВКЛЮЧЕНА (Mark < Space)" : "ВЫКЛЮЧЕНА (Mark > Space)");
+  Serial.print("Инверсия [RTTY_INV  ]: "); Serial.println(my_rtty_invert_var == "1" ? "ВКЛЮЧЕНА (Mark < Space)" : "ВЫКЛЮЧЕНА (Mark > Space)");
   Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
   Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
+
+  // Вывод аппаратной конфигурации пинов из SET.TXT
+  Serial.println("--- Аппаратная конфигурация (SET.TXT) ---");
+  Serial.print("Пин ВЧ-выхода   (FREQ_OUT): "); Serial.println(pin_freq_out);
+  Serial.print("Пин активации УМ (AMP_ACT): "); Serial.println(pin_amp_act);
+  Serial.print("Пины поддиапазонов        : ");
+  for (int k = 0; k < 4; k++) {
+    Serial.print(subband_pins[k]); if (k < 3) Serial.print(", ");
+  }
+  Serial.println("");
+  
+  auto print_pwr_pin = [](const char* label, int pin) {
+    Serial.print("Питание устройства ["); Serial.print(label); Serial.print("]   : ");
+    if (pin == -1) Serial.println("NC (Не назначен)");
+    else Serial.println(pin);
+  };
+  print_pwr_pin("SI", pin_pwr_si);
+  print_pwr_pin("DS", pin_pwr_ds);
+  print_pwr_pin("BM", pin_pwr_bm);
+  print_pwr_pin("DL", pin_pwr_dl);
+  Serial.print("Исключения сканера шины   : "); Serial.println(scan_exclude_list.length() > 0 ? scan_exclude_list : "Нет");
+
   // Диагностика износа ячеек и активных слотов памяти
-  Serial.println("--- Статистика Wear Leveling ---");
-  Serial.print("Активный слот флеши : "); Serial.println(current_active_slot != -1 ? String(current_active_slot) : "Не определен");
+  Serial.println("--- Статистика износа флеш-памяти ---");
+  Serial.print("Активный слот флеша  : "); Serial.println(current_active_slot != -1 ? String(current_active_slot) : "Не определен");
   Serial.print("Счетчик записей (seq): "); Serial.println(current_max_seq);
   Serial.print("Физический адрес флеш: 0x"); Serial.println(0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE), HEX);
 
@@ -518,9 +543,18 @@ void init_file_manager() {
   if (slot_found) {
     uint32_t final_flash_src = 0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE);
     memcpy(ram_disk_buffer, (const void*)final_flash_src, DISK_SIZE_BYTES);
-    my_FAT = "Файловая система флэш - корректна. Загружен слот " + String(current_active_slot) + " (seq=" + String(current_max_seq) + ")";
+    
+    // ПРАВКА: Проверяем первый байт имени первого файла в корневом каталоге (Сектор 2)
+    uint32_t first_file_name_byte = ram_disk_buffer[SECTOR_SIZE * 2];
+    
+    if (first_file_name_byte == 0x00 || first_file_name_byte == 0xE5) {
+      Serial.println(F("[Система] Диск валиден, но файлы удалены ПК. Перегенерация..."));
+      create_default_fat_with_info_file();
+      my_FAT = "Файлы диска были удалены. Успешно восстановлены по умолчанию.";
+    } else {
+      my_FAT = "Файловая система флэш - корректна. Слот " + String(current_active_slot) + " (seq=" + String(current_max_seq) + ")";
+    }
   } else {
-    // Если ни один слот не валиден, генерируем структуру диска по умолчанию
     create_default_fat_with_info_file();
     my_FAT = "Файловая система не найдена во всех слотах. Восстановлен дефолт.";
   }
@@ -540,16 +574,16 @@ void init_file_manager() {
 // Функция проверки изменений от ПК для loop()
 void check_and_handle_pc_changes() {
   if (pc_activity_detected && (millis() - last_msc_write_time > 1500)) {
-    Serial.println("\r\n> ОБНАРУЖЕНА КОРРЕКТИРОВКА INFO-ФАЙЛА");
+    Serial.println("> ОБНАРУЖЕНА КОРРЕКТИРОВКА INFO-ФАЙЛА");
     pc_activity_detected = false;
     
     save_ram_to_flash();
     read_file_to_variable();
     read_hardware_settings(); // Перечитываем пины, если оператор изменил SET.TXT
 
-    usb_msc.setUnitReady(false); 
-    delay(1500);                  
-    usb_msc.setUnitReady(true);
+    //usb_msc.setUnitReady(false); 
+    //delay(1500);                  
+    //usb_msc.setUnitReady(true);
     
     //print_current_settings();
     pc_file_written = false; // Сбрасываем флаг только ПОСЛЕ обновления строк
@@ -721,10 +755,10 @@ static inline int parse_pin_value(const String& val) {
 }
 
 // ПРАВКА: Функция побайтового разбора маркеров файла SET.TXT
+// ОКОНЧАТЕЛЬНАЯ ПРАВКА: Надежный парсер инженерных настроек с защитой от сброса в 0
 void read_hardware_settings() {
   flash_flush_cache();
   
-  // Временные строки для буферизации значений из парсера
   String s_freq_out = "", s_amp_act = "";
   String s_subband[4] = {"", "", "", ""};
   String s_pwr_si = "", s_pwr_ds = "", s_pwr_bm = "", s_pwr_dl = "";
@@ -739,45 +773,56 @@ void read_hardware_settings() {
       int32_t start_idx = -1;
       String* target_str = nullptr;
 
-      // Посимвольное сравнение ключевых маркеров файла SET.TXT
-      if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_FREQ_OUT ", 12) == 0) {
-        start_idx = i + 14; target_str = &s_freq_out;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_AMP_ACT  ", 12) == 0) {
-        start_idx = i + 14; target_str = &s_amp_act;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_0", 13) == 0) {
-        start_idx = i + 15; target_str = &s_subband[0];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_1", 13) == 0) {
-        start_idx = i + 15; target_str = &s_subband[1];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_2", 13) == 0) {
-        start_idx = i + 15; target_str = &s_subband[2];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_3", 13) == 0) {
-        start_idx = i + 15; target_str = &s_subband[3];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_SI   ", 12) == 0) {
-        start_idx = i + 14; target_str = &s_pwr_si;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DS   ", 12) == 0) {
-        start_idx = i + 14; target_str = &s_pwr_ds;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_BM   ", 12) == 0) {
-        start_idx = i + 14; target_str = &s_pwr_bm;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DL   ", 12) == 0) {
-        start_idx = i + 14; target_str = &s_pwr_dl;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE ", 12) == 0) {
-        start_idx = i + 14; target_str = &scan_exclude_list;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_RESULT  ", 12) == 0) {
-        start_idx = i + 14; target_str = &scan_result_data;
+      // Динамически ищем закрывающую скобку ']', чтобы пробелы выравнивания не ломали strncmp
+      uint32_t close_bracket_idx = 0;
+      for (uint32_t k = i; k < i + 20; k++) {
+        if (ram_disk_buffer[k] == ']') {
+          close_bracket_idx = k;
+          break;
+        }
       }
 
-      // Если маркер обнаружен, вытаскиваем его значение до конца строки
+      if (close_bracket_idx == 0) continue; // Битый маркер без скобки
+
+      // Сравниваем чистые имена тегов, игнорируя пробелы внутри скобок
+      if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_FREQ_OUT", 12) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_freq_out;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_AMP_ACT", 11) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_amp_act;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_0", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[0];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_1", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[1];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_2", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[2];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_3", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[3];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_SI", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_si;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DS", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_ds;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_BM", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_bm;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DL", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_dl;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE", 12) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &scan_exclude_list;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_RESULT", 11) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &scan_result_data;
+      }
+
+      // Выкусываем значение строго до конца строки
       if (start_idx != -1 && target_str != nullptr) {
         target_str->reserve(64);
         if (ram_disk_buffer[start_idx] == '=') start_idx++;
@@ -795,19 +840,20 @@ void read_hardware_settings() {
     }
   }
 
-  // Конвертируем считанные строки в аппаратные int-переменные
-  if (s_freq_out.length() > 0) pin_freq_out = parse_pin_value(s_freq_out);
-  if (s_amp_act.length()  > 0) pin_amp_act  = parse_pin_value(s_amp_act);
+  // Назначаем дефолты жестко в коде, если файлы пустые или теги не прочитались
+  pin_freq_out = (s_freq_out.length() > 0) ? parse_pin_value(s_freq_out) : 14;
+  pin_amp_act  = (s_amp_act.length() > 0)  ? parse_pin_value(s_amp_act)  : 15;
   
   for (int k = 0; k < 4; k++) {
-    if (s_subband[k].length() > 0) subband_pins[k] = parse_pin_value(s_subband[k]);
+    subband_pins[k] = (s_subband[k].length() > 0) ? parse_pin_value(s_subband[k]) : (2 + k);
   }
   
-  if (s_pwr_si.length() > 0) pin_pwr_si = parse_pin_value(s_pwr_si);
-  if (s_pwr_ds.length() > 0) pin_pwr_ds = parse_pin_value(s_pwr_ds);
-  if (s_pwr_bm.length() > 0) pin_pwr_bm = parse_pin_value(s_pwr_bm);
-  if (s_pwr_dl.length() > 0) pin_pwr_dl = parse_pin_value(s_pwr_dl);
+  pin_pwr_si = (s_pwr_si.length() > 0) ? parse_pin_value(s_pwr_si) : -1;
+  pin_pwr_ds = (s_pwr_ds.length() > 0) ? parse_pin_value(s_pwr_ds) : -1;
+  pin_pwr_bm = (s_pwr_bm.length() > 0) ? parse_pin_value(s_pwr_bm) : -1;
+  pin_pwr_dl = (s_pwr_dl.length() > 0) ? parse_pin_value(s_pwr_dl) : -1;
 }
+
 
 
 // Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
@@ -838,6 +884,9 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
+  content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
+  content += "[FLASH_SLOT   ]=" + (current_active_slot != -1 ? String(current_active_slot) : "0") + "\r\n";
+  content += "[FLASH_SEQ    ]=" + String(current_max_seq) + "\r\n\r\n";
   content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
   content += "[SCAN_RESULT  ]=" + scan_results + "\r\n";
   content += "[EOF]";
@@ -862,4 +911,25 @@ void save_hardware_settings_to_file(String scan_results) {
   delay(1500); 
   usb_msc.setUnitReady(true); 
 }
+
+
+// Проверка, входит ли конкретный пин в список исключений SCAN_EXCLUDE
+bool is_pin_excluded_from_scan(int pin) {
+  if (scan_exclude_list.length() == 0) return false;
+  
+  String target = String(pin);
+  int start = 0;
+  
+  while (true) {
+    int comma_idx = scan_exclude_list.indexOf(',', start);
+    String token = (comma_idx == -1) ? scan_exclude_list.substring(start) : scan_exclude_list.substring(start, comma_idx);
+    token.trim();
+    
+    if (token.equals(target)) return true;
+    if (comma_idx == -1) break;
+    start = comma_idx + 1;
+  }
+  return false;
+}
+
 

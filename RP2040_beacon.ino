@@ -199,12 +199,12 @@ void check_serial_commands() {
             Serial.println(F("[!] КРИТИЧЕСКИЙ ЖЕСТКИЙ СБРОС ПРОЦЕССОРА..."));
             LCD_init(true);
             LCD_print(">> CPU RESET <<", 0, 0);
-            Serial.flush();
+            // Пишем в файл на виртуальную флешку историю работы
+            log_file_write_line(get_current_time() + " рестарт процессора");
             SI_POWER_OFF();
             Serial.println(F("***"));
             Serial.println(F(""));
-            // Пишем в файл на виртуальную флешку историю работы
-            log_file_write_line(get_current_time() + " рестарт процессора");
+            Serial.flush();
             delay(500);
             watchdog_reboot(0, 0, 0);
           }
@@ -363,6 +363,13 @@ void setup() {
   init_si5351();       // инициализировать си5351
 
   ZERO_LED_init();     // инициализировать WS2812B
+
+  // Инициализация пинов питания шин, если они назначены (не равны -1)
+  if (pin_pwr_si != -1) { pinMode(pin_pwr_si, OUTPUT); digitalWrite(pin_pwr_si, LOW); }
+  if (pin_pwr_ds != -1) { pinMode(pin_pwr_ds, OUTPUT); digitalWrite(pin_pwr_ds, HIGH); } // Часы обычно всегда запитаны
+  if (pin_pwr_bm != -1) { pinMode(pin_pwr_bm, OUTPUT); digitalWrite(pin_pwr_bm, LOW); }
+  if (pin_pwr_dl != -1) { pinMode(pin_pwr_dl, OUTPUT); digitalWrite(pin_pwr_dl, LOW); }
+
 
   //Serial.println(F("\n================================================================"));
   Serial.println(F("  АВТОМАТИЧЕСКИЙ РАДИОМАЯК ЗАПУЩЕН"));
@@ -859,8 +866,7 @@ void I2C_Scanner() {
 
   // Записываем результат и обновляем файл на диске
   save_hardware_settings_to_file(results);
-  Serial.print(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT: "));
-  Serial.println(results);
+  Serial.println(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
 }
 
 
@@ -879,15 +885,15 @@ void scanRP2040Ports() {
     uint8_t scl = sda + 1;
     
     // ИСКЛЮЧЕНИЯ ДЛЯ RP2040-ZERO:
-    // 1. Исключаем GPIO16 (там распаян встроенный RGB светодиод WS2812B)
     if (sda == 16 || scl == 16) continue;
-    
-    // 2. Исключаем пины GPIO23, GPIO24, GPIO25 (они отсутствуют на распиновке платы)
-    // на плате YD-RP2040 встроенный RGB светодиод WS2812B на пине GPIO23
-    // на плате YD-RP2040 и Pico встроенный обычный светодиод на пине GPIO25
     if (sda >= 23 && sda <= 25) continue;
     if (scl >= 23 && scl <= 25) continue;
 
+    // Проверяем кастомный список исключений из SET.TXT
+    if (is_pin_excluded_from_scan(sda) || is_pin_excluded_from_scan(scl)) {
+      Serial.print(F("[Сканер] Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
+      continue;
+    }
     I2C_Scan_module(0, sda, scl, false); 
     delay(50);
   }
@@ -901,16 +907,10 @@ void scanRP2040Ports() {
   // SDA: 26, SCL: 27 (Нижние аналоговые пины)
   for (uint8_t sda = 2; sda <= 26; sda += 4) {
     uint8_t scl = sda + 1;
-
-    // ИСКЛЮЧЕНИЯ ДЛЯ RP2040-ZERO:
-    // 1. Так как шаг цикла +=4, при sda=14 значение scl станет равен 15. 
-    //    Исключаем пины 14,15,16,23,24,25
-    if (sda == 14 || scl == 14) continue;
-    if (sda == 15 || scl == 15) continue;
-    if (sda == 16 || scl == 16) continue;
-    if (sda >= 23 && sda <= 25) continue;
-    if (scl >= 23 && scl <= 25) continue;
-
+    if (is_pin_excluded_from_scan(sda) || is_pin_excluded_from_scan(scl)) {
+      Serial.print(F("[Сканер] Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
+      continue;
+    }
     I2C_Scan_module(1, sda, scl, false); 
     delay(50);
   }

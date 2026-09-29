@@ -44,6 +44,7 @@
 
 #include "si5351_driver.h"
 #include "vfo_hardware.h"
+#include "file_manager.h" // Обеспечиваем доступ к переменной pin_pwr_si
 
 bool SI_FAIL = true;
 uint64_t Xtal_freq  = 25000000;
@@ -257,6 +258,9 @@ void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
 // Функция включения питания si5351
 void SI_POWER_ON() {
   if (device_SI[0]) {
+    // запуск питания
+    if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, HIGH); // Включаем генератор
+    delay(50); // Небольшая пауза на стабилизацию питания перед инициализацией чипов
     // перезапуск шины Wire на линиях генератора
     // Выбираем нужный интерфейс Wire
     TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
@@ -289,8 +293,10 @@ void SI_POWER_OFF() {
     si5351_write_reg(0x12, 0x80);
     //03:отключить все выходы
     si5351_write_reg(0x03, 0xFF);
-    Serial.println("[Питание] Si5351: ВЫКЛ");
     pWire->end();
+    Serial.println("[Питание] Si5351: ВЫКЛ");
+    // запуск питания
+    if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, LOW); // Выключаем генератор
   }
   else {
     //fractGen_OFF();

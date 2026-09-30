@@ -382,7 +382,7 @@ void read_file_to_variable() {
   int task_counter = 0;
 
   for (uint32_t i = scan_start; i < scan_end - 15; i++) {
-    if (ram_disk_buffer[i] == '[') {
+    if (ram_disk_buffer[i] == '[' && (i == scan_start || ram_disk_buffer[i-1] == '\n' || ram_disk_buffer[i-1] == '\r')) {
       int32_t start_idx = -1;
       String* target_str = nullptr;
       bool is_task_line = false;

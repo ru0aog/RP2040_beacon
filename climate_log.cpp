@@ -3,11 +3,12 @@
 #include "scheduler.h"  
 #include "file_manager.h"
 
+
 // ---------- Периоды ----------  
 // Отладка: замер каждые 10 сек, таблица каждые 5 мин  
 // Боевой режим: замер каждые 10 мин, таблица каждый час  
 #define CLIMATE_DEBUG 1       // 0 — отключить быстрый тестовый опрос
-#define DEBUG_CLIMATE_LOG 1   // 0 — отключить вывод в порт    
+#define DEBUG_CLIMATE_LOG 0   // 0 — отключить вывод в порт    
   
 #if CLIMATE_DEBUG  
   #define SAMPLE_INTERVAL_MS   (10UL * 1000UL)        // 10 с  
@@ -103,7 +104,8 @@ void climate_log_update() {
   // чтобы не было мгновенного догоняющего замера после эфира  
   if (is_transmitting) {  
     last_sample_ms = now;  
-    last_report_ms = now;  
+    last_report_ms = now;
+    sample_count = 0;
     return;  
   }  
   

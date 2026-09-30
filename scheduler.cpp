@@ -59,6 +59,7 @@
 #include <Wire.h>
 #include "scheduler.h"
 #include "file_manager.h" // Доступ к константам и структуре TaskItem
+#include "si5351_driver.h"
 #include "climate_log.h"
 
 extern int pin_amp_act;          // Динамический пин активации УМ из file_manager.cpp
@@ -321,57 +322,7 @@ String get_current_date() {
   return String(buf);
 }
 
-// Автоматический парсер текстового расписания
-// ПРАВКА: Новая высокоскоростная побитовая проверка расписания с защитой от наложений
-bool is_time_to_transmit(uint8_t mode) {
-  extern bool is_transmitting;         
-  uint32_t cur_abs_min = rtc_hour * 60 + rtc_min;
 
-  if (mode == 0 && cur_abs_min == last_ifkp_minute) return false;
-  if (mode == 1 && cur_abs_min == last_rtty_minute) return false;
-  if (mode == 2 && cur_abs_min == last_cw_minute)   return false;
-
-  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {
-    TaskItem& task = beacon_schedule[i];
-    if (!task.active || task.mode != mode) continue;
-
-    // 1. ИСПРАВЛЕНО: Сверхбыстрая проверка дня недели через наложение битовой маски
-    if (task.days > 0) {
-      if ((task.days & (1 << rtc_dotw)) == 0) continue; // Если бит текущего дня не взведен — пропускаем
-    }
-
-    uint32_t start_abs = task.start_hour * 60 + task.start_min;
-    uint32_t end_abs   = task.end_hour * 60 + task.end_min;
-
-    if (task.interval_min == 0) {
-      if (cur_abs_min == start_abs) {
-        if (is_transmitting) {
-          Serial.println(F("[Планировщик] ВНИМАНИЕ: Наложение интервалов! Задача пропущена."));
-          return false;
-        }
-        if (mode == 0) last_ifkp_minute = cur_abs_min;
-        if (mode == 1) last_rtty_minute = cur_abs_min;
-        if (mode == 2) last_cw_minute   = cur_abs_min;
-        return true;
-      }
-    } else {
-      if (cur_abs_min >= start_abs && cur_abs_min <= end_abs) {
-        uint32_t elapsed = cur_abs_min - start_abs;
-        if (elapsed % task.interval_min == 0) {
-          if (is_transmitting) {
-            Serial.println(F("[Планировщик] ВНИМАНИЕ: Предыдущий сеанс занял шину! Шаг пропущен."));
-            return false;
-          }
-          if (mode == 0) last_ifkp_minute = cur_abs_min;
-          if (mode == 1) last_rtty_minute = cur_abs_min;
-          if (mode == 2) last_cw_minute   = cur_abs_min;
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
 
 
 
@@ -563,3 +514,223 @@ void handle_time_command(String cmd) {
   }
 }
 
+
+
+// scheduler.cpp — чистый парсер одной строки  
+// Формат: "МОДА | ДНИ | ВРЕМЯ"  или совместимый "ДНИ,ВРЕМЯ,ЧАСТОТА,МОДА"  
+// Возвращает true, если строка корректна  
+static bool parse_days(const String& s, uint8_t& mask) {  
+  mask = 0;  
+  if (s == "0" || s.length() == 0) return true;          // каждый день  
+  for (size_t i = 0; i < s.length(); i++) {  
+    char c = s[i];  
+    if (c >= '1' && c <= '7') mask |= (1 << (c - '0'));  
+    else if (c == '-') {                                  // диапазон a-b  
+      if (i == 0 || i + 1 >= s.length()) return false;  
+      int a = s[i - 1] - '0', b = s[i + 1] - '0';  
+      if (a < 1 || b > 7 || a > b) return false;  
+      for (int d = a; d <= b; d++) mask |= (1 << d);  
+    }  
+    else if (c != ' ') return false;  
+  }  
+  return true;  
+}  
+  
+static bool parse_hhmm(const String& s, uint8_t& h, uint8_t& m) {  
+  int colon = s.indexOf(':');  
+  if (colon == -1) return false;  
+  int hh = s.substring(0, colon).toInt();  
+  int mm = s.substring(colon + 1).toInt();  
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return false;  
+  h = hh; m = mm;  
+  return true;  
+}  
+  
+// ВРЕМЯ: "HH:MM" | "HH:MM-HH:MM/N" | "HH:MM/HH:MM/N"  
+static bool parse_time_expr(const String& s, TaskItem& t) {  
+  int sep  = s.indexOf('-');  if (sep == -1) sep = s.indexOf('/');  
+  int sep2 = s.indexOf('/', sep + 1);  
+  if (sep == -1) {            // разовая  
+    t.interval_min = 0;  
+    if (!parse_hhmm(s, t.start_hour, t.start_min)) return false;  
+    t.end_hour = t.start_hour; t.end_min = t.start_min;  
+    return true;  
+  }  
+  if (sep2 == -1) return false;  
+  if (!parse_hhmm(s.substring(0, sep),  t.start_hour, t.start_min)) return false;  
+  if (!parse_hhmm(s.substring(sep + 1, sep2), t.end_hour, t.end_min)) return false;  
+  int iv = s.substring(sep2 + 1).toInt();  
+  if (iv < 1 || iv > 1440) return false;  
+  t.interval_min = iv;  
+  return true;  
+}
+
+
+
+/*
+// Автоматический парсер текстового расписания
+// ПРАВКА: Новая высокоскоростная побитовая проверка расписания с защитой от наложений
+bool is_time_to_transmit(uint8_t mode) {
+  extern bool is_transmitting;         
+  uint32_t cur_abs_min = rtc_hour * 60 + rtc_min;
+
+  if (mode == 0 && cur_abs_min == last_ifkp_minute) return false;
+  if (mode == 1 && cur_abs_min == last_rtty_minute) return false;
+  if (mode == 2 && cur_abs_min == last_cw_minute)   return false;
+
+  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {
+    TaskItem& task = beacon_schedule[i];
+    if (!task.active || task.mode != mode) continue;
+
+    // 1. ИСПРАВЛЕНО: Сверхбыстрая проверка дня недели через наложение битовой маски
+    if (task.days > 0) {
+      if ((task.days & (1 << rtc_dotw)) == 0) continue; // Если бит текущего дня не взведен — пропускаем
+    }
+
+    uint32_t start_abs = task.start_hour * 60 + task.start_min;
+    uint32_t end_abs   = task.end_hour * 60 + task.end_min;
+
+    if (task.interval_min == 0) {
+      if (cur_abs_min == start_abs) {
+        if (is_transmitting) {
+          Serial.println(F("[Планировщик] ВНИМАНИЕ: Наложение интервалов! Задача пропущена."));
+          return false;
+        }
+        if (mode == 0) last_ifkp_minute = cur_abs_min;
+        if (mode == 1) last_rtty_minute = cur_abs_min;
+        if (mode == 2) last_cw_minute   = cur_abs_min;
+        return true;
+      }
+    } else {
+      if (cur_abs_min >= start_abs && cur_abs_min <= end_abs) {
+        uint32_t elapsed = cur_abs_min - start_abs;
+        if (elapsed % task.interval_min == 0) {
+          if (is_transmitting) {
+            Serial.println(F("[Планировщик] ВНИМАНИЕ: Предыдущий сеанс занял шину! Шаг пропущен."));
+            return false;
+          }
+          if (mode == 0) last_ifkp_minute = cur_abs_min;
+          if (mode == 1) last_rtty_minute = cur_abs_min;
+          if (mode == 2) last_cw_minute   = cur_abs_min;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+*/
+
+
+// scheduler.cpp — вывод таблицы расписания в Serial  
+// scheduler.cpp — вывод таблицы расписания в Serial  
+void print_schedule() {  
+  static const char* mode_names[] = {"IFKP", "RTTY", "CW", "SEQ"};  // по enum BeaconMode  
+  
+  const int DAYS_WIDTH = 18;   // ширина колонки "Дни" в СИМВОЛАХ (под "Пн,Вт,Ср,Чт,Пт")  
+  const int TIME_WIDTH = 18;   // ширина колонки "Время" в символах  
+  
+  Serial.println(F("=== РАСПИСАНИЕ ПЕРЕДАЧ ==="));  
+  Serial.println(F("No | МОДА | Дни               | Время             |    Частота"));  
+  
+  uint8_t found = 0;  
+  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {  
+    TaskItem &t = beacon_schedule[i];  
+    if (!t.active) continue;  
+    found++;  
+  
+    // --- Дни недели: 0 = каждый день, иначе маска -> "Пн,Вт,Ср,Чт,Пт" ---  
+    String days;  
+    if (t.days == 0 || (t.days & 0xFE) == 0xFE) {  // 0 = каждый день; 0xFE = биты Пн..Вс — вся неделя
+      days = "ежедневно";  
+    } else {  
+      const char* dn[] = {"", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"};  
+      for (uint8_t d = 1; d <= 7; d++) {  
+        if (t.days & (1 << d)) {  
+          if (days.length()) days += ",";  
+          days += dn[d];  
+        }  
+      }  
+    }  
+  
+    // --- Время: одиночная "15:15" или период "17:00-22:00/5мин" ---  
+    char timebuf[24];  
+    if (t.interval_min == 0) {  
+      snprintf(timebuf, sizeof(timebuf), "%02d:%02d", t.start_hour, t.start_min);  
+    } else {  
+      snprintf(timebuf, sizeof(timebuf), "%02d:%02d-%02d:%02d/%dмин",  
+               t.start_hour, t.start_min, t.end_hour, t.end_min, t.interval_min);  
+    }  
+  
+    const char* mname = (t.mode <= 3) ? mode_names[t.mode] : "?";  
+  
+    // --- Печать строки ---  
+    // Колонка "Дни" содержит кириллицу (UTF-8: 2 байта на символ),  
+    // поэтому printf с %-Ns не подходит — выравниваем вручную.  
+    Serial.printf("%2d | %-4s | ", i+1, mname);  
+  
+    Serial.print(days);  
+    // UTF-8: новый символ = байт < 0x80 (ASCII) или начальный байт >= 0xC0  
+    int day_chars = 0;  
+    for (size_t k = 0; k < days.length(); k++) {  
+      uint8_t b = (uint8_t)days[k];  
+      if (b < 0x80 || b >= 0xC0) day_chars++;  
+    }  
+    for (int pad = day_chars; pad < DAYS_WIDTH; pad++) Serial.print(' ');  
+  
+    // Колонка "Время" ASCII — но "%-18s" тоже считает байты; тут кириллицы нет,  
+    // кроме слова "мин". Считаем символы и допечатываем пробелы вручную.  
+    Serial.print("| ");  
+    Serial.print(timebuf);  
+    int time_chars = 0;  
+    for (size_t k = 0; k < strlen(timebuf); k++) {  
+      uint8_t b = (uint8_t)timebuf[k];  
+      if (b < 0x80 || b >= 0xC0) time_chars++;  
+    }  
+    for (int pad = time_chars; pad < TIME_WIDTH; pad++) Serial.print(' ');  
+  
+    Serial.printf("| %11s Гц\n", format_freq(t.freq_hz).c_str());  
+  }  
+  
+  if (!found) Serial.println(F("(пусто — задач нет)"));  
+  Serial.printf("Всего задач: %d\n", found);  
+}
+
+
+
+// scheduler.cpp — планировщик с диагностикой сработки  
+bool is_time_to_transmit(uint8_t mode) {  
+  extern bool is_transmitting;  
+  uint32_t cur = rtc_hour * 60UL + rtc_min;  
+  static uint32_t last_min[3] = {9999, 9999, 9999};  
+  
+  if (mode > 2) return false;  
+  if (cur == last_min[mode]) return false;               // один запуск на минуту  
+  
+  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {  
+    TaskItem& t = beacon_schedule[i];  
+    if (!t.active || t.mode != mode) continue;  
+    if (t.days && !(t.days & (1 << rtc_dotw))) continue; // день не совпал  
+  
+    uint32_t st = t.start_hour * 60UL + t.start_min;  
+    uint32_t en = t.end_hour   * 60UL + t.end_min;  
+    bool hit;  
+    if (t.interval_min == 0) hit = (cur == st);  
+    else {  
+      hit = (en >= st) ? (cur >= st && cur <= en && (cur - st) % t.interval_min == 0)  
+                       : (cur >= st || cur <= en) &&                        // окно через полночь  
+                         ((cur >= st ? cur - st : cur + 1440 - st) % t.interval_min == 0);  
+    }  
+    if (!hit) continue;  
+  
+    if (is_transmitting) {  
+      Serial.printf("[Планировщик] TASK_%02d: шина занята, сеанс пропущен\n", i);  
+      return false;  
+    }  
+    Serial.printf("[Планировщик] TASK_%02d: запуск mode=%d в %02d:%02d\n",  
+                  i, mode, rtc_hour, rtc_min);  
+    last_min[mode] = cur;  
+    return true;  
+  }  
+  return false;  
+}

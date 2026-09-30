@@ -121,8 +121,6 @@ void msc_flush_cb(void) {
 int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
   if (lba >= SECTOR_COUNT) return -1;
   memcpy(buffer, &ram_disk_buffer[lba * SECTOR_SIZE], bufsize);
-  pc_activity_detected = true;
-  pc_file_written = true; // Выставляем флаг мгновенно для экстренного останова передачи
   return bufsize;
 }
 
@@ -130,6 +128,8 @@ int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
 int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   if (lba >= SECTOR_COUNT) return -1;
   memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);
+  pc_activity_detected = true;
+  pc_file_written = true; // Выставляем флаг мгновенно для экстренного останова передачи
   return bufsize;
 }
 

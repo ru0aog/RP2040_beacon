@@ -697,6 +697,62 @@ void print_schedule() {
 }
 
 
+// scheduler.cpp — ближайший запуск для режима (MODE_CW=2? см. ниже!)  
+// Возвращает абсолютные минуты от "сегодня 00:00", -1 если задач нет  
+// День недели: rtc_dotw (0=Вс? уточнить конвенцию — используется та же, что в is_time_to_transmit)  
+int32_t get_next_start_minute(uint8_t mode) {  
+  uint32_t now_abs = rtc_hour * 60 + rtc_min;  
+  int32_t best_abs = -1;  
+  
+  // ищем вперёд до 8 дней  
+  for (uint8_t day_off = 0; day_off < 8; day_off++) {  
+    uint8_t dotw = (rtc_dotw + day_off) % 7;      // конвенция та же, что у планировщика  
+  
+    for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {  
+      TaskItem &t = beacon_schedule[i];  
+      if (!t.active) continue;  
+      if (t.mode != mode && t.mode != MODE_SEQ) continue; // SEQ запускает все режимы  
+      if (t.days > 0 && (t.days & (1 << dotw)) == 0) continue;  
+  
+      uint32_t start_abs = t.start_hour * 60 + t.start_min;  
+      uint32_t end_abs   = t.end_hour   * 60 + t.end_min;  
+  
+      if (t.interval_min == 0) {  
+        // одиночная задача  
+        if (day_off == 0 && start_abs <= now_abs) continue; // сегодня уже прошла  
+        int32_t cand = day_off * 1440 + start_abs;  
+        if (best_abs == -1 || cand < best_abs) best_abs = cand;  
+      } else {  
+        // периодическая: первый шаг после now (для сегодня), либо сам старт (для будущих дней)  
+        uint32_t first = (day_off == 0)  
+          ? ((now_abs > start_abs) ? start_abs + ((now_abs - start_abs + t.interval_min - 1) / t.interval_min) * t.interval_min  
+                                   : start_abs)  
+          : start_abs;  
+        if (first <= end_abs) {  
+          int32_t cand = day_off * 1440 + first;  
+          if (best_abs == -1 || cand < best_abs) best_abs = cand;  
+        }  
+      }  
+    }  
+    if (best_abs != -1) break; // нашли в ближайший подходящий день — дальше не ищем  
+  }  
+  return best_abs;  
+}
+
+
+// преобразование результата в строку "HH:MM" или "завтра HH:MM"  
+static String fmt_next_start(int32_t abs_min) {  
+  if (abs_min < 0) return String("Не задан");  
+  uint32_t day_off = abs_min / 1440;  
+  uint32_t m = abs_min % 1440;  
+  char buf[24];  
+  const char* suffix = (day_off == 0) ? "" : (day_off == 1 ? " (завтра)" : " (через дни)");  
+  snprintf(buf, sizeof(buf), "%02d:%02d%s", m / 60, m % 60, suffix);  
+  return String(buf);  
+}  
+  
+
+
 
 // scheduler.cpp — планировщик с диагностикой сработки  
 bool is_time_to_transmit(uint8_t mode) {  

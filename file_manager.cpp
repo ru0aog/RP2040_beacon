@@ -543,8 +543,13 @@ void read_file_to_variable() {
 
 
 
+
+
 // Функция вывода текущих настроек
 void print_current_settings() {
+  my_cw_variable   = fmt_next_start(get_next_start_minute(MODE_CW));  
+  my_rtty_variable = fmt_next_start(get_next_start_minute(MODE_RTTY));
+  my_ifkp_variable = fmt_next_start(get_next_start_minute(MODE_IFKP));
   Serial.println("=== ТЕКУЩИЕ НАСТРОЙКИ РАДИОМАЯКА ===");
   Serial.print("Позывной [CALL      ]: "); Serial.println(my_call_variable.length() > 0 ? my_call_variable : "Не задан");
   Serial.print("Локатор  [QTH       ]: "); Serial.println(my_qth_variable.length()  > 0 ? my_qth_variable  : "Не задан");

@@ -268,11 +268,10 @@ void update_scheduler() {
     if (pWire->available() >= 7) {
       rtc_sec   = bcd2bin(pWire->read() & 0x7F); // 0x00: Секунды
       rtc_min   = bcd2bin(pWire->read());        // 0x01: Минуты
-      rtc_hour  = bcd2bin(pWire->read() & 0x3F); // 0x02: Часы
-      pWire->read(); // Пропускаем день недели (регистр 0x03)
-      rtc_dotw  = bcd2bin(pWire->read() & 0x07); // 0x03: День недели (записываем сюда вместо пропуска!)
-      rtc_day   = bcd2bin(pWire->read());        // 0x04: День месяца (дата)
-      rtc_month = bcd2bin(pWire->read() & 0x1F); // 0x05: Месяц
+      rtc_hour  = bcd2bin(pWire->read() & 0x3F); // 0x02: Часы  
+      rtc_dotw  = bcd2bin(pWire->read() & 0x07); // 0x03: День недели  
+      rtc_day   = bcd2bin(pWire->read());        // 0x04: Дата  
+      rtc_month = bcd2bin(pWire->read() & 0x1F); // 0x05: Месяц  
       rtc_year  = bcd2bin(pWire->read()) + 2000; // 0x06: Год
     }
 

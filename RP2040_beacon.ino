@@ -873,7 +873,7 @@ void loop() {
         Serial.println(end_buf);
 
         // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line("Сеанс CW завершен. Длительность: " + String(cw_session_duration_sec) + " сек.");
+        log_file_write_line("Сеанс CW завершен.   Длительность: " + String(cw_session_duration_sec) + " сек.");
       } 
       
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании

@@ -73,7 +73,13 @@ RtcType activeRtc = RTC_NONE;
 
 datetime_t currentTime;
 
-
+// Имена режимов — соответствуют enum BeaconMode: 0=IFKP, 1=RTTY, 2=CW, 3=SEQ  
+static const char* MODE_NAMES[] = {"IFKP", "RTTY", "CW", "SEQ"};  
+  
+// Безопасный доступ: защита от мусора в mode (например MODE_NONE=255)  
+static const char* mode_name(uint8_t mode) {  
+  return (mode <= MODE_SEQ) ? MODE_NAMES[mode] : "??";  
+}
 
 // Глобальные переменные для хранения текущего времени
 uint8_t  rtc_hour  = 0;
@@ -568,62 +574,6 @@ static bool parse_time_expr(const String& s, TaskItem& t) {
 
 
 
-/*
-// Автоматический парсер текстового расписания
-// ПРАВКА: Новая высокоскоростная побитовая проверка расписания с защитой от наложений
-bool is_time_to_transmit(uint8_t mode) {
-  extern bool is_transmitting;         
-  uint32_t cur_abs_min = rtc_hour * 60 + rtc_min;
-
-  if (mode == 0 && cur_abs_min == last_ifkp_minute) return false;
-  if (mode == 1 && cur_abs_min == last_rtty_minute) return false;
-  if (mode == 2 && cur_abs_min == last_cw_minute)   return false;
-
-  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {
-    TaskItem& task = beacon_schedule[i];
-    if (!task.active || task.mode != mode) continue;
-
-    // 1. ИСПРАВЛЕНО: Сверхбыстрая проверка дня недели через наложение битовой маски
-    if (task.days > 0) {
-      if ((task.days & (1 << rtc_dotw)) == 0) continue; // Если бит текущего дня не взведен — пропускаем
-    }
-
-    uint32_t start_abs = task.start_hour * 60 + task.start_min;
-    uint32_t end_abs   = task.end_hour * 60 + task.end_min;
-
-    if (task.interval_min == 0) {
-      if (cur_abs_min == start_abs) {
-        if (is_transmitting) {
-          Serial.println(F("[Планировщик] ВНИМАНИЕ: Наложение интервалов! Задача пропущена."));
-          return false;
-        }
-        if (mode == 0) last_ifkp_minute = cur_abs_min;
-        if (mode == 1) last_rtty_minute = cur_abs_min;
-        if (mode == 2) last_cw_minute   = cur_abs_min;
-        return true;
-      }
-    } else {
-      if (cur_abs_min >= start_abs && cur_abs_min <= end_abs) {
-        uint32_t elapsed = cur_abs_min - start_abs;
-        if (elapsed % task.interval_min == 0) {
-          if (is_transmitting) {
-            Serial.println(F("[Планировщик] ВНИМАНИЕ: Предыдущий сеанс занял шину! Шаг пропущен."));
-            return false;
-          }
-          if (mode == 0) last_ifkp_minute = cur_abs_min;
-          if (mode == 1) last_rtty_minute = cur_abs_min;
-          if (mode == 2) last_cw_minute   = cur_abs_min;
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-*/
-
-
-// scheduler.cpp — вывод таблицы расписания в Serial  
 // scheduler.cpp — вывод таблицы расписания в Serial  
 void print_schedule() {  
   static const char* mode_names[] = {"IFKP", "RTTY", "CW", "SEQ"};  // по enum BeaconMode  
@@ -753,8 +703,6 @@ String fmt_next_start(int32_t abs_min) {
 }  
   
 
-
-
 // scheduler.cpp — планировщик с диагностикой сработки  
 bool is_time_to_transmit(uint8_t mode) {  
   extern bool is_transmitting;  
@@ -781,11 +729,11 @@ bool is_time_to_transmit(uint8_t mode) {
     if (!hit) continue;  
   
     if (is_transmitting) {  
-      Serial.printf("[Планировщик] TASK_%02d: шина занята, сеанс пропущен\n", i);  
+      Serial.printf("[Планировщик] TASK_%02d: шина занята, сеанс пропущен\n", i + 1);  
       return false;  
     }  
-    Serial.printf("[Планировщик] TASK_%02d: запуск mode=%d в %02d:%02d\n",  
-                  i, mode, rtc_hour, rtc_min);  
+    Serial.printf("[Планировщик] TASK_%02d: запуск %s в %02d:%02d\n",  
+                  i + 1, mode_name(mode), rtc_hour, rtc_min); 
     last_min[mode] = cur;  
     return true;  
   }  

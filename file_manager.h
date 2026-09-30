@@ -64,7 +64,7 @@ void log_file_write_line(String message);
 extern bool is_transmitting; // Ссылка на флаг занятости эфира из главного скетча
 
 // ============================================================================
-// вГеометрия диска 128 КБ (Каталог = 48 записей, Данные = Сектор 5)
+// Геометрия диска 128 КБ (Каталог = 48 записей, Данные = Сектор 5)
 // ============================================================================
 #define INFO_FIRST_CLUSTER   2
 #define INFO_CLUSTERS        20    // 20 секторов = 10 КБ под конфигурацию
@@ -127,30 +127,7 @@ void log_file_write_block(const String& block);  // запись многост�
 
 bool is_pin_excluded_from_scan(int pin);
 
-// ============================================================================
-// Структура планировщика задач нового поколения в ОЗУ
-// ============================================================================
-#define MODE_CW    0
-#define MODE_RTTY  1
-#define MODE_IFKP  2
-#define MODE_SEQ   3 // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
 
-// Структура задачи с использованием битовой маски под дни недели (1 байт)
-struct TaskItem {
-    uint8_t  days;         // Битовая маска дней: 0=Каждый день, бит 1=Пн, бит 2=Вт ... бит 7=Вс
-    uint8_t  start_hour;   
-    uint8_t  start_min;    
-    uint8_t  end_hour;     
-    uint8_t  end_min;      
-    uint8_t  interval_min; 
-    uint32_t freq_hz;      
-    uint8_t  mode;         
-    bool     active;       
-};
-
-
-#define MAX_SCHEDULE_TASKS 32
-extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
 
 
 #endif

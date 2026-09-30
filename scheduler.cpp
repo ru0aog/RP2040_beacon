@@ -185,7 +185,7 @@ void init_scheduler() {
     // часы подключены
     device_DS[0] = 1;
     activeRtc = RTC_DS3231;
-/*
+
     // Автоопределение типа чипа часов (DS3231 vs DS1307A)
     pWire->beginTransmission(RTC_I2C_ADDRESS);
     pWire->write(0x0F);
@@ -234,7 +234,7 @@ void init_scheduler() {
         }
       }
     }
-*/
+
     update_scheduler();
     char buf[34];
     snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
@@ -247,7 +247,7 @@ void init_scheduler() {
 }
 
 
-// Обновление переменных времени из регистров BCD
+// Обновление переменных времени
 void update_scheduler() {
   // установить состояние пина управления УМ
   // ПРАВКА: Циклический фоновый контроль состояния УМ на динамическом пине из SET.TXT
@@ -257,6 +257,7 @@ void update_scheduler() {
 
   if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
     // если часы подключены
+    I2C_DS_restart();
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     
     pWire->beginTransmission(RTC_I2C_ADDRESS);
@@ -269,7 +270,7 @@ void update_scheduler() {
       rtc_min   = bcd2bin(pWire->read());        // 0x01: Минуты
       rtc_hour  = bcd2bin(pWire->read() & 0x3F); // 0x02: Часы
       pWire->read(); // Пропускаем день недели (регистр 0x03)
-      //rtc_dotw  = bcd2bin(pWire->read() & 0x07); // 0x03: День недели (записываем сюда вместо пропуска!)
+      rtc_dotw  = bcd2bin(pWire->read() & 0x07); // 0x03: День недели (записываем сюда вместо пропуска!)
       rtc_day   = bcd2bin(pWire->read());        // 0x04: День месяца (дата)
       rtc_month = bcd2bin(pWire->read() & 0x1F); // 0x05: Месяц
       rtc_year  = bcd2bin(pWire->read()) + 2000; // 0x06: Год
@@ -333,6 +334,8 @@ String get_telemetry_string() {
 
   // Считываем температуру только если чип определен как DS3231
   if (device_DS[0] == 1 && activeRtc == RTC_DS3231) {
+    // Передаём пины под управление I2C-контроллера Wire1/Wire
+    I2C_DS_restart();
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     pWire->beginTransmission(RTC_I2C_ADDRESS);
     pWire->write(0x11); // Регистр MSB температуры DS3231

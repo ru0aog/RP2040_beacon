@@ -123,6 +123,8 @@ void read_hardware_settings();
 // Функция экспорта результатов сканирования I2C и пинов обратно в SET.TXT
 void save_hardware_settings_to_file(String scan_results);
 
+void log_file_write_block(const String& block);  // запись многострочного блока на флэш за один раз
+
 bool is_pin_excluded_from_scan(int pin);
 
 // ============================================================================

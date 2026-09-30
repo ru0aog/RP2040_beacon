@@ -59,6 +59,7 @@
 #include <Wire.h>
 #include "scheduler.h"
 #include "file_manager.h" // Доступ к константам и структуре TaskItem
+#include "climate_log.h"
 
 extern int pin_amp_act;          // Динамический пин активации УМ из file_manager.cpp
 extern bool dev_TX_state;        // Состояние усилителя (true = передача, false = прием)
@@ -286,6 +287,8 @@ void update_scheduler() {
       rtc_year  = currentTime.year;
     }
   }
+  // обновить лог климата
+  climate_log_update();
 }
 
 

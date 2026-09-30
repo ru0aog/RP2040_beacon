@@ -1101,3 +1101,45 @@ void force_reset_to_default_disk() {
 }
 
 
+
+
+// добавление произвольного блока строк в LOG.TXT  
+// ОДИН вызов save_ram_to_flash() и ОДИН цикл перемонтирования USB на весь блок  
+void log_file_write_block(const String& block) {  
+  uint32_t root_offset      = SECTOR_SIZE * 2;  
+  uint32_t log_entry_offset = root_offset + 64;  
+  uint32_t log_data_offset  = SECTOR_SIZE * (5 + INFO_CLUSTERS + SET_CLUSTERS);  
+  
+  uint32_t current_size = ram_disk_buffer[log_entry_offset + 28] |  
+                         (ram_disk_buffer[log_entry_offset + 29] << 8) |  
+                         (ram_disk_buffer[log_entry_offset + 30] << 16) |  
+                         (ram_disk_buffer[log_entry_offset + 31] << 24);  
+  
+  String formatted = block + "\r\n";   // завершаем последнюю строку блока  
+  uint32_t msg_len = formatted.length();  
+  
+  if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {  
+    Serial.println("[Журнал]  Лог заполнен! Автоочистка...");  
+    log_file_clear();  
+    current_size = ram_disk_buffer[log_entry_offset + 28] |  
+                  (ram_disk_buffer[log_entry_offset + 29] << 8) |  
+                  (ram_disk_buffer[log_entry_offset + 30] << 16) |  
+                  (ram_disk_buffer[log_entry_offset + 31] << 24);  
+  }  
+  
+  memcpy(&ram_disk_buffer[log_data_offset + current_size], formatted.c_str(), msg_len);  
+  
+  uint32_t new_size = current_size + msg_len;  
+  ram_disk_buffer[log_entry_offset + 28] = (uint8_t)(new_size);  
+  ram_disk_buffer[log_entry_offset + 29] = (uint8_t)(new_size >> 8);  
+  ram_disk_buffer[log_entry_offset + 30] = (uint8_t)(new_size >> 16);  
+  ram_disk_buffer[log_entry_offset + 31] = (uint8_t)(new_size >> 24);  
+  
+  save_ram_to_flash();              // <-- один раз на весь блок  
+  Serial.print("[Журнал]  Блок добавлен, объем: ");  
+  Serial.println(new_size);  
+  
+  usb_msc.setUnitReady(false);      // <-- одно перемонтирование  
+  delay(1500);  
+  usb_msc.setUnitReady(true);  
+}

@@ -33,6 +33,7 @@ extern uint8_t device_BM[5]; // номер шины, пин SDA, пин SCL, а�
 
 void init_BME();
 void BME_read();
+void get_BME_data();
 String get_climate_telemetry();
 
 #endif

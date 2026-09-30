@@ -741,7 +741,7 @@ int32_t get_next_start_minute(uint8_t mode) {
 
 
 // преобразование результата в строку "HH:MM" или "завтра HH:MM"  
-static String fmt_next_start(int32_t abs_min) {  
+String fmt_next_start(int32_t abs_min) {  
   if (abs_min < 0) return String("Не задан");  
   uint32_t day_off = abs_min / 1440;  
   uint32_t m = abs_min % 1440;  

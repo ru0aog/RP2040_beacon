@@ -61,6 +61,7 @@
 #include "bme280.h"
 #include "lcd.h"
 #include "led_blink.h"
+#include "climate_log.h"
 #include <hardware/watchdog.h>
 #include <hardware/adc.h>
 #include "vfo_hardware.h"
@@ -281,7 +282,9 @@ void check_serial_commands() {
               log_file_write_line("флэш-диск отформатирован. Все установки сброшены");
             }
           }
-
+          else if (command.equalsIgnoreCase("sched") || command.equalsIgnoreCase("schedule")) {  
+            print_schedule();  
+          }
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();
@@ -310,6 +313,7 @@ void check_serial_commands() {
           Serial.println(F("text            - Показать текущий текст радиопередачи из конфигурации INFO.txt"));
           Serial.println(F("text [текст]    - Записать новый текст передачи в файл конфигурации, например: text NEW TEXT"));
           Serial.println(F("setparam M=V    - Изменить любой маркер в конфигурации, например: setparam CALL=RA3ABC или setparam QTH=NA56AV"));
+          Serial.println(F("sched           - Показать таблицу расписания передач из INFO.txt"));
           Serial.println(F("start cw        - Немедленно запустить внеочередной сеанс CW"));
           Serial.println(F("start rtty      - Немедленно запустить внеочередной сеанс RTTY"));
           Serial.println(F("start ifkp      - Немедленно запустить внеочередной сеанс IFKP"));
@@ -800,7 +804,7 @@ void loop() {
         uint32_t cw_hz = (my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000;
         
         prepare_cw_frequency(cw_hz);
-        Serial.print(F("[Скорость]: ")); Serial.print(1200 / CW_DOT_TIME_MS); Serial.print(F(" WPM, "));
+        Serial.print(F("[Скорость] ")); Serial.print(1200 / CW_DOT_TIME_MS); Serial.print(F(" WPM, "));
         Serial.print(F("длительность точки ")); Serial.print(CW_DOT_TIME_MS); Serial.println(F(" мс"));
         
         // ШАГ 1: Передача позывного и локатора

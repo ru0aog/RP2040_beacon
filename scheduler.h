@@ -88,7 +88,7 @@ struct TaskItem {
 extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
 
 void print_schedule();
-static String fmt_next_start(int32_t abs_min);
+String fmt_next_start(int32_t abs_min);
 int32_t get_next_start_minute(uint8_t mode);
 
 /*

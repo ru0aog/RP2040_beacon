@@ -123,13 +123,18 @@ extern uint8_t rtc_sec;
 // Функция проверки и обработки текстовых команд с локальным эхом
 extern void update_info_config_from_console(String marker, String new_value);
 
-void check_serial_commands() {
-  static char cmd_buffer[64];
-  static size_t buf_idx = 0;
+void check_serial_commands() {  
+  static char cmd_buffer[64];  
+  static size_t buf_idx = 0;  
+  static uint32_t last_input_ms = 0;   // время последнего принятого символа  
+  static bool reminder_shown = false;  // защёлка, чтобы напоминание не повторялось
 
   // Цикл работает, пока не вычитает ВСЕ доступные символы из UART
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
+
+    last_input_ms = millis();  
+    reminder_shown = false;   // новый ввод — сбрасываем защёлку
 
     if (c == '\n' || c == '\r') {
       if (buf_idx > 0) {
@@ -332,10 +337,26 @@ void check_serial_commands() {
           cmd_buffer[buf_idx++] = c;
       } else {
           buf_idx = 0; // Защита от переполнения
+          reminder_shown = true;  
+          Serial.println(F("\n[Ошибка] Команда длиннее 63 символов — буфер очищен."));  
       }
     }
   } // Конец while
+  
+  // Напоминание: буфер не пуст, а терминатор не приходит уже 10 секунд  
+  if (!reminder_shown && buf_idx > 0 && last_input_ms != 0 &&  
+      (millis() - last_input_ms > 10000)) {  
+    reminder_shown = true;  
+    Serial.println(F("\n[Подсказка] Команда набрана, но не отправлена. "  
+                     "Включите в терминале перевод строки (NL или NL&CR)."));  
+    Serial.print(F("> "));  
+    Serial.write(cmd_buffer, buf_idx);   // выводит ровно buf_idx байт, '\0' не нужен  
+    Serial.println();  
+  }  
 }
+
+
+
 
 void setup() {
   adc_init();

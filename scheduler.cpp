@@ -96,7 +96,7 @@ static uint8_t bin2bcd(uint8_t val) { return val + 6 * (val / 10); }
 
 void I2C_DS_restart() {
   // перезапуск шины Wire на линиях часов
-  if (device_DS[4] == RTC_I2C_ADDRESS) {
+  if (device_DS[0] == 1) {
     // если часы обнаружены
     // Выбираем нужный интерфейс Wire
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
@@ -113,7 +113,7 @@ void I2C_DS_restart() {
 // Низкоуровневая проверка: отвечает ли чип по I2C
 bool pingRTC() {
   // перезапуск шины Wire на линиях часов
-  if (device_DS[4] == RTC_I2C_ADDRESS) {
+  if (device_DS[0] == 1) {
     TwoWire *pWire = (device_DS[1] == 1) ? &Wire1 : &Wire;
     pWire->beginTransmission(RTC_I2C_ADDRESS);
     //Serial.println("[Система] пинг модуля RTC");
@@ -164,12 +164,12 @@ void init_scheduler() {
     
     datetime_t setcurrentTime = {
       .year  = 2026,
-      .month = 7,
-      .day   = 27,
+      .month = 9,
+      .day   = 30,
       .dotw  = 1, 
       .hour  = 15,
-      .min   = 00,
-      .sec   = 45};
+      .min   = 12,
+      .sec   = 00};
       
     // Безопасная аппаратная установка времени во внутренний регистр
     rtc_set_datetime(&setcurrentTime);
@@ -249,8 +249,7 @@ void init_scheduler() {
 
 // Обновление переменных времени
 void update_scheduler() {
-  // установить состояние пина управления УМ
-  // ПРАВКА: Циклический фоновый контроль состояния УМ на динамическом пине из SET.TXT
+  // Циклический фоновый контроль состояния УМ на динамическом пине из SET.TXT
   if (pin_amp_act != -1) {
     gpio_put(pin_amp_act, dev_TX_state);
   }

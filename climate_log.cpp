@@ -57,10 +57,10 @@ static void climate_take_sample() {
   sample_count++;  
   
 #if DEBUG_CLIMATE_LOG  
-  Serial.printf("[Климат] Замер %d/%d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",  
-                sample_count, MAX_SAMPLES, s.time, s.temp, s.press, s.humid);  
+  Serial.printf("[Климат] Замер %2d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",  
+                sample_count, s.time, s.temp, s.press, s.humid);  
 #endif  
-}  
+}
   
 static void climate_write_report() {  
   if (sample_count == 0) {  
@@ -71,7 +71,7 @@ static void climate_write_report() {
   }  
   
 #if DEBUG_CLIMATE_LOG  
-  Serial.printf("[Климат] Формирую таблицу: %d замеров -> LOG.TXT... ", sample_count);  
+  Serial.printf("[Климат] Формирую таблицу: %d замеров -> LOG.TXT... \r\n", sample_count);  
 #endif  
   
   String table;  
@@ -89,65 +89,31 @@ static void climate_write_report() {
   sample_count = 0;  
   
 #if DEBUG_CLIMATE_LOG  
-  Serial.println(F("готово"));  
+  Serial.println(F("[Климат] готово"));  
 #endif  
 }
 
 
-/*
-// Формирование таблицы и запись в LOG.TXT  
-static void climate_write_report() {  
-  if (sample_count == 0) return;  
-  
-  log_file_write_line("=== КЛИМАТ за " + get_current_date() + " ===");  
-  log_file_write_line("TIME      T(C)   P(mm)  H(%)");  
-  
-  for (uint8_t i = 0; i < sample_count; i++) {  
-    char line[48];  
-    snprintf(line, sizeof(line), "%s  %5.1f  %6.1f  %4.1f",  
-             samples[i].time, samples[i].temp, samples[i].press, samples[i].humid);  
-    log_file_write_line(String(line));  
-  }  
-  
-  sample_count = 0; // очищаем буфер после записи  
-}  
-
-
-
-// Формирование таблицы и запись в LOG.TXT за один раз
-static void climate_write_report() {  
-  if (sample_count == 0 || device_BM[0] != 1) return;  
-  
-  String table;  
-  table.reserve(sample_count * 48 + 96);   // без фрагментации кучи  
-  
-  table += "=== КЛИМАТ за ";  
-  table += get_current_date();  
-  table += " ===\r\n";  
-  table += "TIME      T(C)   P(mm)  H(%)\r\n";  
-  
-  for (uint8_t i = 0; i < sample_count; i++) {  
-    char line[48];  
-    snprintf(line, sizeof(line), "%s  %5.1f  %6.1f  %4.1f\r\n",  
-             samples[i].time, samples[i].temp,  
-             samples[i].press, samples[i].humid);  
-    table += line;  
-  }  
-  
-  log_file_write_block(table);   // одна запись во Flash на всю таблицу  
-  sample_count = 0;  
-}
-
-*/
-
-
+// Проверка времени
 // Вызывать из loop() каждую итерацию  
 void climate_log_update() {  
   uint32_t now = millis();  
+  
+  // Пауза на время сеанса передачи: сдвигаем оба таймера,  
+  // чтобы не было мгновенного догоняющего замера после эфира  
+  if (is_transmitting) {  
+    last_sample_ms = now;  
+    last_report_ms = now;  
+    return;  
+  }  
   
   if (now - last_sample_ms >= SAMPLE_INTERVAL_MS) {  
     last_sample_ms = now;  
     climate_take_sample();  
   }  
-
+  
+  if (now - last_report_ms >= REPORT_INTERVAL_MS) {  
+    last_report_ms = now;  
+    climate_write_report();  
+  }  
 }

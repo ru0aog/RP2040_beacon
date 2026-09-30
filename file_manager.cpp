@@ -110,18 +110,23 @@ volatile uint32_t last_msc_write_time = 0;
 bool pc_activity_detected = false;
 
 // Колбэки и посредники для TinyUSB MSC
+
+// msc_flush_cb в стеке TinyUSB MSC вызывается не только после реальной записи секторов, 
+// но и на SCSI-команду SYNCHRONIZE CACHE, 
+// которую Windows посылает регулярно — при монтировании тома, обращении к файлу, фоновом опросе проводника.
 void msc_flush_cb(void) {
   last_msc_write_time = millis();
-  pc_activity_detected = true;
-  pc_file_written = true; // Выставляем флаг мгновенно для экстренного останова передачи
 }
 
 int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
   if (lba >= SECTOR_COUNT) return -1;
   memcpy(buffer, &ram_disk_buffer[lba * SECTOR_SIZE], bufsize);
+  pc_activity_detected = true;
+  pc_file_written = true; // Выставляем флаг мгновенно для экстренного останова передачи
   return bufsize;
 }
 
+// msc_write_cb - единственное место, где ПК действительно пишет сектор
 int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   if (lba >= SECTOR_COUNT) return -1;
   memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);

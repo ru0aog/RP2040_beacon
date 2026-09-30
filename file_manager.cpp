@@ -125,14 +125,21 @@ int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
 }
 
 // msc_write_cb - единственное место, где ПК действительно пишет сектор
-int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
-  if (lba >= SECTOR_COUNT) return -1;
-  memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);
-  last_msc_write_time = millis();
-  pc_activity_detected = true;
-  pc_file_written = true; // Выставляем флаг мгновенно для экстренного останова передачи
-  return bufsize;
+int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {  
+  if (lba >= SECTOR_COUNT) return -1;  
+  memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);  
+  last_msc_write_time = millis();  
+  pc_activity_detected = true;  
+  // Прерываем эфир только при изменении конфигурации:  
+  // сектора 0-4 (Boot/FAT/каталог), INFO.TXT (5-24), SET.TXT (25-44)  
+  uint32_t last_lba = lba + (bufsize / SECTOR_SIZE) - 1;  
+  if (lba <= 44) {  // покрывает и случай last_lba > 44 при захвате сектора 44  
+    pc_file_written = true;  // Выставляем флаг для экстренного останова передачи
+  }  
+  return bufsize;  
 }
+
+
 
 // функция сохранения ОЗУ во Flash с ротацией по 8 слотам
 static void save_ram_to_flash() {

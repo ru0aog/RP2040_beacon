@@ -305,7 +305,7 @@ void print_current_date() {
 
 String get_current_time() {
   update_scheduler();
-  char buf[9]; 
+  char buf[16]; 
   snprintf(buf, sizeof(buf), "%02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
   return String(buf);
 }
@@ -313,7 +313,7 @@ String get_current_time() {
 // Исправлено: разделители заменены на корректные точки '.'
 String get_current_date() {
   update_scheduler();
-  char buf[11]; 
+  char buf[16]; 
   snprintf(buf, sizeof(buf), "%02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
   return String(buf);
 }

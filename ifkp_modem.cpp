@@ -143,7 +143,8 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
         vfo_hardware_init(base_hz, IFKP_STEP_HZ);
         vfo_set_cw_key(true); // Открываем ВЧ-выход ноги 28 в эфир
         vfo_set_tone_instant(0);
-        Serial.print(F("[IFKP_PIO] Аппаратное PIO-ядро готово. База: ")); Serial.print(base_hz);
+        Serial.println(F("[IFKP_PIO] Аппаратное PIO-ядро готово."));
+        Serial.print(F("[IFKP_PIO] Базовая частота: ")); Serial.print(format_freq(base_hz));
         Serial.print(F(" Гц, Шаг: ")); Serial.print(IFKP_STEP_HZ, 3); Serial.println(F(" Гц"));
         return; 
     }
@@ -160,8 +161,8 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
     uint32_t span_hz_part = (uint32_t)((((uint64_t)32 * 11697ULL)) / 1000ULL);
     uint32_t midd_hz_part = (uint32_t)(base_hz_part+(span_hz_part/2));
 
-    Serial.print(F("Базовая частота: ")); Serial.print(make_freq_with_space(base_hz_part)); Serial.println(F(" Гц")); 
-    Serial.print(F("Средняя частота: ")); Serial.print(make_freq_with_space(midd_hz_part)); Serial.println(F(" Гц")); 
+    Serial.print(F("Базовая частота: ")); Serial.print(format_freq(base_hz_part)); Serial.println(F(" Гц")); 
+    Serial.print(F("Средняя частота: ")); Serial.print(format_freq(midd_hz_part)); Serial.println(F(" Гц")); 
     Serial.print(F("Ширина полосы  : ")); Serial.print(span_hz_part); Serial.println(F(" Гц")); 
     Serial.println(F("[IFKP_ГОТОВ] 33 тона сетки частот IFKP успешно рассчитаны."));
 }

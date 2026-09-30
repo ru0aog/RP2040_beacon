@@ -92,13 +92,15 @@ void prepare_cw_frequency(uint32_t freq_hz) {
     calculate_freq_bytes_mHz(freq_mHz, cw_reg_buffer);
     CLK_OFF_si5351(0);               // отключить CLK0
     setFrq_si5351(cw_reg_buffer, 0); // установить частоту для CLK0
+    Serial.println(F("[RTTY_ГОТОВ] Аппаратный VFO CW инициализирован!"));
     Serial.print("[CW_ГОТОВ]: Частота несущей CW готова: "); 
-    Serial.print(cw_frequency_hz); 
-    Serial.println(" Hz");
+    Serial.print(format_freq(cw_frequency_hz)); Serial.println(" Гц");
   }
   else {
     //set_pio_sdr_freq(freq_hz);
+    Serial.println(F("[CW_ГОТОВ] Программный DDS VFO инициализирован!"));
     Serial.print("[CW_ГОТОВ]: Частота несущей CW готова: ");
+    Serial.print(format_freq(freq_hz)); Serial.println(" Гц");
     vfo_hardware_init(freq_hz, 10.0);
     vfo_set_cw_key(false);
     //Serial.print(fractGen_get_real_frequency()); 

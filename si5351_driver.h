@@ -47,6 +47,6 @@ void setFrq_si5351(uint8_t SI_FREQ[], uint8_t CLK_NO);
 void SI_POWER_ON();
 void SI_POWER_OFF();
 bool si5351_write_reg(uint8_t reg, uint8_t data);
-String make_freq_with_space(uint32_t FREQ);
+String format_freq(uint32_t FREQ);  // разделение частоты на МГц, кГц и Гц
 
 #endif

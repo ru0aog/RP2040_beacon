@@ -66,8 +66,8 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-#define BCN_VER "2.10.3"
-#define BCN_DAT "2026-09-28"
+String BCN_VER = "2.11";
+String BCN_DAT = "2026-09-30";
 
 bool dev_TX_state  = false;
 
@@ -199,7 +199,7 @@ void check_serial_commands() {
             LCD_init(true);
             LCD_print(">> CPU RESET <<", 0, 0);
             // Пишем в файл на виртуальную флешку историю работы
-            log_file_write_line(get_current_time() + " рестарт процессора");
+            log_file_write_line("рестарт процессора");
             SI_POWER_OFF();
             Serial.println(F("***"));
             Serial.println(F(""));
@@ -262,9 +262,25 @@ void check_serial_commands() {
               LCD_print("LOG FILE BLANK", 0, 0);
               Serial.println(F("[Система] Журнал успешно очищен!"));
               // Пишем в файл на виртуальную флешку историю работы
-              log_file_write_line(get_current_time() + " Лог очищен");
+              log_file_write_line("Лог очищен");
             }
           }
+          // ПРИНУДИТЕЛЬНЫЙ СБРОС ВСЕХ ФАЙЛОВ НА ДЕФОЛТ ---
+          else if (command.equalsIgnoreCase("format disk")) {
+            if (is_transmitting) {
+              Serial.println(F("[Ошибка] Нельзя форматировать диск во время активной передачи в эфир!"));
+            } else {
+              LCD_init(true);
+              LCD_print("FORMATTING DISK.", 0, 0);
+              
+              force_reset_to_default_disk(); // Вызов новой функции сброса
+              
+              LCD_print("DISK DEFAULT OK", 0, 0);
+              // Записываем событие в свежесозданный дефолтный лог
+              log_file_write_line("флэш-диск отформатирован. Все установки сброшены");
+            }
+          }
+
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();
@@ -297,6 +313,7 @@ void check_serial_commands() {
           Serial.println(F("start rtty      - Немедленно запустить внеочередной сеанс RTTY"));
           Serial.println(F("start ifkp      - Немедленно запустить внеочередной сеанс IFKP"));
           Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
+          Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));
           Serial.println(F("stop            - Экстренная остановка передачи маяка"));
           Serial.println(F("restart         - Мягкий виртуальный перезапуск маяка"));
           Serial.println(F("reset           - Жесткий аппаратный сброс процессора RP2040"));
@@ -317,9 +334,10 @@ void check_serial_commands() {
 
 void setup() {
   adc_init();
-  init_file_manager();  // инициализировать флэш-диск
+  init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом
+  init_file_manager();
 
-  pinMode(PIN_USR_BUTTON, INPUT_PULLUP); 
+  pinMode(PIN_USR_BUTTON, INPUT_PULLUP);          // инициализируем пин кнопки
   delay(20);                                      // Даем Pull-up надежно поднять линию до +3.3 В
   old_button_state = digitalRead(PIN_USR_BUTTON); // Фиксируем РЕАЛЬНОЕ стартовое состояние (HIGH)
 
@@ -348,9 +366,8 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.print("[Система] "); Serial.println(my_FAT);
 
-  //Serial.print("[Система] Сканирование доступных устройств. \n");
-  I2C_Scanner();
-  //Serial.print("[Система] Сканирование завершено.\n");
+
+  I2C_Scanner();       // сканировать шину I2C, формировать таблицу устройств
 
   init_BME();          // инициализировать bme280
 
@@ -359,6 +376,9 @@ void setup() {
   init_si5351();       // инициализировать си5351
 
   ZERO_LED_init();     // инициализировать WS2812B
+
+  init_flash_disk();   // инициализировать флэш-диск для Windows
+
 
   // Инициализация пинов питания шин, если они назначены (не равны -1)
   if (pin_pwr_si != -1) { pinMode(pin_pwr_si, OUTPUT); digitalWrite(pin_pwr_si, LOW); }
@@ -619,12 +639,17 @@ void loop() {
           Serial.print(F("[ЭФИР_IFKP] Телем: "));
           send_ifkp_string(telemetry);
         }
-        
-        // IFKP: передача климатической телеметрии
+
+        // ШАГ 4: Передача климатической телеметрии
         if (!pc_file_written && !soft_restart_flag) {
-          String telemetry = get_climate_telemetry();
+          if (device_BM[0] == 1) {
+            String telemetry = get_climate_telemetry();
           Serial.print(F("[ЭФИР_IFKP] Телем: "));
-          send_ifkp_string(telemetry);
+            send_ifkp_string(telemetry);
+          }
+          else {
+            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
+          }
         }
         
         // IFKP завершение передачи
@@ -641,7 +666,7 @@ void loop() {
           snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс IFKP завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ifkp_session_duration_sec);
           Serial.println(end_buf);
           // Пишем в файл на виртуальную флешку историю работы
-          log_file_write_line(get_current_time() + " Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
+          log_file_write_line("Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
         }
       } 
       
@@ -650,7 +675,6 @@ void loop() {
       SI_POWER_OFF();
       dev_TX_state = false;
       update_scheduler(); // Гарантированно сдвигаем планировщик во избежание бесконечного перезапуска цикла
-      Serial.println("");
     } 
   }
 
@@ -709,12 +733,17 @@ void loop() {
           Serial.print(F("[ЭФИР_RTTY] Телем: "));
           send_rtty_string(telemetry);
         }
-        
-        // ШАГ 4: RTTY передача климатической телеметрии
+
+        // ШАГ 4: Передача климатической телеметрии
         if (!pc_file_written && !soft_restart_flag) {
-          String telemetry = get_climate_telemetry();
+          if (device_BM[0] == 1) {
+            String telemetry = get_climate_telemetry();
           Serial.print(F("[ЭФИР_RTTY] Телем: "));
-          send_rtty_string(telemetry);
+            send_rtty_string(telemetry);
+          }
+          else {
+            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
+          }
         }
         
         // ШАГ 5: RTTY завершение передачи
@@ -732,7 +761,7 @@ void loop() {
           Serial.println(end_buf);
         
         // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line(get_current_time() + " Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
+        log_file_write_line("Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
         }
       } 
       
@@ -741,7 +770,6 @@ void loop() {
       SI_POWER_OFF();
       dev_TX_state = false;
       update_scheduler(); 
-      Serial.println("");
     } 
   }
 
@@ -801,7 +829,7 @@ void loop() {
             send_cw_string(telemetry);
           }
           else {
-            Serial.println(F("[Система] отустствует модуль BME. Погодная телеметрия не передаётся"));
+            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
           }
         }
         
@@ -819,7 +847,7 @@ void loop() {
         Serial.println(end_buf);
 
         // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line(get_current_time() + " Сеанс CW завершен. Длительность: " + String(cw_session_duration_sec) + " сек.");
+        log_file_write_line("Сеанс CW завершен. Длительность: " + String(cw_session_duration_sec) + " сек.");
       } 
       
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
@@ -827,7 +855,6 @@ void loop() {
       SI_POWER_OFF();
       dev_TX_state = false;
       update_scheduler(); // Переключаем планировщик на следующий интервал времени
-      Serial.println("");
     } 
   }
 
@@ -958,166 +985,139 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
   }
 
   for (address = 1; address < 127; address++) {
-    // Начало передачи по адресу
+    // Первичная проверка присутствия прибора по ACK
     pWire->beginTransmission(address);
     error = pWire->endTransmission();
 
     if (error == 0) {
-      if (LOGGING) {
-        Serial.print("[Система] - найден I2C прибор по адресу: 0x");
-        if (address < 16) Serial.print("0");
-        Serial.print(address, HEX);
-      }
-      
-      // для Si5351
+      // Инициализируем локальный флаг глубокой проверки
+      bool hardware_verified = false;
+
+      // =========================================================================
+      // 1. УСИЛЕННАЯ ВЕРИФИКАЦИЯ СИНТЕЗАТОРА SI5351 (0x60)
+      // =========================================================================
       if (address == 0x60) {
-      byte revid;
+        byte revid = 0;
         pWire->beginTransmission(address);
-        pWire->write(0x00);
+        pWire->write(0x00); // Регистр ревизии чипа / Device Status
         if (pWire->endTransmission() == 0) {
-          pWire->requestFrom(address, 1);
-          if (pWire->available()) {
+          // Запрашиваем 1 байт и строго проверяем успешность транзакции шины
+          if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
             byte reg0 = pWire->read();
             revid = reg0 & 0x03;
-            if (LOGGING) {Serial.print(" - это чип Si5351 ревизии "); Serial.print(revid);}
+            hardware_verified = true; // Устройство физически ответило байтом данных!
+            
+            if (LOGGING) { 
+              Serial.print("[Система] - найден прибор 0x60: Si5351 ревизии "); 
+              Serial.println(revid); 
+            }
           }
         }
-        device_SI[0] = 1;
-        device_SI[1] = WIRE_NO;
-        device_SI[2] = PIN_SDA;
-        device_SI[3] = PIN_SCL;
-        device_SI[4] = address;
-        device_SI_name = "SI5351 Генератор";
+        
+        if (hardware_verified) {
+          device_SI[0] = 1;
+          device_SI[1] = WIRE_NO;
+          device_SI[2] = PIN_SDA;
+          device_SI[3] = PIN_SCL;
+          device_SI[4] = address;
+          device_SI_name = "SI5351 Генератор";
+        }
       }
 
-      // для DS3231/1307
-      if (address == 0x68) {
+      // =========================================================================
+      // 2. УСИЛЕННАЯ ВЕРИФИКАЦИЯ ЧАСОВ RTC DS3231 / DS1307 (0x68)
+      // =========================================================================
+      else if (address == 0x68) {
         extern String rtc_chip_name;
-        
-        // --- 100% НАДЕЖНОЕ И БЕЗОПАСНОЕ ОПРЕДЕЛЕНИЕ ТИПА ЧИПА RTC ---
-        // Пытаемся записать биты 4,5,6 (0x70) в регистр статуса 0x0F
         pWire->beginTransmission(address);
-        pWire->write(0x0F);
+        pWire->write(0x0F); // Регистр управления/статуса
         pWire->write(0x70); 
         if (pWire->endTransmission() == 0) {
-          
-          // Читаем этот же регистр обратно
           pWire->beginTransmission(address);
           pWire->write(0x0F);
           pWire->endTransmission();
           
-          uint8_t rxBytes = pWire->requestFrom(address, (uint8_t)1);
-          uint8_t testByte = 0;
-          if (rxBytes > 0 && pWire->available()) {
-            testByte = pWire->read();
-          }
+          // Проверяем, вернулся ли ровно 1 байт без обрыва связи
+          if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
+            uint8_t testByte = pWire->read();
+            hardware_verified = true; // Пробное чтение прошло успешно
 
-          // Анализируем: если биты стерлись — это аппаратный регистр DS3231. 
-          // Если записались — это пользовательская NV RAM чипа DS1307.
-          if ((testByte & 0x70) == 0x70) {
-            rtc_chip_name = "DS1307";
-            if (LOGGING) { Serial.print(" - это чип DS1307"); }
-            
-            // Заметаем следы в памяти DS1307A
-            pWire->beginTransmission(address);
-            pWire->write(0x0F);
-            pWire->write(0x00);
-            pWire->endTransmission();
-          } else {
-            rtc_chip_name = "DS3231";
-            if (LOGGING) { Serial.print(" - это чип высокой точности DS3231"); }
+            if ((testByte & 0x70) == 0x70) {
+              rtc_chip_name = "DS1307";
+              pWire->beginTransmission(address);
+              pWire->write(0x0F); pWire->write(0x00); // Чистим NVRAM регистр за собой
+              pWire->endTransmission();
+            } else {
+              rtc_chip_name = "DS3231";
+            }
+            if (LOGGING) { 
+              Serial.print("[Система] - найден прибор 0x68: Часы "); 
+              Serial.println(rtc_chip_name); 
+            }
           }
-        } else {
-          // Резервный случай, если транзакция сбоит
-          rtc_chip_name = "DS3231";
         }
-
-        // Заполнение глобальной таблицы приборов маяка
-        device_DS[0] = 1;
-        device_DS[1] = WIRE_NO;
-        device_DS[2] = PIN_SDA;
-        device_DS[3] = PIN_SCL;
-        device_DS[4] = address;
-        device_DS_name = rtc_chip_name + " Часы RTC";
+        
+        if (hardware_verified) {
+          device_DS[0] = 1;
+          device_DS[1] = WIRE_NO;
+          device_DS[2] = PIN_SDA;
+          device_DS[3] = PIN_SCL;
+          device_DS[4] = address;
+          device_DS_name = rtc_chip_name + " Часы RTC";
+        }
       }
 
-
-      // для флэш памяти AT24Cxx
-      // Проверяем весь диапазон адресов для памяти AT24Cxx (от 0x50 до 0x57)
-      if (address >= 0x50 && address <= 0x57) {
-        
-        // ТЕСТОВОЕ ЧТЕНИЕ: проверяем, отвечает ли чип вообще
+      // =========================================================================
+      // 3. УСИЛЕННАЯ ВЕРИФИКАЦИЯ ЭНЕРГОНЕЗАВИСИМОЙ ПАМЯТИ AT24Cxx (0x50..0x57)
+      // =========================================================================
+      else if (address >= 0x50 && address <= 0x57) {
         pWire->beginTransmission(address);
-        pWire->write(0x00); // Старший байт адреса 0
-        pWire->write(0x00); // Младший байт адреса 0
-        
+        pWire->write(0x00); pWire->write(0x00); // Выставляем указатель на адрес ячейки 0
         if (pWire->endTransmission() == 0) {
-          pWire->requestFrom(address, 1);
-          if (pWire->available()) {
-            uint8_t byte0 = pWire->read(); // Запоминаем значение в ячейке 0
+          // Выполняем строгое верификационное чтение первого байта памяти
+          if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
+            uint8_t byte0 = pWire->read();
+            hardware_verified = true; // Микросхема памяти подтверждена!
 
-            // Переменная для хранения определенного объема памяти в Килобитах
-            int kbits = 0; 
-            
-            // Массив возможных объемов для проверки переполнения: 32, 64, 128, 256, 512 Кбит
+            int kbits = 512; 
             int sizesToTest[] = {32, 64, 128, 256}; 
-            
-            // По умолчанию предполагаем самый большой чип, если переполнение не подтвердится
-            kbits = 512; 
 
             for (int i = 0; i < 4; i++) {
-              // Вычисляем адрес ячейки, где должно случиться зеркалирование (объем в Кбитах * 1024 / 8 битов)
               uint16_t testAddr = (sizesToTest[i] * 128); 
-
               pWire->beginTransmission(address);
-              pWire->write((uint8_t)(testAddr >> 8));   // Старший байт тестового адреса
-              pWire->write((uint8_t)(testAddr & 0xFF));  // Младший байт тестового адреса
+              pWire->write((uint8_t)(testAddr >> 8)); pWire->write((uint8_t)(testAddr & 0xFF));
               
-              if (pWire->endTransmission() == 0) {
-                pWire->requestFrom(address, 1);
-                if (pWire->available()) {
-                  uint8_t testByte = pWire->read();
+              if (pWire->endTransmission() == 0 && pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
+                uint8_t testByte = pWire->read();
+                if (testByte == byte0) {
+                  pWire->beginTransmission(address);
+                  pWire->write(0x00); pWire->write(0x00); pWire->write((uint8_t)~byte0);
+                  pWire->endTransmission();
+                  delay(5); 
+
+                  pWire->beginTransmission(address);
+                  pWire->write((uint8_t)(testAddr >> 8)); pWire->write((uint8_t)(testAddr & 0xFF));
+                  pWire->endTransmission();
                   
-                  // Если байт совпал с нулевой ячейкой, проверяем инверсией (чтобы исключить случайное совпадение)
-                  if (testByte == byte0) {
-                    // Временно пишем инвертированное значение в ячейку 0
+                  if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available() && pWire->read() == (uint8_t)~byte0) {
+                    kbits = sizesToTest[i];
                     pWire->beginTransmission(address);
-                    pWire->write(0x00); pWire->write(0x00);
-                    pWire->write((uint8_t)~byte0);
-                    pWire->endTransmission();
-                    delay(5); // Ждем окончания физической записи в EEPROM (макс. 5мс)
-
-                    // Снова читаем тестовый адрес
-                    pWire->beginTransmission(address);
-                    pWire->write((uint8_t)(testAddr >> 8));
-                    pWire->write((uint8_t)(testAddr & 0xFF));
-                    pWire->endTransmission();
-                    pWire->requestFrom(address, 1);
-                    
-                    bool isMirrored = (pWire->available() && pWire->read() == (uint8_t)~byte0);
-
-                    // Возвращаем исходный байт назад в ячейку 0
-                    pWire->beginTransmission(address);
-                    pWire->write(0x00); pWire->write(0x00);
-                    pWire->write(byte0);
+                    pWire->write(0x00); pWire->write(0x00); pWire->write(byte0);
                     pWire->endTransmission();
                     delay(5);
-
-                    if (isMirrored) {
-                      kbits = sizesToTest[i]; // Объем определен!
-                      break;
-                    }
+                    break;
                   }
+                  pWire->beginTransmission(address);
+                  pWire->write(0x00); pWire->write(0x00); pWire->write(byte0);
+                  pWire->endTransmission();
+                  delay(5);
                 }
               }
             }
             if (LOGGING) {
-              // Выводим результат сканирования в консоль
-              Serial.print(" - это EEPROM AT24C");
-              Serial.print(kbits);
-              Serial.print(" (Объем: ");
-              Serial.print(kbits / 8); // Переводим килобиты в килобайты (32 Кбит = 4 Кбайт)
-              Serial.print(" Кбайт)");
+              Serial.print("[Система] - найден прибор 0x"); Serial.print(address, HEX);
+              Serial.print(": EEPROM AT24C"); Serial.print(kbits);
+              Serial.print(" ("); Serial.print(kbits / 8); Serial.println(" Кбайт)");
             }
             device_AT[0] = 1;
             device_AT[1] = WIRE_NO;
@@ -1129,110 +1129,86 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
         }
       }
 
-      if (address == 0x58) {
-        if (LOGGING) {Serial.print(" - это зеркальный адрес (страница) памяти EEPROM AT24Cxx");}
-      }
+      // =========================================================================
+      // 4. УСИЛЕННАЯ ВЕРИФИКАЦИЯ ДИСПЛЕЯ LCD1602 (0x27) ЧЕРЕЗ ПРОВЕРКУ ФЛАНГА ШИНЫ
+      // =========================================================================
+      else if (address == 0x27) {
+        // Микросхема расширителя PCF8574 всегда возвращает 1 байт состояния пинов при чтении
+        if (pWire->requestFrom(address, (uint8_t)1) == 1) {
+          hardware_verified = true; // Экран подтвердил своё присутствие
 
-
-      // для дисплея LCD1602 / LCD2004
-      if (address == 0x27) {
-        if (LOGGING) { Serial.print(" - найден дисплей на 0x27. Инициализация..."); }
-        // 1. Сохраняем базовые настройки в системный массив маяка
-        device_DL[0] = 1;
-        device_DL[1] = WIRE_NO;
-        device_DL[2] = PIN_SDA;
-        device_DL[3] = PIN_SCL;
-        device_DL[4] = address;
-        device_DL_name = "H44780 LCD Дисплей";
-        // 2. Полностью останавливаем аппаратный I2C для защиты от зависаний
-        pWire->end();
-        LCD_init(true);
-        LCD_print("I2C Scan: OK!", 0, 0);
-        LCD_print("Display Active", 1, 0);
-        // 5. ВОЗВРАЩАЕМ АППАРАТНЫЙ I2C НАЗАД для остальных датчиков маяка
-        pWire->begin();
-        pWire->setClock(400000);
-        if (LOGGING) { Serial.println(" ок"); }
-      }
-
-
-      // для дисплея OLED 0.96"
-      if (address == 0x3C) {
-        if (LOGGING) {Serial.print(" - это дисплей OLED 0.96'");}
-      }
-
-      // для дисплея OLED 0.96"
-      if (address == 0x3D) {
-        if (LOGGING) {Serial.print(" - это дисплей OLED 0.96'");}
-      }
-
-
-      // для датчика давления BME280/BMP280
-      if (address == 0x76) {
-        if (LOGGING) {Serial.print(" - это датчик давления ");}
-        uint8_t chipID = 0;
-        pWire->beginTransmission(address);
-        pWire->write(0xD0);
-        pWire->endTransmission();
-        pWire->requestFrom(address, 1);
-        chipID = pWire->read();
-        if (chipID == 0x60) {
-          if (LOGGING) {Serial.print("BME280");}
-          device_BM_name = "BME280 Гигрометр";
-        } 
-        else if (chipID == 0x58 || chipID == 0x56 || chipID == 0x57) {
-          if (LOGGING) {Serial.print("BMP280");}
-          device_BM_name = "BMP280 Барометр";
-        } 
-        else {
-          if (LOGGING) {Serial.print("неизвестный чип");}
-          device_BM_name = "неизвестный чип";
+          if (LOGGING) { Serial.println("[Система] - найден прибор 0x27: LCD Дисплей (PCF8574). Инициализация..."); }
+          device_DL[0] = 1;
+          device_DL[1] = WIRE_NO;
+          device_DL[2] = PIN_SDA;
+          device_DL[3] = PIN_SCL;
+          device_DL[4] = address;
+          device_DL_name = "H44780 LCD Дисплей";
+          
+          pWire->end();
+          LCD_init(true);
+          LCD_print("I2C Scan: OK!", 0, 0);
+          LCD_print("Display Active", 1, 0);
+          pWire->begin();
+          pWire->setClock(400000);
         }
-        device_BM[0] = 1;
-        device_BM[1] = WIRE_NO;
-        device_BM[2] = PIN_SDA;
-        device_BM[3] = PIN_SCL;
-        device_BM[4] = address;
       }
 
-      // для датчика давления BME180
-      if (address == 0x77) {
-        if (LOGGING) {Serial.print(" - это датчик давления ");}
-        uint8_t chipID = 0;
+      // =========================================================================
+      // 5. УСИЛЕННАЯ ВЕРИФИКАЦИЯ КЛИМАТИЧЕСКИХ ДАТЧИКОВ BME280 / BMP280 / BMP180
+      // =========================================================================
+      else if (address == 0x76 || address == 0x77) {
+        uint8_t reg_id_addr = (address == 0x76 || address == 0x77) ? 0xD0 : 0xD0; // Идентификационный регистр Chip ID
         pWire->beginTransmission(address);
-        pWire->write(0xD0);
-        pWire->endTransmission();
-        pWire->requestFrom(address, 1);
-        chipID = pWire->read();
-        if (chipID == 0x55) {
-          if (LOGGING) {Serial.print("BMP180");}
-          device_BM_name = "BMP180 Барометр";
-        } 
-        else if (chipID == 0x58 || chipID == 0x56 || chipID == 0x57) {
-          if (LOGGING) {Serial.print("BMP280");}
-          device_BM_name = "BMP280 Барометр";
-        } 
-        else {
-          if (LOGGING) {Serial.print("неизвестный чип");}
-          device_BM_name = "неизвестный чип";
+        pWire->write(reg_id_addr);
+        if (pWire->endTransmission() == 0) {
+          // Запрашиваем уникальный заводской ID датчика
+          if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
+            uint8_t chipID = pWire->read();
+            hardware_verified = true; // Датчик физически прочитан!
+
+            if (chipID == 0x60) {
+              device_BM_name = "BME280 Гигрометр";
+            } else if (chipID == 0x58 || chipID == 0x56 || chipID == 0x57) {
+              device_BM_name = "BMP280 Барометр";
+            } else if (chipID == 0x55 && address == 0x77) {
+              device_BM_name = "BMP180 Барометр";
+            } else {
+              device_BM_name = "Неизвестный климатический чип ID:0x" + String(chipID, HEX);
+            }
+
+            if (LOGGING) { 
+              Serial.print("[Система] - найден прибор 0x"); Serial.print(address, HEX);
+              Serial.print(": "); Serial.println(device_BM_name); 
+            }
+
+            device_BM[0] = 1;
+            device_BM[1] = WIRE_NO;
+            device_BM[2] = PIN_SDA;
+            device_BM[3] = PIN_SCL;
+            device_BM[4] = address;
+          }
         }
-        device_BM[0] = 1;
-        device_BM[1] = WIRE_NO;
-        device_BM[2] = PIN_SDA;
-        device_BM[3] = PIN_SCL;
-        device_BM[4] = address;
       }
 
-
-      if (LOGGING) {Serial.println("");}
-      nDevices++;
+      // Финальный инкремент счетчика устройств только при успешном прохождении глубокого теста
+      if (hardware_verified) {
+        nDevices++;
+      } else {
+        if (LOGGING) {
+          Serial.print("[Предупреждение] Фантомный ACK на адресе 0x");
+          Serial.print(address, HEX);
+          Serial.println("! Устройство проигнорировано (нет ответа данных).");
+        }
+      }
     }
     else if (error == 4) {
-      Serial.print("[Система] Неизвестная ошибка по адресу: 0x");
+      Serial.print("[Система] Критическая ошибка шины на адресе: 0x");
       if (address < 16) Serial.print("0");
       Serial.println(address, HEX);
     }
   }
+
   if (nDevices == 0) {
     if (LOGGING) {Serial.print("[Система] - I2C устройства не найдены.\n");}
   }

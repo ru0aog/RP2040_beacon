@@ -38,7 +38,7 @@
  *  CLK_ON_si5351 / CLK_OFF_si5351 — вкл/выкл драйвера CLK0/CLK1 (регистры  
  *  0x10/0x11); при отсутствии чипа вызывают vfo_set_cw_key(true/false).  
  *  SI_POWER_ON / SI_POWER_OFF — подача/снятие питания с выходов и сброс PLL.  
- *  make_freq_with_space() — форматирование частоты для вывода (МГц,кГц.Гц).  
+ *  format_freq() — форматирование частоты для вывода (МГц,кГц.Гц).  
  * ============================================================================  
  */
 
@@ -260,14 +260,11 @@ void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
 // Функция включения питания si5351
 void SI_POWER_ON() {
   extern int pin_pwr_si;
-  extern int pin_amp_act; // Пробрасываем пин активации УМ из SET.TXT
   if (device_SI[0]) {
     // запуск питания
     if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, HIGH); // Включаем генератор
     delay(50); // Небольшая пауза на стабилизацию питания перед инициализацией чипов
     // перезапуск шины Wire на линиях генератора
-    // Выбираем нужный интерфейс Wire
-    TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
     I2C_SI_restart();
     //16,17:включить драйверы CLK0,CLK1
     si5351_write_reg(0x10, 0x0F);
@@ -288,7 +285,6 @@ void SI_POWER_ON() {
 // Функция выключения питания si5351
 void SI_POWER_OFF() {
   extern int pin_pwr_si;
-  extern int pin_amp_act;
   if (device_SI[0]) {
     // перезапуск шины Wire на линиях генератора
     // Выбираем нужный интерфейс Wire
@@ -315,7 +311,7 @@ void SI_POWER_OFF() {
 
 
 // Функция разделения частоты пробелами
-String make_freq_with_space(uint32_t FREQ) {
+String format_freq(uint32_t FREQ) {
   uint32_t mhz  = FREQ / 1000000;          
   uint32_t khz  = (FREQ % 1000000) / 1000; 
   uint32_t hz   = FREQ % 1000;             

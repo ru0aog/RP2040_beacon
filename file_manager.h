@@ -50,7 +50,10 @@ extern volatile bool pc_file_written;
 extern volatile uint32_t RTTY_BIT_TIME_US;
 
 // Прототипы функций управления файлами
-void init_file_manager();
+void init_usb_msc_interface();      // инициализация USB-регистрацию диска
+void init_flash_disk();             // Считывание данных в ОЗУ из Flash
+void init_file_manager();           // инициализация файл-менеджера
+void force_reset_to_default_disk(); // Принудительный сброс диска на дефолт
 void check_and_handle_pc_changes();
 void print_current_settings();
 void read_file_to_variable();
@@ -75,7 +78,11 @@ extern bool is_transmitting; // Ссылка на флаг занятости э
 #define LOG_CLUSTERS         200   // 200 секторов = 100 КБ под логи работы
 #define LOG_MAX_BYTES        (LOG_CLUSTERS * 512)
 
-
+// Определение параметров геометрии диска в ОЗУ
+#define SECTOR_SIZE        512
+#define SECTOR_COUNT       256   // 128 КБ
+#define DISK_SIZE_BYTES    (SECTOR_COUNT * SECTOR_SIZE)
+#define FLASH_TARGET_OFFSET (FS_START - 0x10000000)
 
 
 // ============================================================================
@@ -90,8 +97,11 @@ struct __attribute__((packed)) SlotMeta {
   uint32_t seq;
 };
 
+// доступ к переменным из других модулей
 extern int32_t current_active_slot;
 extern uint32_t current_max_seq;
+extern String BCN_VER;
+extern String BCN_DAT;
 
 
 // ============================================================================

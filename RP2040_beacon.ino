@@ -140,7 +140,8 @@ void check_serial_commands() {
         command.trim(); 
 
         if (command.length() > 0) {
-          Serial.print(F("> ")); 
+          // перевести строку и вывести введённую команду
+          Serial.print(F("\r\n> "));
           Serial.println(command);
           
           LCD_print("                    ", 1, 0);
@@ -157,7 +158,7 @@ void check_serial_commands() {
             else {
             Serial.print(F("Телеметрия: ")); Serial.println("в системе отсутствует датчик давления");
             }
-            Serial.println(F("Введите help для перехода в справочное меню по командам управления\r\n"));
+            Serial.println(F("Введите help для перехода в справочное меню по командам управления"));
           }
           else if (command.equalsIgnoreCase("TELE")) {
             print_current_time();
@@ -400,7 +401,7 @@ void setup() {
   Serial.println(F("  Плата готова к работе."));
   Serial.print(F("  Текущая дата ")); Serial.print(get_current_date()); Serial.print(F(" время ")); Serial.println(get_current_time());
   Serial.println(F("  Введите команду или h для выхода в справочное меню."));
-  Serial.println(F("==========================================================================\n"));
+  Serial.println(F("=========================================================================="));
 
 }
 
@@ -872,6 +873,16 @@ void loop() {
   delay(1); 
 }
 
+
+// RP2040_beacon.ino — выравнивание колонок в отчёте [SCAN_RESULT]  
+static String fmt_dev(const char* name, const char* addr, int sda, int scl) {  
+  char buf[48];  
+  // %-8s — имя слева до 8 симв.; %-4s — адрес; %2d — пины по правому краю  
+  snprintf(buf, sizeof(buf), "%-8s(%-4s SDA:%2d SCL:%2d)", name, addr, sda, scl);  
+  return String(buf);  
+}
+
+
 // Сбор результатов сканирования с фиксацией физических пинов SDA/SCL и их экспорт в файл конфигурации железа
 void I2C_Scanner() {
   // Первично производим аппаратный обход портов I2C
@@ -883,25 +894,27 @@ void I2C_Scanner() {
   
   if (device_SI[0] == 1) {
     if (results.length() > 0) results += "\r\n";
-    results += "SI5351(0x60,SDA:" + String(device_SI[2]) + ",SCL:" + String(device_SI[3]) + ")";
+    results += fmt_dev("SI5351", "0x60", device_SI[2], device_SI[3]);
   }
   if (device_DS[0] == 1) {
     if (results.length() > 0) results += "\r\n";
-    results += rtc_chip_name + "(0x68,SDA:" + String(device_DS[2]) + ",SCL:" + String(device_DS[3]) + ")";
+    results += fmt_dev(rtc_chip_name.c_str(), "0x68", device_DS[2], device_DS[3]); 
   }
   if (device_AT[0] == 1) {
     if (results.length() > 0) results += "\r\n";
     char addr_buf[8];
     snprintf(addr_buf, sizeof(addr_buf), "0x%02X", device_AT[4]);
-    results += "EEPROM(" + String(addr_buf) + ",SDA:" + String(device_AT[2]) + ",SCL:" + String(device_AT[3]) + ")";
+    results += fmt_dev("EEPROM", addr_buf, device_AT[2], device_AT[3]);
   }
   if (device_BM[0] == 1) {
     if (results.length() > 0) results += "\r\n";
-    results += "BME/BMP(0x76/0x77,SDA:" + String(device_BM[2]) + ",SCL:" + String(device_BM[3]) + ")";
+    char addr_buf[8];
+    snprintf(addr_buf, sizeof(addr_buf), "0x%02X", device_BM[4]);
+    results += fmt_dev("BME/BMP", addr_buf, device_BM[2], device_BM[3]);
   }
   if (device_DL[0] == 1) {
     if (results.length() > 0) results += "\r\n";
-    results += "LCD(0x27,SDA:" + String(device_DL[2]) + ",SCL:" + String(device_DL[3]) + ")";
+    results += fmt_dev("LCD", "0x27", device_DL[2], device_DL[3]);
   }
   
   results.trim();

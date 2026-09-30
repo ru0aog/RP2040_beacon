@@ -575,22 +575,20 @@ static bool parse_time_expr(const String& s, TaskItem& t) {
 
 
 // scheduler.cpp — вывод таблицы расписания в Serial  
-void print_schedule() {  
-  static const char* mode_names[] = {"IFKP", "RTTY", "CW", "SEQ"};  // по enum BeaconMode  
-  
+void print_schedule() {
   const int DAYS_WIDTH = 18;   // ширина колонки "Дни" в СИМВОЛАХ (под "Пн,Вт,Ср,Чт,Пт")  
   const int TIME_WIDTH = 18;   // ширина колонки "Время" в символах  
   
-  Serial.println(F("=== РАСПИСАНИЕ ПЕРЕДАЧ ==="));  
-  Serial.println(F("No | МОДА | Дни               | Время             |    Частота"));  
+  Serial.println(F("=== РАСПИСАНИЕ ПЕРЕДАЧ ==="));
+  Serial.println(F("No | МОДА | Дни               | Время             |    Частота"));
   
-  uint8_t found = 0;  
-  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {  
-    TaskItem &t = beacon_schedule[i];  
-    if (!t.active) continue;  
-    found++;  
+  uint8_t found = 0;
+  for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {
+    TaskItem &t = beacon_schedule[i];
+    if (!t.active) continue;
+    found++;
   
-    // --- Дни недели: 0 = каждый день, иначе маска -> "Пн,Вт,Ср,Чт,Пт" ---  
+    // --- Дни недели: 0 = каждый день, иначе маска -> "Пн,Вт,Ср,Чт,Пт,Сб,Вс" ---  
     String days;  
     if (t.days == 0 || (t.days & 0xFE) == 0xFE) {  // 0 = каждый день; 0xFE = биты Пн..Вс — вся неделя
       days = "ежедневно";  
@@ -613,7 +611,7 @@ void print_schedule() {
                t.start_hour, t.start_min, t.end_hour, t.end_min, t.interval_min);  
     }  
   
-    const char* mname = (t.mode <= 3) ? mode_names[t.mode] : "?";  
+    const char* mname = mode_name(t.mode);
   
     // --- Печать строки ---  
     // Колонка "Дни" содержит кириллицу (UTF-8: 2 байта на символ),  

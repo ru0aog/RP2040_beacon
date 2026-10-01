@@ -112,8 +112,8 @@ UsrChainState usr_chain_state = USR_IDLE;  // Текущий статус авт
 uint32_t usr_timer_ms = 0;                 // Таймер неблокирующей паузы
 bool old_button_state = HIGH;              // Предыдущее состояние кнопки для отслеживания клика
 
-
 bool soft_restart_flag = false;
+static bool wd_reboot_detected = false;
 extern bool pc_activity_detected; 
 bool is_transmitting = false; // Флаг передачи 
 String rtc_chip_name = "Неизвестный RTC"; // Сюда сканер запишет точное имя чипа
@@ -206,7 +206,7 @@ void check_serial_commands() {
             LCD_init(true);
             LCD_print(">> CPU RESET <<", 0, 0);
             // Пишем в файл на виртуальную флешку историю работы
-            log_file_write_line("рестарт процессора");
+            log_file_write_line("рестарт процессора по команде оператора");
             SI_POWER_OFF();
             Serial.println(F("***"));
             Serial.println(F(""));
@@ -367,6 +367,8 @@ void setup() {
   delay(20);                                      // Даем Pull-up надежно поднять линию до +3.3 В
   old_button_state = digitalRead(PIN_USR_BUTTON); // Фиксируем РЕАЛЬНОЕ стартовое состояние (HIGH)
 
+  wd_reboot_detected = watchdog_caused_reboot(); 
+
   // запуск виртуального СОМ-порта через USB
   Serial.begin(115200);
 
@@ -416,6 +418,13 @@ void setup() {
     pinMode(pin_amp_act, OUTPUT);
     digitalWrite(pin_amp_act, dev_TX_state);
   }
+
+  watchdog_enable(8000, true);   // 8 сек; true = не тикать при остановке по отладчику
+  if (wd_reboot_detected) {  
+    Serial.println(F("[Watchdog] Обнаружен перезапуск по сторожевому таймеру!"));  
+    log_file_write_line("Watchdog: аварийный перезапуск");   // попадёт в LOG.TXT с датой/временем RTC  
+  }
+  else Serial.println(F("[Система] запуск сторожевого таймера - ок"));
 
   //Serial.println(F("\n================================================================"));
   Serial.println(F("  АВТОМАТИЧЕСКИЙ РАДИОМАЯК ЗАПУЩЕН"));

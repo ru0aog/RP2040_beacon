@@ -342,15 +342,15 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
   dynamic_set_content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
   dynamic_set_content += "// Пины кода поддиапазона (4 пина)\r\n";
-  dynamic_set_content += "[SUBBAND_PIN_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
-  dynamic_set_content += "[SUBBAND_PIN_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
-  dynamic_set_content += "[SUBBAND_PIN_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
-  dynamic_set_content += "[SUBBAND_PIN_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
+  dynamic_set_content += "[PIN_SUBBAND_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
+  dynamic_set_content += "[PIN_SUBBAND_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
+  dynamic_set_content += "[PIN_SUBBAND_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
+  dynamic_set_content += "[PIN_SUBBAND_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
   dynamic_set_content += "// Пины питания шины (NC если не назначены)\r\n";
-  dynamic_set_content += "[BUS_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
-  dynamic_set_content += "[BUS_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
-  dynamic_set_content += "[BUS_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
-  dynamic_set_content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
+  dynamic_set_content += "[PIN_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
+  dynamic_set_content += "[PIN_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
+  dynamic_set_content += "[PIN_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
+  dynamic_set_content += "[PIN_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   dynamic_set_content += "// Дополнительные исключения из сканирования шин\r\n";
   dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
   dynamic_set_content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
@@ -618,7 +618,6 @@ void read_and_parse_SET_txt() {
      (uint8_t)ram_disk_buffer[i-1] >= 0x80)) {
           int32_t start_idx = -1;  
           String* target_str = nullptr;  
-          bool is_task_line = false;  
       
           // Динамически ищем закрывающую скобку ']' — пробелы выравнивания в теге не ломают разбор  
           uint32_t close_bracket_idx = 0;  
@@ -636,10 +635,10 @@ void read_and_parse_SET_txt() {
 
           if      (tag == "PIN_FREQ_OUT")  target_str = &s_freq_out;  
           else if (tag == "PIN_AMP_ACT")   target_str = &s_amp_act;  
-          else if (tag == "PIN_SUBBAND_1") target_str = &s_subband[0];  
-          else if (tag == "PIN_SUBBAND_2") target_str = &s_subband[1];  
-          else if (tag == "PIN_SUBBAND_3") target_str = &s_subband[2];  
-          else if (tag == "PIN_SUBBAND_4") target_str = &s_subband[3];  
+          else if (tag == "PIN_SUBBAND_0") target_str = &s_subband[0];  
+          else if (tag == "PIN_SUBBAND_1") target_str = &s_subband[1];  
+          else if (tag == "PIN_SUBBAND_2") target_str = &s_subband[2];  
+          else if (tag == "PIN_SUBBAND_3") target_str = &s_subband[3];  
           else if (tag == "PIN_PWR_SI")    target_str = &s_pwr_si;  
           else if (tag == "PIN_PWR_DS")    target_str = &s_pwr_ds;  
           else if (tag == "PIN_PWR_BM")    target_str = &s_pwr_bm;  
@@ -1044,15 +1043,15 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
   content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
   content += "// Пины кода поддиапазона (4 пина)\r\n";
-  content += "[SUBBAND_PIN_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
-  content += "[SUBBAND_PIN_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
-  content += "[SUBBAND_PIN_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
-  content += "[SUBBAND_PIN_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
+  content += "[PIN_SUBBAND_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
+  content += "[PIN_SUBBAND_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
+  content += "[PIN_SUBBAND_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
+  content += "[PIN_SUBBAND_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
   content += "// Пины питания шины (NC если не назначены)\r\n";
-  content += "[BUS_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
-  content += "[BUS_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
-  content += "[BUS_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
-  content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
+  content += "[PIN_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
+  content += "[PIN_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
+  content += "[PIN_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
+  content += "[PIN_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
   content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";

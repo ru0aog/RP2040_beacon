@@ -1001,7 +1001,9 @@ void read_hardware_settings() {
         // [DEBUG]=1 — включает служебный вывод в Serial  
         start_idx = close_bracket_idx + 1; target_str = &my_debug_var;  
       }
-
+      
+      debug_flag = (my_debug_var.toInt() != 0);
+      
       // Выкусываем значение строго до конца строки
       if (start_idx != -1 && target_str != nullptr) {
         target_str->reserve(64);

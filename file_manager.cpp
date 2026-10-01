@@ -850,10 +850,12 @@ void check_and_handle_pc_changes() {
     if (pc_written_regions & 0x02) {
       Serial.println(F("[Система] Обнаружена корректировка файла: INFO.TXT "));
       read_and_parse_INFO_txt();    // Парсер настроек INFO.TXT
+      ensure_file_timestamps();    // проверяет метки даты/времени на файлах
     }  
     if (pc_written_regions & 0x04) {  
       Serial.println(F("[Система] Обнаружена корректировка файла: SET.TXT "));
       read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
+      ensure_file_timestamps();    // проверяет метки даты/времени на файлах
     }  
     if (config_changed) {  
       save_ram_to_flash();   // один раз, даже если правились оба файла  

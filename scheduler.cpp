@@ -708,9 +708,9 @@ String fmt_next_start(int32_t abs_min) {
 bool is_time_to_transmit(uint8_t mode) {  
   extern bool is_transmitting;  
   uint32_t cur = rtc_hour * 60UL + rtc_min;  
-  static uint32_t last_min[3] = {9999, 9999, 9999};  
+  static uint32_t last_min[4] = {9999, 9999, 9999, 9999};  
   
-  if (mode > 2) return false;  
+  if (mode > 3) return false;  
   if (cur == last_min[mode]) return false;               // один запуск на минуту  
   
   for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {  
@@ -736,8 +736,7 @@ bool is_time_to_transmit(uint8_t mode) {
     Serial.printf("[Планировщик] TASK_%02d: запуск %s в %02d:%02d\n",  
                   i + 1, mode_name(mode), rtc_hour, rtc_min); 
     last_min[mode] = cur;  
-    scheduled_freq_hz = task.freq_hz;    // частота из расписания
-    if (mode == 0) last_ifkp_minute = cur_abs_min;
+    scheduled_freq_hz = beacon_schedule[i].freq_hz;  // частота из задачи расписания 
     return true;  
   }  
   return false;  

@@ -943,6 +943,7 @@ void read_hardware_settings() {
   String s_pwr_si = "", s_pwr_ds = "", s_pwr_bm = "", s_pwr_dl = "";
   scan_exclude_list = "";
   scan_result_data  = "";
+  my_debug_var      = "";
 
   uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
   uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
@@ -1002,8 +1003,6 @@ void read_hardware_settings() {
         start_idx = close_bracket_idx + 1; target_str = &my_debug_var;  
       }
       
-      debug_flag = (my_debug_var.toInt() != 0);
-      
       // Выкусываем значение строго до конца строки
       if (start_idx != -1 && target_str != nullptr) {
         target_str->reserve(64);
@@ -1022,6 +1021,7 @@ void read_hardware_settings() {
     }
   }
 
+  debug_flag = (my_debug_var.toInt() != 0);
   // Назначаем дефолты жестко в коде, если файлы пустые или теги не прочитались
   pin_freq_out = (s_freq_out.length() > 0) ? parse_pin_value(s_freq_out) : 14;
   pin_amp_act  = (s_amp_act.length() > 0)  ? parse_pin_value(s_amp_act)  : 15;

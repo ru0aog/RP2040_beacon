@@ -61,6 +61,8 @@ void print_current_settings();
 void read_and_parse_INFO_txt();   // парсер INFO.txt
 void read_and_parse_SET_txt();    // парсер SET.txt
 void remount_usb_disk ();         // перемонтировать USB-диск
+void ensure_file_timestamps();    // проверяет метки даты/времени на файлах
+
 
 // API для работы с журналом LOG.TXT
 void log_file_clear();

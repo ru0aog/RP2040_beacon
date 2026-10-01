@@ -304,9 +304,10 @@ static void create_default_fat_with_info_file() {
     "// Формат одиночной:     [TASK_01]=ДНИ,ЧЧ:ММ,ЧАСТОТА_ГЦ,МОДА\r\n"
     "// Формат периодической: [TASK_01]=ДНИ,ЧЧ:ММ_СТАРТ/ЧЧ:ММ_КОНЕЦ/ИНТЕРВАЛ,ЧАСТОТА_ГЦ,МОДА\r\n"
     "// Базовое расписание (Ежедневно) ---\r\n"
-    "[TASK_01]=0,15:15,3601500,CW\r\n"
-    "[TASK_02]=0,15:18,3601585,RTTY\r\n"
-    "[TASK_03]=0,15:20,3601307,IFKP\r\n"
+    "// Плотный дневной цикл каждые 5 минут (с 09:00 до 22:00 ежедневно) ---\r\n"
+    "[TASK_01]=0,09:00/22:00/5,3591500,RTTY\r\n"
+    "// [TASK_02]=0,15:18,3601585,CW\r\n"
+    "// [TASK_03]=0,15:20,3601307,IFKP\r\n"
     "// Примеры:\r\n"
     "// Вечерний плотный цикл каждые 5 минут (с 17:00 до 22:00 ежедневно) ---\r\n"
     "// [TASK_04]=0,17:00/22:00/5,3601500,CW\r\n"
@@ -1167,7 +1168,11 @@ void log_file_write_block(const String& block) {
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {  
     Serial.println("[Журнал]  Лог заполнен! Автоочистка...");  
     log_file_clear();   // если внутри есть save+remount — они выполнятся лишний раз  
-    current_size = 0;   // после clear размер известен, перечитывать не обязательно  
+    // перечитываем размер — clear оставляет заголовок длиной header_len  
+    current_size = ram_disk_buffer[log_entry_offset + 28] |  
+                  (ram_disk_buffer[log_entry_offset + 29] << 8) |  
+                  (ram_disk_buffer[log_entry_offset + 30] << 16) |  
+                  (ram_disk_buffer[log_entry_offset + 31] << 24);
   }
 
   memcpy(&ram_disk_buffer[log_data_offset + current_size], formatted.c_str(), msg_len);  
@@ -1197,4 +1202,33 @@ void remount_usb_disk() {
       delay(50);  
     } 
   usb_msc.setUnitReady(true); 
+}
+
+
+
+// Проверка меток даты/времени файлов: если поля создания нулевые — проставить текущие  
+void ensure_file_timestamps() {
+  if (rtc_year < 2020) return;   // RTC ещё не готов — отложить до следующего вызова
+  uint32_t root_offset = SECTOR_SIZE * 2;  
+  const char* names[3] = { "INFO.TXT", "SET.TXT", "LOG.TXT" };  
+  bool changed = false;  
+  
+  for (uint8_t idx = 0; idx < 3; idx++) {  
+    uint32_t e = root_offset + (uint32_t)idx * 32;  
+  
+    // Поля создания: 14-15 (время), 16-17 (дата). Проверяем дату (16-17) — главный признак  
+    uint16_t create_date = ram_disk_buffer[e + 16] | (ram_disk_buffer[e + 17] << 8);  
+    uint16_t write_date  = ram_disk_buffer[e + 24] | (ram_disk_buffer[e + 25] << 8);  
+  
+    if (create_date == 0 || write_date == 0) {  
+      // with_create = true: заполнит и creation, и write time/date  
+      set_dir_timestamp(idx, true);  
+      Serial.printf("[Диск] %s: проставлены отсутствующие метки даты/времени\r\n", names[idx]);  
+      changed = true;  
+    }  
+  }  
+  
+  if (changed) {  
+    save_ram_to_flash();   // зафиксировать метки во Flash, иначе пропадут при выключении  
+  }  
 }

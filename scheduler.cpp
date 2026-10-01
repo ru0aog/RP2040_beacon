@@ -182,7 +182,7 @@ void init_scheduler() {
       
     // Безопасная аппаратная установка времени во внутренний регистр
     rtc_set_datetime(&setcurrentTime);
-    delay(10); 
+    delay(20);                      // ждём защёлкивания новых значений в счётчики RTC
     
     update_scheduler();
 
@@ -447,6 +447,7 @@ void handle_date_command(String cmd) {
         current_time.day   = d;
         // Записываем обновленную структуру обратно в контроллер RTC
         rtc_set_datetime(&current_time);
+        delay(20);                      // ждём защёлкивания новых значений в счётчики RTC
         Serial.println("[Система] : Календарь встроенного RTC успешно обновлен.");
       }
     }
@@ -509,6 +510,7 @@ void handle_time_command(String cmd) {
         current_time.min  = m;
         current_time.sec  = s;
         rtc_set_datetime(&current_time);
+        delay(20);                      // ждём защёлкивания новых значений в счётчики RTC
         Serial.println("[Система] : Время встроенного RTC успешно обновлено.");
       }
     }
@@ -730,10 +732,10 @@ bool is_time_to_transmit(uint8_t mode) {
     if (!hit) continue;  
   
     if (is_transmitting) {  
-      Serial.printf("[Планировщик] TASK_%02d: шина занята, сеанс пропущен\n", i + 1);  
+      Serial.printf("[Планировщик] Задача %02d: шина занята, сеанс пропущен\n", i + 1);  
       return false;  
     }  
-    Serial.printf("[Планировщик] TASK_%02d: запуск %s в %02d:%02d\n",  
+    Serial.printf("[Планировщик] Задача %02d: запуск %s в %02d:%02d\n",  
                   i + 1, mode_name(mode), rtc_hour, rtc_min); 
     last_min[mode] = cur;  
     scheduled_freq_hz = beacon_schedule[i].freq_hz;  // частота из задачи расписания 

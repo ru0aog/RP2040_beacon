@@ -411,6 +411,7 @@ void send_ifkp_calibration_ladder() {
                 return;
             }
             check_serial_commands();
+            watchdog_update();   // кормление сторожевого таймера на лесенке
             
             if (!led_half_turned_off && (millis() - start_ms >= halftone_duration_ms)) {
                 digitalWrite(LED_BUILTIN, LOW);

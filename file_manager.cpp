@@ -130,27 +130,29 @@ int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
   return bufsize;
 }
 
-// msc_write_cb - единственное место, где ПК действительно пишет сектор
+// callback-функция записи TinyUSB MSC
+// вызывается по типу прерывания, когда ПК пишет сектор
 int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {  
   if (lba >= SECTOR_COUNT) return -1;  
   memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);  
   last_msc_write_time = millis();  
-  pc_activity_detected = true;
-
-  // Определяем, какой файл затронула запись (сектора данных начинаются с LBA 5)  
-  if      (lba < 5)                            pc_written_regions |= 0x01; // бут/FAT/каталог  
-  else if (lba < 5 + INFO_CLUSTERS)            pc_written_regions |= 0x02; // INFO.TXT  
-  else if (lba < 5 + INFO_CLUSTERS + SET_CLUSTERS) pc_written_regions |= 0x04; // SET.TXT  
-  else                                         pc_written_regions |= 0x08; // LOG.TXT
-
-  // Прерываем эфир только при изменении конфигурации:  
-  // сектора 0-4 (Boot/FAT/каталог), INFO.TXT (5-24), SET.TXT (25-44)  
+  pc_activity_detected = true;  
+  
+  // Определяем, какой файл затронула запись  
+  if      (lba < 5)                                 pc_written_regions |= 0x01; // бут/FAT/каталог  
+  else if (lba < 5 + INFO_CLUSTERS)                 pc_written_regions |= 0x02; // INFO.TXT  
+  else if (lba < 5 + INFO_CLUSTERS + SET_CLUSTERS)  pc_written_regions |= 0x04; // SET.TXT  
+  else                                              pc_written_regions |= 0x08; // LOG.TXT  
+  
+  // Прерываем эфир только при изменении данных INFO.TXT (5-24) или SET.TXT (25-44)  
   uint32_t last_lba = lba + (bufsize / SECTOR_SIZE) - 1;  
-  if (lba <= 44) {  // покрывает и случай last_lba > 44 при захвате сектора 44  
-    pc_file_written = true;  // Выставляем флаг для экстренного останова передачи
+  if (last_lba >= 5 && lba <= 44) {  
+    pc_file_written = true;  // флаг изменения файлов INFO или SET. Выставляем флаг для экстренного останова передачи 
   }  
   return bufsize;  
 }
+
+
 
 // FAT: время = час<<11 | мин<<5 | сек/2 ; дата = (год-1980)<<9 | месяц<<5 | день  
 static uint16_t fat_time_now() {  
@@ -352,7 +354,7 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "// Дополнительные исключения из сканирования шин\r\n";
   dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
   dynamic_set_content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
-  dynamic_set_content += "[DEBUG]=0\r\n\r\n";   // 0/1 — режим отладки
+  dynamic_set_content += "[DEBUG]=1\r\n\r\n";   // 0/1 — режим отладки
   dynamic_set_content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
   dynamic_set_content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
   dynamic_set_content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
@@ -756,7 +758,7 @@ void check_and_handle_pc_changes() {
 
     pc_activity_detected = false; // сброс флага факта записи на диск
     pc_written_regions = 0;       // сброс указателя места записи
-    pc_file_written = false;      // сброс флага изменения файлов INFO или SET
+    pc_file_written = false;      // сброс флага изменения файлов INFO или SET (true останавливает передачу)
   }
 }
 

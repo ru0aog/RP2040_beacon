@@ -58,7 +58,8 @@ void init_file_manager();           // инициализация файл-ме�
 void force_reset_to_default_disk(); // Принудительный сброс диска на дефолт
 void check_and_handle_pc_changes();
 void print_current_settings();
-void read_file_to_variable();
+void read_and_parse_INFO_txt();
+void read_and_parse_SET_txt();
 
 // API для работы с журналом LOG.TXT
 void log_file_clear();

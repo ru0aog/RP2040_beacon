@@ -1,4 +1,4 @@
-/**  
+﻿/**  
  * ============================================================================  
  *  file_manager.cpp — USB-накопитель (MSC) в ОЗУ + конфиг маяка INFO.TXT  
  * ============================================================================  
@@ -351,8 +351,8 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   dynamic_set_content += "// Дополнительные исключения из сканирования шин\r\n";
   dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
-  dynamic_set_content += "// Режим отладки\r\n";
-  dynamic_set_content += "[DEBUG]=0\r\n";   // 0/1 — вывод служебных сообщений в Serial
+  dynamic_set_content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
+  dynamic_set_content += "[DEBUG]=0\r\n\r\n";   // 0/1 — режим отладки
   dynamic_set_content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
   dynamic_set_content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
   dynamic_set_content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
@@ -401,9 +401,8 @@ static void create_default_fat_with_info_file() {
 
 
 
-// Внутренняя функция побайтового разбора маркеров
-// ПРАВКА: Полный парсер INFO.TXT, изолированный на Секторах 5..24 со сбором всех переменных и расписания
-void read_file_to_variable() {
+// Полный парсер INFO.TXT, изолированный на Секторах 5..24 со сбором всех переменных и расписания
+void read_and_parse_INFO_txt() {
   flash_flush_cache();
   
   // 1. Полностью обнуляем ВСЕ строки перед чтением
@@ -729,34 +728,35 @@ void init_file_manager() {
     my_FAT = "Файловая система не найдена во всех слотах. Восстановлен дефолт.";
   }
 
-  read_file_to_variable();  // Парсер INFO.TXT
-  read_hardware_settings(); // Парсер инженерных настроек SET.TXT
+  read_and_parse_INFO_txt();  // Парсер настроек INFO.TXT
+  read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
   Serial.flush();
-
 }
-
 
 
 // Функция проверки изменений от ПК для loop()
 void check_and_handle_pc_changes() {
   if (pc_activity_detected && (millis() - last_msc_write_time > 1500)) {
 
+    watchdog_update();    // обновить сторожевой таймер
+    save_ram_to_flash();  // сохранить изменения на флэш
+
     Serial.print(F("> ОБНАРУЖЕНА КОРРЕКТИРОВКА ФАЙЛА: "));  
     if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.print(F("системная область/FAT "));  
-    if (pc_written_regions & 0x02) Serial.print(F("INFO.TXT "));  
-    if (pc_written_regions & 0x04) Serial.print(F("SET.TXT "));  
-    if (pc_written_regions & 0x08) Serial.print(F("LOG.TXT "));  
-    Serial.println();  
-    pc_written_regions = 0;
+    if (pc_written_regions & 0x02) {
+      read_and_parse_INFO_txt();    // Парсер настроек INFO.TXT
+      Serial.print(F("INFO.TXT "));
+    }
+    if (pc_written_regions & 0x04) {
+      Serial.print(F("SET.TXT "));
+      read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
+    }
+    if (pc_written_regions & 0x08) Serial.print(F("LOG.TXT "));  // LOG не парсим
+    Serial.println();
 
-    pc_activity_detected = false;
-    watchdog_update();
-
-    save_ram_to_flash();
-    read_file_to_variable();
-    read_hardware_settings(); // Перечитываем пины, если оператор изменил SET.TXT
-
-    pc_file_written = false; // Сбрасываем флаг только ПОСЛЕ обновления строк
+    pc_activity_detected = false; // сброс флага факта записи на диск
+    pc_written_regions = 0;       // сброс указателя места записи
+    pc_file_written = false;      // сброс флага изменения файлов INFO или SET
   }
 }
 
@@ -831,7 +831,7 @@ void update_info_config_from_console(String marker, String new_value) {
 
       // Сохраняем образ диска во Flash-память RP2040 и обновляем переменные в ОЗУ
       save_ram_to_flash();
-      read_file_to_variable();
+      read_and_parse_INFO_txt();
       
       // Принудительно перезапускаем сессию для Windows
       usb_msc.setUnitReady(false); // Сообщаем ОС, что накопитель извлечен
@@ -935,7 +935,7 @@ static inline int parse_pin_value(const String& val) {
 
 // Функция побайтового разбора маркеров файла SET.TXT
 // Парсер инженерных настроек с защитой от сброса в 0
-void read_hardware_settings() {
+void read_and_parse_SET_txt() {
   flash_flush_cache();
   
   String s_freq_out = "", s_amp_act = "";
@@ -1066,6 +1066,8 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
+  content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
+  content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n"; // 0/1 — режим отладки
   content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
   content += "[SCAN_RESULT]\r\n" + scan_results + "\r\n\r\n"; 
   content += "[EOF]";
@@ -1155,8 +1157,8 @@ void force_reset_to_default_disk() {
   create_default_fat_with_info_file(); 
   
   // 2. Сразу же обновляем глобальные переменные в ОЗУ из нового дефолтного файла
-  read_file_to_variable();  
-  read_hardware_settings(); 
+  read_and_parse_INFO_txt();  
+  read_and_parse_SET_txt(); 
   
   // 3. Жестко уведомляем Windows, чтобы он перечитал файловую систему
   usb_msc.setUnitReady(false);

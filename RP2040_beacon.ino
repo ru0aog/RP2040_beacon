@@ -455,7 +455,7 @@ void loop() {
     current_tone = 0;
     usr_chain_state = USR_IDLE;
     delay(100);
-    read_file_to_variable(); // Извлекаем чистые маркеры
+    read_and_parse_INFO_txt(); // Извлекаем чистые маркеры
     pc_file_written = false;
     Serial.println("Рестарт: OK");
     //print_current_settings();
@@ -623,9 +623,11 @@ void loop() {
     force_ifkp_transmission = false;
     is_transmitting = true;
     
-    char time_buf[128];
-    snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса IFKP! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
-    Serial.println(time_buf);
+    if (debug_flag) {
+      char time_buf[128];
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса IFKP! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
+      Serial.println(time_buf);
+    }
     
     if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
       
@@ -726,9 +728,11 @@ void loop() {
     force_rtty_transmission = false;
     is_transmitting = true; 
     
-    char time_buf[128];
-    snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса RTTY! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
-    Serial.println(time_buf);
+    if (debug_flag) {
+      char time_buf[128];
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса RTTY! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
+      Serial.println(time_buf);
+    }
     
     if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
       
@@ -751,8 +755,10 @@ void loop() {
         // Вызов обновленной функции модема
         prepare_rtty_frequencies(rtty_mark_hz, rtty_shift_hz, rtty_invert);
         
-        Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.print(F(" БОД, "));
-        Serial.print(F("длительность бита ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));
+        if (debug_flag) {
+          Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.print(F(" БОД, "));
+          Serial.print(F("длительность бита ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));
+        }
         
         // ШАГ 1: RTTY передача позывного и локатора
         if (!pc_file_written && !soft_restart_flag) {
@@ -824,8 +830,10 @@ void loop() {
     is_transmitting = true; 
     
     char time_buf[128];
-    snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса CW! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
-    Serial.println(time_buf);
+    if (debug_flag) {
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса CW! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
+      Serial.println(time_buf);
+    }
     
     if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
       
@@ -839,8 +847,10 @@ void loop() {
         uint32_t cw_hz = (my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000;
         
         prepare_cw_frequency(cw_hz);
-        Serial.print(F("[Скорость] ")); Serial.print(1200 / CW_DOT_TIME_MS); Serial.print(F(" WPM, "));
-        Serial.print(F("длительность точки ")); Serial.print(CW_DOT_TIME_MS); Serial.println(F(" мс"));
+        if (debug_flag) {
+          Serial.print(F("[Скорость] ")); Serial.print(1200 / CW_DOT_TIME_MS); Serial.print(F(" WPM, "));
+          Serial.print(F("длительность точки ")); Serial.print(CW_DOT_TIME_MS); Serial.println(F(" мс"));
+        }
         
         // ШАГ 1: Передача позывного и локатора
         if (!pc_file_written && !soft_restart_flag) {

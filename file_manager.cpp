@@ -841,19 +841,17 @@ void init_file_manager() {
 void check_and_handle_pc_changes() {
   watchdog_update();    // обновить сторожевой таймер
   if (pc_activity_detected && (millis() - last_msc_write_time > 1500)) {
-    Serial.println(F("[Система] Обнаружена корректировка файла: "));
-    if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.println(F("  - системная область/FAT "));  
-    if (pc_written_regions & 0x08) {
-      Serial.println(F("  - LOG.TXT "));  // LOG не парсим и на флэш не сохраняем
-    }
+    // Serial.println(F("[Система] Обнаружена корректировка файла: "));
+    // if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.println(F("  - системная область/FAT "));  
+    // if (pc_written_regions & 0x08) Serial.println(F("  - LOG.TXT "));  // LOG не парсим и на флэш не сохраняем
     // переписываем флэш только один раз, даже если правились оба файла 
     bool config_changed = (pc_written_regions & 0x02) || (pc_written_regions & 0x04);
     if (pc_written_regions & 0x02) {
-      Serial.println(F("  - INFO.TXT "));
+      Serial.println(F("[Система] Обнаружена корректировка файла: INFO.TXT "));
       read_and_parse_INFO_txt();    // Парсер настроек INFO.TXT
     }  
     if (pc_written_regions & 0x04) {  
-      Serial.println(F("  - SET.TXT "));
+      Serial.println(F("[Система] Обнаружена корректировка файла: SET.TXT "));
       read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
     }  
     if (config_changed) {  

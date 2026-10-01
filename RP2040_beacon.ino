@@ -390,7 +390,7 @@ void setup() {
   //Serial.println("...");
 
   Serial.println("[Система] Питание маяка включено.");
-  Serial.println("[Система] Последовательное соединение восстановлено.");
+  //Serial.println("[Система] Последовательное соединение восстановлено.");
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.print("[Система] "); Serial.println(my_FAT);
 
@@ -702,8 +702,10 @@ void loop() {
           char end_buf[128];
           snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс IFKP завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ifkp_session_duration_sec);
           Serial.println(end_buf);
-          // Пишем в файл на виртуальную флешку историю работы
-          log_file_write_line("Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
+          if (debug_flag) {
+            // Пишем в файл на виртуальную флешку историю работы
+            log_file_write_line("Сеанс IFKP завершен. Длительность: " + String(ifkp_session_duration_sec) + " сек.");
+          }
         }
       } 
       
@@ -796,9 +798,10 @@ void loop() {
           char end_buf[128];
           snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс RTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, rtty_session_duration_sec);
           Serial.println(end_buf);
-        
-        // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line("Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
+        if (debug_flag) {
+          // Пишем в файл на виртуальную флешку историю работы
+          log_file_write_line("Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
+          }
         }
       } 
       
@@ -883,8 +886,10 @@ void loop() {
         snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс CW завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, cw_session_duration_sec);
         Serial.println(end_buf);
 
-        // Пишем в файл на виртуальную флешку историю работы
-        log_file_write_line("Сеанс CW завершен.   Длительность: " + String(cw_session_duration_sec) + " сек.");
+        if (debug_flag) {
+          // Пишем в файл на виртуальную флешку историю работы
+          log_file_write_line("Сеанс CW завершен.   Длительность: " + String(cw_session_duration_sec) + " сек.");
+        }
       } 
       
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
@@ -917,7 +922,6 @@ static String fmt_dev(const char* name, const char* addr, int sda, int scl) {
   snprintf(buf, sizeof(buf), "%-8s(%-4s SDA:%2d SCL:%2d)", name, addr, sda, scl);  
   return String(buf);  
 }
-
 
 // Сбор результатов сканирования с фиксацией физических пинов SDA/SCL и их экспорт в файл конфигурации железа
 void I2C_Scanner() {
@@ -963,9 +967,6 @@ void I2C_Scanner() {
   Serial.println(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
 }
 
-
-
-
 void scanRP2040Ports() {
   // Serial.println(F("\n=== ЗАПУСК ПОЛНОГО СКАНИРОВАНИЯ РАЗРЕШЕННЫХ ПОРТОВ RP2040-ZERO ==="));
 
@@ -986,7 +987,7 @@ void scanRP2040Ports() {
 
     // Проверяем кастомный список исключений из SET.TXT
     if (is_pin_excluded_from_scan(sda) || is_pin_excluded_from_scan(scl)) {
-      Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
+      //Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
       continue;
     }
     I2C_Scan_module(0, sda, scl, false); 
@@ -1003,15 +1004,13 @@ void scanRP2040Ports() {
   for (uint8_t sda = 2; sda <= 26; sda += 4) {
     uint8_t scl = sda + 1;
     if (is_pin_excluded_from_scan(sda) || is_pin_excluded_from_scan(scl)) {
-      Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
+      //Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
       continue;
     }
     I2C_Scan_module(1, sda, scl, false); 
     delay(50);
   }
 }
-
-
 
 void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
   watchdog_update(); // сброс сторожевого таймера

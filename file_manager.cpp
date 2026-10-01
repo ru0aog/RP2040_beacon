@@ -74,6 +74,7 @@ String my_freq_ifkp_var   = "";
 String my_FAT             = "";
 String scan_exclude_list  = "";
 String scan_result_data   = "";
+String my_debug_var       = "";
 
 // Физическое выделение памяти под инженерные переменные железа
 // Значения по умолчанию, если теги не найдены
@@ -93,6 +94,7 @@ int pin_pwr_dl   = -1;  // дисплей
 extern uint16_t rtc_year;  // extern, если объявлены не в этом файле  
 extern uint8_t rtc_month, rtc_day, rtc_hour, rtc_min, rtc_sec;
 
+bool debug_flag = false;  // флаг вывода служебных сообщений
 
 // Выделение ОЗУ под таблицу расписания задач
 TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
@@ -349,6 +351,8 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "[BUS_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
   dynamic_set_content += "// Дополнительные исключения из сканирования шин\r\n";
   dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
+  dynamic_set_content += "// Режим отладки\r\n";
+  dynamic_set_content += "[DEBUG]=0\r\n";   // 0/1 — вывод служебных сообщений в Serial
   dynamic_set_content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
   dynamic_set_content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
   dynamic_set_content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
@@ -746,7 +750,8 @@ void check_and_handle_pc_changes() {
     pc_written_regions = 0;
 
     pc_activity_detected = false;
-    
+    watchdog_update();
+
     save_ram_to_flash();
     read_file_to_variable();
     read_hardware_settings(); // Перечитываем пины, если оператор изменил SET.TXT
@@ -991,6 +996,10 @@ void read_hardware_settings() {
       }
       else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE", 12) == 0) {
         start_idx = close_bracket_idx + 1; target_str = &scan_exclude_list;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "DEBUG", 5) == 0) {  
+        // [DEBUG]=1 — включает служебный вывод в Serial  
+        start_idx = close_bracket_idx + 1; target_str = &my_debug_var;  
       }
 
       // Выкусываем значение строго до конца строки

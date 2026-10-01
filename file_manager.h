@@ -45,6 +45,8 @@ extern String my_cw_variable;      // Строка минут запуска (н
 extern String my_freq_cw_var;      // Строка частоты несущей (например, "3601000")
 extern String my_rtty_baud_var;
 extern String my_FAT;
+  
+extern bool debug_flag;   // [DEBUG]=1 в SET.TXT: вывод служебных сообщений
 
 extern volatile bool pc_file_written; 
 extern volatile uint32_t RTTY_BIT_TIME_US;

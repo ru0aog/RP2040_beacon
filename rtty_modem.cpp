@@ -148,9 +148,11 @@ void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) 
     uint64_t mark_mHz  = (uint64_t)mark_hz * 1000ULL;
     calculate_freq_bytes_mHz(space_mHz, rtty_reg_space);
     calculate_freq_bytes_mHz(mark_mHz,  rtty_reg_mark);
-    Serial.println(F("[RTTY_ГОТОВ] Сетка частот RTTY для Si5351 готова.")); 
-    Serial.print(F("            F_MARK : ")); Serial.print(mark_hz); Serial.println(F(" Hz"));
-    Serial.print(F("            F_SPACE: ")); Serial.print(space_hz); Serial.println(F(" Hz"));
+    if (debug_flag) {
+        Serial.println(F("[RTTY_ГОТОВ] Сетка частот RTTY для Si5351 готова.")); 
+        Serial.print(F("            F_MARK : ")); Serial.print(mark_hz); Serial.println(F(" Hz"));
+        Serial.print(F("            F_SPACE: ")); Serial.print(space_hz); Serial.println(F(" Hz"));
+    }
   }
   else {
     // Для аппаратного VFO RP2040:
@@ -161,9 +163,11 @@ void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) 
     vfo_hardware_init(mark_hz, rtty_shift);
     vfo_set_tone_instant(1);
     vfo_set_cw_key(true);
-    Serial.println(F("[RTTY_ГОТОВ] Аппаратный VFO RTTY инициализирован!"));
-    Serial.print(F("            MARK :  ")); Serial.print(format_freq(mark_hz)); Serial.println(F(" Гц"));
-    Serial.print(F("            SPACE:  ")); Serial.print(format_freq(space_hz)); Serial.println(F(" Гц"));
+    if (debug_flag) {
+        Serial.println(F("[RTTY_ГОТОВ] Программный DDS VFO инициализирован!"));
+        Serial.print(F("            MARK :  ")); Serial.print(format_freq(mark_hz)); Serial.println(F(" Гц"));
+        Serial.print(F("            SPACE:  ")); Serial.print(format_freq(space_hz)); Serial.println(F(" Гц"));
+    }
   }
 }
 

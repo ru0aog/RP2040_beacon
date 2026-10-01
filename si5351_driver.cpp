@@ -273,12 +273,16 @@ void SI_POWER_ON() {
     si5351_write_reg(0xB1, 0xA0);
     //03:активировать выходы
     si5351_write_reg(0x03, 0x00);
-    Serial.println("[Питание] Si5351: ВКЛ");
+    if (debug_flag) {
+      Serial.println("[Питание] Si5351: ВКЛ");
+    }
     dev_TX_state = true;
   }
   else {
-    Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
-    Serial.print("[Питание] Запускаем внутренний DDS-генератор RP2040 на пине "); Serial.println(VFO_OUTPUT_PIN);
+    if (debug_flag) {
+      Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
+      Serial.print("[Питание] Запускаем внутренний DDS-генератор RP2040 на пине "); Serial.println(VFO_OUTPUT_PIN);
+    }
   }
 }
 
@@ -297,7 +301,9 @@ void SI_POWER_OFF() {
     //03:отключить все выходы
     si5351_write_reg(0x03, 0xFF);
     pWire->end();
-    Serial.println("[Питание] Si5351: ВЫКЛ");
+    if (debug_flag) {
+      Serial.println("[Питание] Si5351: ВЫКЛ");
+    }
     // запуск питания
     if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, LOW); // Выключаем генератор
   }
@@ -305,7 +311,9 @@ void SI_POWER_OFF() {
     //fractGen_OFF();
     //set_sys_clock_khz(125000, true);
     vfo_set_cw_key(false);
-    Serial.print("[Питание] DDS-генератор RP2040 на пине "); Serial.print(VFO_OUTPUT_PIN); Serial.println(" остановлен.");
+    if (debug_flag) {
+      Serial.print("[Питание] DDS-генератор RP2040 на пине "); Serial.print(VFO_OUTPUT_PIN); Serial.println(" остановлен.");
+    }
   }
 }
 

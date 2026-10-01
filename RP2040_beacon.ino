@@ -443,7 +443,9 @@ void loop() {
   #if defined(ARDUINO_ARCH_RP2040) && !defined(ARDUINO_ARCH_MBED)
   TinyUSBDevice.task(); 
   #endif
-
+  
+  watchdog_update();  // сброс сторожевого таймера
+  
   extern uint8_t rtc_sec; 
   // =========================================================================
   // 1. ОБРАБОТКА МЯГКОГО РЕСТАРТА

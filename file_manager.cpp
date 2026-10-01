@@ -90,6 +90,9 @@ int pin_pwr_ds   = -1;  // часы RTC
 int pin_pwr_bm   = -1;  // климатический датчик
 int pin_pwr_dl   = -1;  // дисплей
 
+extern uint16_t rtc_year;  // extern, если объявлены не в этом файле  
+extern uint8_t rtc_month, rtc_day, rtc_hour, rtc_min, rtc_sec;
+
 
 // Выделение ОЗУ под таблицу расписания задач
 TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
@@ -147,7 +150,28 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   return bufsize;  
 }
 
-
+// FAT: время = час<<11 | мин<<5 | сек/2 ; дата = (год-1980)<<9 | месяц<<5 | день  
+static uint16_t fat_time_now() {  
+  return ((uint16_t)rtc_hour << 11) | ((uint16_t)rtc_min << 5) | (rtc_sec / 2);  
+}  
+static uint16_t fat_date_now() {  
+  uint16_t y = (rtc_year >= 1980) ? (rtc_year - 1980) : 0;  
+  return (y << 9) | ((uint16_t)rtc_month << 5) | rtc_day;  
+}  
+  
+// dir_entry_idx: 0=INFO.TXT, 1=SET.TXT, 2=LOG.TXT; with_create — ставить ли дату создания  
+static void set_dir_timestamp(uint8_t dir_entry_idx, bool with_create) {  
+  uint32_t e = SECTOR_SIZE * 2 + dir_entry_idx * 32;  // корневой каталог  
+  uint16_t t = fat_time_now(), d = fat_date_now();  
+  if (with_create) {  
+    ram_disk_buffer[e + 13] = 0;                                   // fine-res creation (10мс)  
+    memcpy(&ram_disk_buffer[e + 14], &t, 2);                       // creation time  
+    memcpy(&ram_disk_buffer[e + 16], &d, 2);                       // creation date  
+  }  
+  memcpy(&ram_disk_buffer[e + 18], &d, 2);                         // last access date  
+  memcpy(&ram_disk_buffer[e + 22], &t, 2);                         // write time  
+  memcpy(&ram_disk_buffer[e + 24], &d, 2);                         // write date  
+}
 
 // функция сохранения ОЗУ во Flash с ротацией по 8 слотам
 static void save_ram_to_flash() {
@@ -359,6 +383,10 @@ static void create_default_fat_with_info_file() {
   // Сектор 45: Данные LOG.TXT (5 + 20 + 20)
   uint32_t log_data_offset = SECTOR_SIZE * 45; // Сектор 45 (5 + 20 + 20)
   memcpy(&ram_disk_buffer[log_data_offset], default_log_content.c_str(), log_len);
+
+  set_dir_timestamp(0, true);   // INFO.TXT — создание + изменение  
+  set_dir_timestamp(1, true);   // SET.TXT  
+  set_dir_timestamp(2, true);   // LOG.TXT
 
   save_ram_to_flash();
   Serial.println("[Система] Структура диска обновлена: INFO (10Кб), SET (10Кб) и LOG (100Кб) готовы на Секторе 5!");
@@ -794,6 +822,8 @@ void update_info_config_from_console(String marker, String new_value) {
       ram_disk_buffer[root_offset + 28] = (uint8_t)(total_file_size & 0xFF);
       ram_disk_buffer[root_offset + 29] = (uint8_t)((total_file_size >> 8) & 0xFF);
       
+      set_dir_timestamp(0, false);  // INFO.TXT — только write time/date
+
       // Сохраняем образ диска во Flash-память RP2040 и обновляем переменные в ОЗУ
       save_ram_to_flash();
       read_file_to_variable();
@@ -832,6 +862,8 @@ void log_file_clear() {
   ram_disk_buffer[log_entry_offset + 29] = (uint8_t)((header_len >> 8) & 0xFF);
   ram_disk_buffer[log_entry_offset + 30] = 0x00;
   ram_disk_buffer[log_entry_offset + 31] = 0x00;
+
+  set_dir_timestamp(2, false);
 
   save_ram_to_flash();
   Serial.println("[Журнал]  Файл LOG.TXT успешно очищен.");
@@ -1039,6 +1071,8 @@ void save_hardware_settings_to_file(String scan_results) {
   ram_disk_buffer[set_entry_offset + 30] = 0x00;
   ram_disk_buffer[set_entry_offset + 31] = 0x00;
 
+  set_dir_timestamp(1, false);
+
   save_ram_to_flash();
   // Сообщаем ОС, что накопитель переподключен
   usb_msc.setUnitReady(false); 
@@ -1152,6 +1186,8 @@ void log_file_write_block(const String& block) {
   ram_disk_buffer[log_entry_offset + 30] = (uint8_t)(new_size >> 16);  
   ram_disk_buffer[log_entry_offset + 31] = (uint8_t)(new_size >> 24);  
   
+  set_dir_timestamp(2, false);
+
   save_ram_to_flash();              // <-- один раз на весь блок  
   Serial.print("[Журнал]  Блок добавлен, объем: ");  
   Serial.println(new_size);  

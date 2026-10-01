@@ -930,10 +930,8 @@ void update_info_config_from_console(String marker, String new_value) {
       ram_disk_buffer[root_offset + 28] = (uint8_t)(total_file_size & 0xFF);
       ram_disk_buffer[root_offset + 29] = (uint8_t)((total_file_size >> 8) & 0xFF);
       
-      set_dir_timestamp(0, false);  // INFO.TXT — только write time/date
-
       // Сохраняем образ диска во Flash-память RP2040 и обновляем переменные в ОЗУ
-      set_dir_timestamp(0, false);   // INFO.TXT
+      set_dir_timestamp(0, false);   // INFO.TXT — только write time/date
       save_ram_to_flash();
       read_and_parse_INFO_txt();
       // Принудительно перезапускаем сессию для Windows
@@ -1168,13 +1166,10 @@ void log_file_write_block(const String& block) {
   
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {  
     Serial.println("[Журнал]  Лог заполнен! Автоочистка...");  
-    log_file_clear();  
-    current_size = ram_disk_buffer[log_entry_offset + 28] |  
-                  (ram_disk_buffer[log_entry_offset + 29] << 8) |  
-                  (ram_disk_buffer[log_entry_offset + 30] << 16) |  
-                  (ram_disk_buffer[log_entry_offset + 31] << 24);  
-  }  
-  
+    log_file_clear();   // если внутри есть save+remount — они выполнятся лишний раз  
+    current_size = 0;   // после clear размер известен, перечитывать не обязательно  
+  }
+
   memcpy(&ram_disk_buffer[log_data_offset + current_size], formatted.c_str(), msg_len);  
   
   uint32_t new_size = current_size + msg_len;  

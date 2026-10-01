@@ -65,6 +65,7 @@ enum RtcType {
 extern RtcType activeRtc;
 
 extern String rtc_chip_name; // будем пользоваться переменной из основного INO-файла
+extern uint32_t scheduled_freq_hz;  // частота из расписания
 
 void I2C_DS_restart(); // переключить шину Wire1 на устройство DS3231
 void handle_time_command(String cmd);

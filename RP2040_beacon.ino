@@ -645,7 +645,8 @@ void loop() {
       SI_POWER_ON();
       
       if (!pc_file_written && !soft_restart_flag) {
-        uint32_t ifkp_hz = strtoul(my_freq_ifkp_var.c_str(), NULL, 10);
+        uint32_t ifkp_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz  // приоритет отдать частоте задачи по расписанию
+                   : strtoul(my_freq_ifkp_var.c_str(), NULL, 10);
         if (ifkp_hz == 0) ifkp_hz = 3601307; 
         
         // Вывод параметров IFKP
@@ -720,6 +721,7 @@ void loop() {
       
       // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА
       is_transmitting = false;
+      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
       SI_POWER_OFF();
       dev_TX_state = false;
       update_scheduler(); // Гарантированно сдвигаем планировщик во избежание бесконечного перезапуска цикла
@@ -751,7 +753,8 @@ void loop() {
       
       if (!pc_file_written && !soft_restart_flag) {
         // --- НОВАЯ КОРРЕКТИРОВКА РАСЧЕТА ЧАСТОТ RTTY ---
-        uint32_t rtty_mark_hz = strtoul(my_rtty_mark_var.c_str(), NULL, 10);
+        uint32_t rtty_mark_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz    // приоритет отдать частоте задачи по расписанию
+                        : strtoul(my_rtty_mark_var.c_str(), NULL, 10);
         if (rtty_mark_hz == 0)  rtty_mark_hz = 3601585; // Дефолтная частота MARK
 
         uint32_t rtty_shift_hz = strtoul(my_rtty_shift_var.c_str(), NULL, 10);
@@ -820,6 +823,7 @@ void loop() {
       
       // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА
       is_transmitting = false;
+      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
       SI_POWER_OFF();
       dev_TX_state = false;
       update_scheduler(); 
@@ -851,7 +855,8 @@ void loop() {
       SI_POWER_ON();
       
       if (!pc_file_written && !soft_restart_flag) {
-        uint32_t cw_hz = (my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000;
+        uint32_t cw_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz  
+                 : ((my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000);    // приоритет отдать частоте задачи по расписанию
         
         prepare_cw_frequency(cw_hz);
         if (debug_flag) {
@@ -910,7 +915,8 @@ void loop() {
       } 
       
       // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
-      is_transmitting = false; 
+      is_transmitting = false;
+      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
       SI_POWER_OFF();
       dev_TX_state = false;
       update_scheduler(); // Переключаем планировщик на следующий интервал времени

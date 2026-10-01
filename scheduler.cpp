@@ -68,6 +68,9 @@ extern bool dev_TX_state;        // Состояние усилителя (true 
 // Прямой проброс внешнего массива матричного расписания из ОЗУ
 extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
 
+// Глобальная частота задачи, выбранной планировщиком (0 = не задана)  
+uint32_t scheduled_freq_hz = 0;   // частота из расписания
+
 // Перечисление для типов подключенных чипов времени
 RtcType activeRtc = RTC_NONE;
 
@@ -733,7 +736,13 @@ bool is_time_to_transmit(uint8_t mode) {
     Serial.printf("[Планировщик] TASK_%02d: запуск %s в %02d:%02d\n",  
                   i + 1, mode_name(mode), rtc_hour, rtc_min); 
     last_min[mode] = cur;  
+    scheduled_freq_hz = task.freq_hz;    // частота из расписания
+    if (mode == 0) last_ifkp_minute = cur_abs_min;
     return true;  
   }  
   return false;  
 }
+
+
+
+

@@ -886,7 +886,6 @@ void check_and_handle_pc_changes() {
 }
 
 
-// Функция редактирования любого параметра в файле INFO.txt из консоли
 // Универсальное редактирование любого параметра в файле INFO.txt из консоли
 void update_info_config_from_console(String marker, String new_value) {
   uint32_t root_offset = SECTOR_SIZE * 2;
@@ -930,17 +929,23 @@ void update_info_config_from_console(String marker, String new_value) {
       uint32_t old_val_len = end_of_old_line - write_ptr;
       uint32_t new_val_len = new_value.length();
       
-      // БЕЗОПАСНЫЙ РАСЧЕТ: Вычисляем длину хвоста диска до самого конца выделенного сектора
+      // БЕЗОПАСНЫЙ РАСЧЕТ: Вычисляем позицию внутри RAM-диска
       uint32_t current_write_pos = end_of_old_line - ram_disk_buffer;
-      uint32_t tail_len = DISK_SIZE_BYTES - current_write_pos;
+      
+      // ИСПРАВЛЕНО: Хвост ограничивается концом кластера INFO.TXT (10 Кб),
+      // а не концом всего ОЗУ-диска. Сектор 25 (SET.TXT) теперь под полной защитой!
+      uint32_t tail_len = (data_offset + INFO_MAX_BYTES) - current_write_pos;
 
       // Если длины старого и нового значений не совпадают — раздвигаем или сдвигаем память
       if (new_val_len != old_val_len) {
         uint8_t* new_tail_pos = write_ptr + new_val_len;
         
-        // Защита: проверяем, чтобы сдвиг не вылез за физические границы ОЗУ-диска
-        if ((new_tail_pos - ram_disk_buffer) + tail_len < DISK_SIZE_BYTES) {
+        // Защита: проверяем, чтобы сдвиг не вылез за физические границы, выделенные под INFO.TXT
+        if ((new_tail_pos - ram_disk_buffer) + tail_len <= (data_offset + INFO_MAX_BYTES)) {
           memmove(new_tail_pos, end_of_old_line, tail_len);
+        } else {
+          Serial.println(F("[Ошибка] Критическое переполнение кластера INFO.TXT! Отмена операции."));
+          return;
         }
       }
       
@@ -953,19 +958,21 @@ void update_info_config_from_console(String marker, String new_value) {
       ram_disk_buffer[root_offset + 29] = (uint8_t)((total_file_size >> 8) & 0xFF);
       
       // Сохраняем образ диска во Flash-память RP2040 и обновляем переменные в ОЗУ
-      set_dir_timestamp(0, false);   // INFO.TXT — только write time/date
+      set_dir_timestamp(0, false);   // INFO.TXT — только обновление времени модификации
       save_ram_to_flash();
       read_and_parse_INFO_txt();
-      // Принудительно перезапускаем сессию для Windows
+      
+      // Принудительно перезапускаем сессию для Windows, чтобы обновить файлы в Проводнике
       remount_usb_disk();
       
-      Serial.print("[Система] Изменение успешно записано! ["); Serial.print(marker); 
-      Serial.print("] = ["); Serial.print(new_value); Serial.println("]");
+      Serial.print(F("[Система] Изменение успешно записано! [")); Serial.print(marker); 
+      Serial.print(F("] = [")); Serial.print(new_value); Serial.println(F("]"));
     }
   } else {
-    Serial.print("[Ошибка] Маркер ["); Serial.print(marker); Serial.println("] не найден.");
+    Serial.print(F("[Ошибка] Маркер [")); Serial.print(marker); Serial.println(F("] не найден."));
   }
 }
+
 
 
 // -------------------------------------------------------------------------
@@ -1046,14 +1053,19 @@ void log_file_write_line(String message) {
 
 // Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
 // Сохранение настроек железа на Сектор 25
+// Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
+// Сохранение настроек железа на Сектор 25
 void save_hardware_settings_to_file(String scan_results) {
   uint32_t root_offset = SECTOR_SIZE * 2;
   uint32_t set_entry_offset = root_offset + 32; 
-  uint32_t set_data_offset = SECTOR_SIZE * 25; // ИСПРАВЛЕНО: Сектор 25
+  uint32_t set_data_offset = SECTOR_SIZE * 25; // Сектор 25
 
   auto pin_to_str = [](int p) -> String {
     return (p == -1) ? "NC" : String(p);
   };
+
+  // Сохраняем переданные результаты сканирования в глобальный буфер
+  scan_result_data = scan_results; 
 
   String content = "";
   content.reserve(512);
@@ -1073,11 +1085,12 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
   content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
-  content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n"; // 0/1 — режим отладки
+  content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n"; 
   content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
+  
+  // ИСПРАВЛЕНО: Сюда выгружаются СТРОГО чистые результаты сканирования
   content += "[SCAN_RESULT]\r\n" + scan_results + "\r\n\r\n"; 
   content += "[EOF]";
-
 
   uint32_t total_len = content.length();
   if (total_len >= SET_MAX_BYTES) {
@@ -1095,9 +1108,10 @@ void save_hardware_settings_to_file(String scan_results) {
 
   set_dir_timestamp(1, false);   // SET.TXT
   save_ram_to_flash();
-  // Сообщаем ОС, что накопитель переподключен
   remount_usb_disk(); 
 }
+
+
 
 
 // Проверка, входит ли конкретный пин в список исключений SCAN_EXCLUDE

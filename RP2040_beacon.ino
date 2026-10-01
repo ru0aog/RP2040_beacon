@@ -90,12 +90,14 @@ bool dev_TX_state  = false;
 uint8_t device_SI[5];
 uint8_t device_DS[5];
 uint8_t device_BM[5];
+uint8_t device_AH[5];
 uint8_t device_AT[5];
 uint8_t device_DL[5];
 
 String device_SI_name = "SI5351 Генератор";
 String device_DS_name = "DS3231 Часы RTC";
 String device_BM_name = "BME280 Барометр";
+String device_AH_name = "AHT20  Гигрометр";
 String device_AT_name = "EEPROM AT24C";
 String device_DL_name = "дисплей LCD1602/1604";
 
@@ -608,19 +610,40 @@ void loop() {
       ZERO_LED_OFF();
 
       LCD_init(true);   
-      String T_CPU_text = "";
-      String T_DS_text  = "T1=" + get_telemetry_string().substring(5, 9);
-      if (device_DS[0] == 1 && activeRtc == RTC_DS1307) {T_CPU_text = "CPU " + get_telemetry_string().substring(15, 19) + " ";}
-      if (device_DS[0] == 1 && activeRtc == RTC_DS3231) {T_CPU_text = "CPU " + get_telemetry_string().substring(17, 21) + " ";}
-      if (device_DS[0] == 0) {                           T_CPU_text = "CPU " + get_telemetry_string().substring(15, 19) + " ";}
-      String T_CL_text  = "TMP " + get_climate_telemetry().substring(5, 9) + " ";
-      String P_CL_text  = get_climate_telemetry().substring(17, 22) + "mm";
-      String Time_text  = "  " + get_current_time().substring(0, 5);
+        // --- ИСПРАВЛЕННЫЙ БЛОК ВЫРАВНИВАНИЯ ДЛЯ LCD1602 ---
+        // 1. Извлекаем чистые числовые значения, полностью отвязавшись от индексов snprintf
+        String climate_str = get_climate_telemetry(); // Например: "T_CL=27.5C P_CL=749.4mm H_CL=45.2%"
+        
+        int p_idx = climate_str.indexOf("P_CL=");
+        int h_idx = climate_str.indexOf("H_CL=");
+        
+        String P_value = "000.0"; // Дефолт, если барометр отключен
+        if (p_idx != -1) {
+          // Выкусываем чистое число давления между "P_CL=" и "mm"
+          int p_end = climate_str.indexOf("mm", p_idx);
+          if (p_end != -1) {
+            P_value = climate_str.substring(p_idx + 5, p_end);
+            P_value.trim();
+          }
+        }
 
-      LCD_print(T_CL_text, 1, 0);
-      LCD_print(P_CL_text, 1, 9);
-      LCD_print(T_CPU_text, 0, 0);
-      LCD_print(Time_text, 0, 9);
+        // 2. Формируем строгие 16-символьные строки для экранов 1602
+        // Верхняя строка (Строка 0): "CPU 36.1   21:09" -> ровно 16 символов
+        char lcd_line0[17];
+        String current_time_str = get_current_time().substring(0, 5); // "ЧЧ:ММ"
+        String raw_cpu_temp = get_telemetry_string().substring(get_telemetry_string().indexOf("T_CPU=") + 6, get_telemetry_string().indexOf("T_CPU=") + 10);
+        snprintf(lcd_line0, sizeof(lcd_line0), "CPU %-4s   %5s", raw_cpu_temp.c_str(), current_time_str.c_str());
+
+        // Нижняя строка (Строка 1): "TMP 27.5  749.4m" -> ровно 16 символов
+        char lcd_line1[17];
+        String raw_cl_temp = climate_str.substring(5, 9); // "27.5"
+        snprintf(lcd_line1, sizeof(lcd_line1), "TMP %-4s %5smm", raw_cl_temp.c_str(), P_value.c_str());
+
+        // 3. Выводим готовые монолитные строки, исключая артефакты от старого текста
+        LCD_print(lcd_line0, 0, 0);
+        LCD_print(lcd_line1, 1, 0);
+        // --------------------------------------------------
+
     }
   }
 
@@ -987,6 +1010,10 @@ void I2C_Scanner() {
     snprintf(addr_buf, sizeof(addr_buf), "0x%02X", device_BM[4]);
     results += fmt_dev("BME/BMP", addr_buf, device_BM[2], device_BM[3]);
   }
+  if (device_AH[0] == 1) {
+    if (results.length() > 0) results += "\r\n";
+    results += fmt_dev("AHT20", "0x38", device_AH[2], device_AH[3]);
+  }
   if (device_DL[0] == 1) {
     if (results.length() > 0) results += "\r\n";
     results += fmt_dev("LCD", "0x27", device_DL[2], device_DL[3]);
@@ -1025,7 +1052,11 @@ void scanRP2040Ports() {
       //Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
       continue;
     }
-    I2C_Scan_module(0, sda, scl, false); 
+    if (debug_flag) {
+        I2C_Scan_module(0, sda, scl, true); }
+      else {
+        I2C_Scan_module(0, sda, scl, false);
+      }
     delay(50);
   }
 
@@ -1042,7 +1073,11 @@ void scanRP2040Ports() {
       //Serial.print(F("[Сканер]  Пропуск исключенных пинов: ")); Serial.print(sda); Serial.print(F(", ")); Serial.println(scl);
       continue;
     }
-    I2C_Scan_module(1, sda, scl, false); 
+    if (debug_flag) {
+        I2C_Scan_module(1, sda, scl, true); }
+      else {
+        I2C_Scan_module(1, sda, scl, false);
+      } 
     delay(50);
   }
 }
@@ -1275,6 +1310,28 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
         }
       }
 
+      // =========================================================================
+      // 6. УСИЛЕННАЯ ВЕРИФИКАЦИЯ ДАТЧИКА ВЛАЖНОСТИ И ТЕМПЕРАТУРЫ AHT20 (0x38)
+      // =========================================================================
+      else if (address == AHT20_ADDRESS) {
+        pWire->beginTransmission(address);
+        pWire->write(0x71); // Запрос регистра статуса AHT20
+        if (pWire->endTransmission() == 0) {
+          if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
+            uint8_t status = pWire->read();
+            hardware_verified = true; // Датчик подтвердил свое присутствие
+            
+            if (LOGGING) { Serial.println(F("[Система] - найден прибор 0x38: Датчик AHT20")); }
+            
+            device_AH[0] = 1;
+            device_AH[1] = WIRE_NO;
+            device_AH[2] = PIN_SDA;
+            device_AH[3] = PIN_SCL;
+            device_AH[4] = address;
+          }
+        }
+      }
+
       // Финальный инкремент счетчика устройств только при успешном прохождении глубокого теста
       if (hardware_verified) {
         nDevices++;
@@ -1309,11 +1366,11 @@ void printDeviceTable() {
   Serial.println(F("  Устройство   PIN SDA   PIN SCL   Wire No   Address     Имя"));
   Serial.println(F("--------------------------------------------------------------------------"));
 
-  uint8_t* arrays[] = {device_SI, device_DS, device_AT, device_BM, device_DL};
-  const char* names[] = {"device_SI", "device_DS", "device_AT", "device_BM", "device_DL"};
-  String* deviceNames[] = {&device_SI_name, &device_DS_name, &device_AT_name, &device_BM_name, &device_DL_name};
+  uint8_t* arrays[] = {device_SI, device_DS, device_AT, device_BM, device_AH, device_DL};
+  const char* names[] = {"device_SI", "device_DS", "device_AT", "device_BM", "device_AH", "device_DL"};
+  String* deviceNames[] = {&device_SI_name, &device_DS_name, &device_AT_name, &device_BM_name,  &device_AH_name, &device_DL_name};
 
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     // Если первый элемент (Active) равен 0, пропускаем вывод всей строки
     if (arrays[i][0] == 0) {
       continue; 

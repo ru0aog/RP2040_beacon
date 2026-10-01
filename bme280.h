@@ -24,6 +24,7 @@
 // Адрес датчика на шине I2C.
 #define BME280_ADDRESS 0x76
 #define BMP180_ADDRESS 0x77
+#define AHT20_ADDRESS  0x38  // Адрес климатического датчика AHT20
 
 extern float  bme_humid;
 extern float  bme_temp;

@@ -108,6 +108,7 @@ alignas(4) static uint8_t ram_disk_buffer[DISK_SIZE_BYTES];
 // Переменные времени для отслеживания ПК
 volatile uint32_t last_msc_write_time = 0;
 bool pc_activity_detected = false;
+volatile uint8_t pc_written_regions = 0;  // биты: 0 - системная/FAT/каталог, 1 - INFO.TXT, 2 - SET.TXT, 3 - LOG.TXT
 
 // Колбэки и посредники для TinyUSB MSC
 
@@ -129,7 +130,14 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   if (lba >= SECTOR_COUNT) return -1;  
   memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);  
   last_msc_write_time = millis();  
-  pc_activity_detected = true;  
+  pc_activity_detected = true;
+
+  // Определяем, какой файл затронула запись (сектора данных начинаются с LBA 5)  
+  if      (lba < 5)                            pc_written_regions |= 0x01; // бут/FAT/каталог  
+  else if (lba < 5 + INFO_CLUSTERS)            pc_written_regions |= 0x02; // INFO.TXT  
+  else if (lba < 5 + INFO_CLUSTERS + SET_CLUSTERS) pc_written_regions |= 0x04; // SET.TXT  
+  else 
+
   // Прерываем эфир только при изменении конфигурации:  
   // сектора 0-4 (Boot/FAT/каталог), INFO.TXT (5-24), SET.TXT (25-44)  
   uint32_t last_lba = lba + (bufsize / SECTOR_SIZE) - 1;  
@@ -700,18 +708,21 @@ void init_file_manager() {
 // Функция проверки изменений от ПК для loop()
 void check_and_handle_pc_changes() {
   if (pc_activity_detected && (millis() - last_msc_write_time > 1500)) {
-    Serial.println("> ОБНАРУЖЕНА КОРРЕКТИРОВКА ФАЙЛА");
+
+    Serial.print(F("> ОБНАРУЖЕНА КОРРЕКТИРОВКА ФАЙЛА: "));  
+    if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.print(F("системная область/FAT "));  
+    if (pc_written_regions & 0x02) Serial.print(F("INFO.TXT "));  
+    if (pc_written_regions & 0x04) Serial.print(F("SET.TXT "));  
+    if (pc_written_regions & 0x08) Serial.print(F("LOG.TXT "));  
+    Serial.println();  
+    pc_written_regions = 0;
+
     pc_activity_detected = false;
     
     save_ram_to_flash();
     read_file_to_variable();
     read_hardware_settings(); // Перечитываем пины, если оператор изменил SET.TXT
 
-    //usb_msc.setUnitReady(false); 
-    //delay(1500);                  
-    //usb_msc.setUnitReady(true);
-    
-    //print_current_settings();
     pc_file_written = false; // Сбрасываем флаг только ПОСЛЕ обновления строк
   }
 }

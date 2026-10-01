@@ -612,60 +612,45 @@ void read_and_parse_SET_txt() {
   uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
 
   for (uint32_t i = scan_start; i < scan_end - 15; i++) {
-    if (ram_disk_buffer[i] == '[') {
-      int32_t start_idx = -1;
-      String* target_str = nullptr;
-
-      // Динамически ищем закрывающую скобку ']', чтобы пробелы выравнивания не ломали strncmp
-      uint32_t close_bracket_idx = 0;
-      for (uint32_t k = i; k < i + 20; k++) {
-        if (ram_disk_buffer[k] == ']') {
-          close_bracket_idx = k;
-          break;
-        }
-      }
-
-      if (close_bracket_idx == 0) continue; // Битый маркер без скобки
-
-      // Сравниваем чистые имена тегов, игнорируя пробелы внутри скобок
-      if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_FREQ_OUT", 12) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_freq_out;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_AMP_ACT", 11) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_amp_act;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_0", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[0];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_1", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[1];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_2", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[2];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_3", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[3];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_SI", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_si;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DS", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_ds;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_BM", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_bm;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DL", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_dl;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE", 12) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &scan_exclude_list;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "DEBUG", 5) == 0) {  
-        // [DEBUG]=1 — включает служебный вывод в Serial  
-        start_idx = close_bracket_idx + 1; target_str = &my_debug_var;  
-      }
+    if (ram_disk_buffer[i] == '[' &&   
+    (i == scan_start || ram_disk_buffer[i-1] == '\n' ||   
+     ram_disk_buffer[i-1] == '\r' || (uint8_t)ram_disk_buffer[i-1] < 32 ||   
+     (uint8_t)ram_disk_buffer[i-1] >= 0x80)) {
+          int32_t start_idx = -1;  
+          String* target_str = nullptr;  
+          bool is_task_line = false;  
       
+          // Динамически ищем закрывающую скобку ']' — пробелы выравнивания в теге не ломают разбор  
+          uint32_t close_bracket_idx = 0;  
+          for (uint32_t k = i + 1; k < i + 20 && k < scan_end; k++) {  
+            if (ram_disk_buffer[k] == ']') { close_bracket_idx = k; break; }  
+          }  
+          if (close_bracket_idx == 0) continue;  // ']' не найдена — не тег, идём дальше  
+      
+          // Имя тега между '[' и ']', без пробелов по краям  
+          String tag = "";  
+          for (uint32_t k = i + 1; k < close_bracket_idx; k++) {  
+            char c = (char)ram_disk_buffer[k];  
+            if (c != ' ') tag += c;  
+          }
+
+          if      (tag == "PIN_FREQ_OUT")  target_str = &s_freq_out;  
+          else if (tag == "PIN_AMP_ACT")   target_str = &s_amp_act;  
+          else if (tag == "PIN_SUBBAND_1") target_str = &s_subband[0];  
+          else if (tag == "PIN_SUBBAND_2") target_str = &s_subband[1];  
+          else if (tag == "PIN_SUBBAND_3") target_str = &s_subband[2];  
+          else if (tag == "PIN_SUBBAND_4") target_str = &s_subband[3];  
+          else if (tag == "PIN_PWR_SI")    target_str = &s_pwr_si;  
+          else if (tag == "PIN_PWR_DS")    target_str = &s_pwr_ds;  
+          else if (tag == "PIN_PWR_BM")    target_str = &s_pwr_bm;  
+          else if (tag == "PIN_PWR_DL")    target_str = &s_pwr_dl;  
+          else if (tag == "SCAN_EXCLUDE")  target_str = &scan_exclude_list;  
+          else if (tag == "DEBUG")         target_str = &my_debug_var; 
+
+          if (target_str != nullptr) {  
+            start_idx = close_bracket_idx + 1;  // значение начинается сразу после ']'  
+          }
+
       // Выкусываем значение строго до конца строки
       if (start_idx != -1 && target_str != nullptr) {
         target_str->reserve(64);
@@ -858,22 +843,24 @@ void init_file_manager() {
 void check_and_handle_pc_changes() {
   watchdog_update();    // обновить сторожевой таймер
   if (pc_activity_detected && (millis() - last_msc_write_time > 1500)) {
-    Serial.println(F("[Система] Обнаружена корректировка файла: "));  
+    Serial.println(F("[Система] Обнаружена корректировка файла: "));
     if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.println(F("  - системная область/FAT "));  
-    if (pc_written_regions & 0x02) {
-      Serial.println(F("  - INFO.TXT "));
-      save_ram_to_flash();  // сохранить изменения на флэш
-      read_and_parse_INFO_txt();    // Парсер настроек INFO.TXT
-    }
-    if (pc_written_regions & 0x04) {
-      Serial.println(F("  - SET.TXT "));
-      save_ram_to_flash();  // сохранить изменения на флэш
-      read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
-    }
     if (pc_written_regions & 0x08) {
       Serial.println(F("  - LOG.TXT "));  // LOG не парсим и на флэш не сохраняем
     }
-
+    // переписываем флэш только один раз, даже если правились оба файла 
+    bool config_changed = (pc_written_regions & 0x02) || (pc_written_regions & 0x04);
+    if (pc_written_regions & 0x02) {
+      Serial.println(F("  - INFO.TXT "));
+      read_and_parse_INFO_txt();    // Парсер настроек INFO.TXT
+    }  
+    if (pc_written_regions & 0x04) {  
+      Serial.println(F("  - SET.TXT "));
+      read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
+    }  
+    if (config_changed) {  
+      save_ram_to_flash();   // один раз, даже если правились оба файла  
+    }
     pc_activity_detected = false; // сброс флага факта записи на диск
     pc_written_regions = 0;       // сброс указателя места записи
     pc_file_written = false;      // сброс флага изменения файлов INFO или SET (true останавливает передачу)

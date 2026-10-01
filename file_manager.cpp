@@ -136,7 +136,7 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   if      (lba < 5)                            pc_written_regions |= 0x01; // бут/FAT/каталог  
   else if (lba < 5 + INFO_CLUSTERS)            pc_written_regions |= 0x02; // INFO.TXT  
   else if (lba < 5 + INFO_CLUSTERS + SET_CLUSTERS) pc_written_regions |= 0x04; // SET.TXT  
-  else 
+  else                                         pc_written_regions |= 0x08; // LOG.TXT
 
   // Прерываем эфир только при изменении конфигурации:  
   // сектора 0-4 (Boot/FAT/каталог), INFO.TXT (5-24), SET.TXT (25-44)  

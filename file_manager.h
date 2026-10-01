@@ -55,11 +55,12 @@ extern volatile uint32_t RTTY_BIT_TIME_US;
 void init_usb_msc_interface();      // инициализация USB-регистрацию диска
 void init_flash_disk();             // Считывание данных в ОЗУ из Flash
 void init_file_manager();           // инициализация файл-менеджера
-void force_reset_to_default_disk(); // Принудительный сброс диска на дефолт
+void force_reset_to_default_disk(); // Принудительный сброс USB-диска на дефолт
 void check_and_handle_pc_changes();
 void print_current_settings();
-void read_and_parse_INFO_txt();
-void read_and_parse_SET_txt();
+void read_and_parse_INFO_txt();   // парсер INFO.txt
+void read_and_parse_SET_txt();    // парсер SET.txt
+void remount_usb_disk ();         // перемонтировать USB-диск
 
 // API для работы с журналом LOG.TXT
 void log_file_clear();

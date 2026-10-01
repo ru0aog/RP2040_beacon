@@ -400,7 +400,14 @@ static void create_default_fat_with_info_file() {
 
 
 
-
+// для парсинга SET.TXT
+// Вспомогательный инлайн для обработки значений пинов (парсит числа или возвращает -1 для NC)
+static inline int parse_pin_value(const String& val) {
+  String tmp = val;
+  tmp.trim();
+  if (tmp.equalsIgnoreCase("NC") || tmp.length() == 0) return -1;
+  return tmp.toInt();
+}
 
 
 // Полный парсер INFO.TXT, изолированный на Секторах 5..24 со сбором всех переменных и расписания
@@ -424,51 +431,51 @@ void read_and_parse_INFO_txt() {
   int task_counter = 0;
 
   for (uint32_t i = scan_start; i < scan_end - 15; i++) {
-    if (ram_disk_buffer[i] == '[' && (i == scan_start || ram_disk_buffer[i-1] == '\n' || ram_disk_buffer[i-1] == '\r')) {
-      int32_t start_idx = -1;
-      String* target_str = nullptr;
-      bool is_task_line = false;
+    if (ram_disk_buffer[i] == '[' &&   
+    (i == scan_start || ram_disk_buffer[i-1] == '\n' ||   
+     ram_disk_buffer[i-1] == '\r' || (uint8_t)ram_disk_buffer[i-1] < 32 ||   
+     (uint8_t)ram_disk_buffer[i-1] >= 0x80)) {
+          int32_t start_idx = -1;  
+          String* target_str = nullptr;  
+          bool is_task_line = false;  
+      
+          // Динамически ищем закрывающую скобку ']' — пробелы выравнивания в теге не ломают разбор  
+          uint32_t close_bracket_idx = 0;  
+          for (uint32_t k = i + 1; k < i + 20 && k < scan_end; k++) {  
+            if (ram_disk_buffer[k] == ']') { close_bracket_idx = k; break; }  
+          }  
+          if (close_bracket_idx == 0) continue;  // ']' не найдена — не тег, идём дальше  
+      
+          // Имя тега между '[' и ']', без пробелов по краям  
+          String tag = "";  
+          for (uint32_t k = i + 1; k < close_bracket_idx; k++) {  
+            char c = (char)ram_disk_buffer[k];  
+            if (c != ' ') tag += c;  
+          }  
+      
+          // --- БЛОК А: Одиночные текстовые и частотные маркеры ---  
+          if      (tag == "CALL")        target_str = &my_call_variable;  
+          else if (tag == "QTH")         target_str = &my_qth_variable;  
+          else if (tag == "TEXT")        target_str = &my_text_variable;  
+          else if (tag == "CW_WPM")      target_str = &my_cw_wpm_var;  
+          else if (tag == "RTTY_SPEED")  target_str = &my_rtty_baud_var;  
+          else if (tag == "FREQ_CW")     target_str = &my_freq_cw_var;  
+          else if (tag == "RTTY_MARK")   target_str = &my_rtty_mark_var;  
+          else if (tag == "RTTY_SHIFT")  target_str = &my_rtty_shift_var;  
+          else if (tag == "RTTY_INVERT") target_str = &my_rtty_invert_var;  
+          else if (tag == "FREQ_IFKP")   target_str = &my_freq_ifkp_var;  
+          else if (tag == "CW")          target_str = &my_cw_variable;    // НОВОЕ  
+          else if (tag == "RTTY")        target_str = &my_rtty_variable;  // НОВОЕ  
+          else if (tag == "IFKP")        target_str = &my_ifkp_variable;  // НОВОЕ
 
-      // --- БЛОК А: Сборка одиночных текстовых и частотных маркеров ---
-      if (ram_disk_buffer[i+1] == 'C' && ram_disk_buffer[i+2] == 'A' && ram_disk_buffer[i+3] == 'L' && ram_disk_buffer[i+4] == 'L' && ram_disk_buffer[i+5] == ']') {
-        start_idx = i + 6; target_str = &my_call_variable;
-      }
-      else if (ram_disk_buffer[i+1] == 'Q' && ram_disk_buffer[i+2] == 'T' && ram_disk_buffer[i+3] == 'H' && ram_disk_buffer[i+4] == ']') {
-        start_idx = i + 5; target_str = &my_qth_variable;
-      }
-      else if (ram_disk_buffer[i+1] == 'T' && ram_disk_buffer[i+2] == 'E' && ram_disk_buffer[i+3] == 'X' && ram_disk_buffer[i+4] == 'T' && ram_disk_buffer[i+5] == ']') {
-        start_idx = i + 6; target_str = &my_text_variable;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "CW_WPM    ]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_cw_wpm_var;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_SPEED]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_rtty_baud_var;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "FREQ_CW   ]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_freq_cw_var;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_MARK ]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_rtty_mark_var;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_SHIFT]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_rtty_shift_var;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "RTTY_INVERT]", 12) == 0) {
-        start_idx = i + 13; target_str = &my_rtty_invert_var;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "FREQ_IFKP ]", 11) == 0) {
-        start_idx = i + 12; target_str = &my_freq_ifkp_var;
-      }
-      // --- БЛОК Б: Определение новой матрицы расписания [TASK_XX] ---
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "TASK_", 5) == 0) {
-        uint32_t close_bracket = i;
-        while (close_bracket < scan_end && ram_disk_buffer[close_bracket] != ']') close_bracket++;
-        if (ram_disk_buffer[close_bracket] == ']') {
-          start_idx = close_bracket + 1;
-          is_task_line = true;
-        }
-      }
+          // --- БЛОК Б: Матрица расписания [TASK_XX] ---  
+          else if (tag.startsWith("TASK_")) {  
+            is_task_line = true;  
+          }  
+      
+          if (target_str != nullptr || is_task_line) {  
+            start_idx = close_bracket_idx + 1;  // значение начинается сразу после ']'  
+          }
 
       // 2. Выкусываем значение тега строго до конца строки
       if (start_idx != -1) {
@@ -581,10 +588,121 @@ void read_and_parse_INFO_txt() {
       RTTY_BIT_TIME_US = (uint32_t)(1000000.0f / baud);
     }
   }
+
+  if (debug_flag) {
+    Serial.println("[Система] парсинг INFO.TXT");
+  }
+
 }
 
 
+// Функция побайтового разбора маркеров файла SET.TXT
+// Парсер инженерных настроек с защитой от сброса в 0
+void read_and_parse_SET_txt() {
+  flash_flush_cache();
+  
+  String s_freq_out = "", s_amp_act = "";
+  String s_subband[4] = {"", "", "", ""};
+  String s_pwr_si = "", s_pwr_ds = "", s_pwr_bm = "", s_pwr_dl = "";
+  scan_exclude_list = "";
+  scan_result_data  = "";
+  my_debug_var      = "";
 
+  uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
+  uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
+
+  for (uint32_t i = scan_start; i < scan_end - 15; i++) {
+    if (ram_disk_buffer[i] == '[') {
+      int32_t start_idx = -1;
+      String* target_str = nullptr;
+
+      // Динамически ищем закрывающую скобку ']', чтобы пробелы выравнивания не ломали strncmp
+      uint32_t close_bracket_idx = 0;
+      for (uint32_t k = i; k < i + 20; k++) {
+        if (ram_disk_buffer[k] == ']') {
+          close_bracket_idx = k;
+          break;
+        }
+      }
+
+      if (close_bracket_idx == 0) continue; // Битый маркер без скобки
+
+      // Сравниваем чистые имена тегов, игнорируя пробелы внутри скобок
+      if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_FREQ_OUT", 12) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_freq_out;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_AMP_ACT", 11) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_amp_act;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_0", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[0];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_1", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[1];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_2", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[2];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_3", 13) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_subband[3];
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_SI", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_si;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DS", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_ds;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_BM", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_bm;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DL", 10) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &s_pwr_dl;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE", 12) == 0) {
+        start_idx = close_bracket_idx + 1; target_str = &scan_exclude_list;
+      }
+      else if (strncmp((const char*)&ram_disk_buffer[i+1], "DEBUG", 5) == 0) {  
+        // [DEBUG]=1 — включает служебный вывод в Serial  
+        start_idx = close_bracket_idx + 1; target_str = &my_debug_var;  
+      }
+      
+      // Выкусываем значение строго до конца строки
+      if (start_idx != -1 && target_str != nullptr) {
+        target_str->reserve(64);
+        if (ram_disk_buffer[start_idx] == '=') start_idx++;
+
+        for (uint32_t j = start_idx; j < scan_end; j++) {
+          char c = (char)ram_disk_buffer[j];
+          if (c == '\n' || c == '\r' || c == '[') {
+            i = j - 1;
+            break;
+          }
+          if (c >= 32) *target_str += c;
+        }
+        target_str->trim();
+      }
+    }
+  }
+
+  debug_flag = (my_debug_var.toInt() != 0);
+  // Назначаем дефолты жестко в коде, если файлы пустые или теги не прочитались
+  pin_freq_out = (s_freq_out.length() > 0) ? parse_pin_value(s_freq_out) : 14;
+  pin_amp_act  = (s_amp_act.length() > 0)  ? parse_pin_value(s_amp_act)  : 15;
+  
+  for (int k = 0; k < 4; k++) {
+    subband_pins[k] = (s_subband[k].length() > 0) ? parse_pin_value(s_subband[k]) : (2 + k);
+  }
+  
+  pin_pwr_si = (s_pwr_si.length() > 0) ? parse_pin_value(s_pwr_si) : -1;
+  pin_pwr_ds = (s_pwr_ds.length() > 0) ? parse_pin_value(s_pwr_ds) : -1;
+  pin_pwr_bm = (s_pwr_bm.length() > 0) ? parse_pin_value(s_pwr_bm) : -1;
+  pin_pwr_dl = (s_pwr_dl.length() > 0) ? parse_pin_value(s_pwr_dl) : -1;
+
+  if (debug_flag) {
+    Serial.println("[Система] парсинг SET.TXT");
+  }
+
+}
 
 
 // Функция вывода текущих настроек
@@ -738,23 +856,23 @@ void init_file_manager() {
 
 // Функция проверки изменений от ПК для loop()
 void check_and_handle_pc_changes() {
+  watchdog_update();    // обновить сторожевой таймер
   if (pc_activity_detected && (millis() - last_msc_write_time > 1500)) {
-
-    watchdog_update();    // обновить сторожевой таймер
-    save_ram_to_flash();  // сохранить изменения на флэш
-
-    Serial.print(F("> ОБНАРУЖЕНА КОРРЕКТИРОВКА ФАЙЛА: "));  
-    if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.print(F("системная область/FAT "));  
+    Serial.println(F("[Система] Обнаружена корректировка файла: "));  
+    if (pc_written_regions == 0 || (pc_written_regions & 0x01)) Serial.println(F("  - системная область/FAT "));  
     if (pc_written_regions & 0x02) {
+      Serial.println(F("  - INFO.TXT "));
+      save_ram_to_flash();  // сохранить изменения на флэш
       read_and_parse_INFO_txt();    // Парсер настроек INFO.TXT
-      Serial.print(F("INFO.TXT "));
     }
     if (pc_written_regions & 0x04) {
-      Serial.print(F("SET.TXT "));
+      Serial.println(F("  - SET.TXT "));
+      save_ram_to_flash();  // сохранить изменения на флэш
       read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
     }
-    if (pc_written_regions & 0x08) Serial.print(F("LOG.TXT "));  // LOG не парсим
-    Serial.println();
+    if (pc_written_regions & 0x08) {
+      Serial.println(F("  - LOG.TXT "));  // LOG не парсим и на флэш не сохраняем
+    }
 
     pc_activity_detected = false; // сброс флага факта записи на диск
     pc_written_regions = 0;       // сброс указателя места записи
@@ -836,12 +954,7 @@ void update_info_config_from_console(String marker, String new_value) {
       read_and_parse_INFO_txt();
       
       // Принудительно перезапускаем сессию для Windows
-      usb_msc.setUnitReady(false); // Сообщаем ОС, что накопитель извлечен
-      // Даем операционной системе ПК ровно 1.5 секунды, чтобы она гарантированно 
-      // закрыла файл в Блокноте, удалила кэш секторов и поняла, что флешку вынули!
-      watchdog_update(); // сброс сторожевого таймера
-      delay(1500);
-      usb_msc.setUnitReady(true);  // Сообщаем Windows, что вставлен новый исправный диск
+      remount_usb_disk();
       
       Serial.print("[Система] Изменение успешно записано! ["); Serial.print(marker); 
       Serial.print("] = ["); Serial.print(new_value); Serial.println("]");
@@ -876,10 +989,7 @@ void log_file_clear() {
   save_ram_to_flash();
   Serial.println("[Журнал]  Файл LOG.TXT успешно очищен.");
   // Сообщаем ОС, что накопитель переподключен
-  usb_msc.setUnitReady(false);
-  watchdog_update(); // сброс сторожевого таймера
-  delay(1500); 
-  usb_msc.setUnitReady(true);
+  remount_usb_disk();
 }
 
 // -------------------------------------------------------------------------
@@ -919,124 +1029,14 @@ void log_file_write_line(String message) {
   Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
   // Сообщаем ОС, что накопитель переподключен
-  usb_msc.setUnitReady(false);
-  watchdog_update(); // сброс сторожевого таймера
-  delay(1500); 
-  usb_msc.setUnitReady(true); 
+  remount_usb_disk();
 }
 
 
 
-// Вспомогательный инлайн для обработки значений пинов (парсит числа или возвращает -1 для NC)
-static inline int parse_pin_value(const String& val) {
-  String tmp = val;
-  tmp.trim();
-  if (tmp.equalsIgnoreCase("NC") || tmp.length() == 0) return -1;
-  return tmp.toInt();
-}
 
-// Функция побайтового разбора маркеров файла SET.TXT
-// Парсер инженерных настроек с защитой от сброса в 0
-void read_and_parse_SET_txt() {
-  flash_flush_cache();
-  
-  String s_freq_out = "", s_amp_act = "";
-  String s_subband[4] = {"", "", "", ""};
-  String s_pwr_si = "", s_pwr_ds = "", s_pwr_bm = "", s_pwr_dl = "";
-  scan_exclude_list = "";
-  scan_result_data  = "";
-  my_debug_var      = "";
 
-  uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
-  uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
 
-  for (uint32_t i = scan_start; i < scan_end - 15; i++) {
-    if (ram_disk_buffer[i] == '[') {
-      int32_t start_idx = -1;
-      String* target_str = nullptr;
-
-      // Динамически ищем закрывающую скобку ']', чтобы пробелы выравнивания не ломали strncmp
-      uint32_t close_bracket_idx = 0;
-      for (uint32_t k = i; k < i + 20; k++) {
-        if (ram_disk_buffer[k] == ']') {
-          close_bracket_idx = k;
-          break;
-        }
-      }
-
-      if (close_bracket_idx == 0) continue; // Битый маркер без скобки
-
-      // Сравниваем чистые имена тегов, игнорируя пробелы внутри скобок
-      if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_FREQ_OUT", 12) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_freq_out;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "PIN_AMP_ACT", 11) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_amp_act;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_0", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[0];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_1", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[1];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_2", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[2];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SUBBAND_PIN_3", 13) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_subband[3];
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_SI", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_si;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DS", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_ds;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_BM", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_bm;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "BUS_PWR_DL", 10) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &s_pwr_dl;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "SCAN_EXCLUDE", 12) == 0) {
-        start_idx = close_bracket_idx + 1; target_str = &scan_exclude_list;
-      }
-      else if (strncmp((const char*)&ram_disk_buffer[i+1], "DEBUG", 5) == 0) {  
-        // [DEBUG]=1 — включает служебный вывод в Serial  
-        start_idx = close_bracket_idx + 1; target_str = &my_debug_var;  
-      }
-      
-      // Выкусываем значение строго до конца строки
-      if (start_idx != -1 && target_str != nullptr) {
-        target_str->reserve(64);
-        if (ram_disk_buffer[start_idx] == '=') start_idx++;
-
-        for (uint32_t j = start_idx; j < scan_end; j++) {
-          char c = (char)ram_disk_buffer[j];
-          if (c == '\n' || c == '\r' || c == '[') {
-            i = j - 1;
-            break;
-          }
-          if (c >= 32) *target_str += c;
-        }
-        target_str->trim();
-      }
-    }
-  }
-
-  debug_flag = (my_debug_var.toInt() != 0);
-  // Назначаем дефолты жестко в коде, если файлы пустые или теги не прочитались
-  pin_freq_out = (s_freq_out.length() > 0) ? parse_pin_value(s_freq_out) : 14;
-  pin_amp_act  = (s_amp_act.length() > 0)  ? parse_pin_value(s_amp_act)  : 15;
-  
-  for (int k = 0; k < 4; k++) {
-    subband_pins[k] = (s_subband[k].length() > 0) ? parse_pin_value(s_subband[k]) : (2 + k);
-  }
-  
-  pin_pwr_si = (s_pwr_si.length() > 0) ? parse_pin_value(s_pwr_si) : -1;
-  pin_pwr_ds = (s_pwr_ds.length() > 0) ? parse_pin_value(s_pwr_ds) : -1;
-  pin_pwr_bm = (s_pwr_bm.length() > 0) ? parse_pin_value(s_pwr_bm) : -1;
-  pin_pwr_dl = (s_pwr_dl.length() > 0) ? parse_pin_value(s_pwr_dl) : -1;
-}
 
 
 
@@ -1093,10 +1093,7 @@ void save_hardware_settings_to_file(String scan_results) {
 
   save_ram_to_flash();
   // Сообщаем ОС, что накопитель переподключен
-  usb_msc.setUnitReady(false);
-  watchdog_update(); // сброс сторожевого таймера
-  delay(1500); 
-  usb_msc.setUnitReady(true); 
+  remount_usb_disk(); 
 }
 
 
@@ -1163,10 +1160,7 @@ void force_reset_to_default_disk() {
   read_and_parse_SET_txt(); 
   
   // 3. Жестко уведомляем Windows, чтобы он перечитал файловую систему
-  usb_msc.setUnitReady(false);
-  watchdog_update(); // сброс сторожевого таймера
-  delay(1500); 
-  usb_msc.setUnitReady(true);
+  remount_usb_disk();
   
   Serial.println(F("[Система] Все файлы успешно перезаписаны на дефолтные!"));
 }
@@ -1212,8 +1206,17 @@ void log_file_write_block(const String& block) {
   Serial.print("[Журнал]  Блок добавлен, объем: ");  
   Serial.println(new_size);  
   
-  usb_msc.setUnitReady(false);      // <-- одно перемонтирование
-  watchdog_update(); // сброс сторожевого таймера
-  delay(1500);  
-  usb_msc.setUnitReady(true);  
+  remount_usb_disk();  
+}
+
+
+// перемонтирование USB диска
+void remount_usb_disk() {
+  usb_msc.setUnitReady(false);      // перемонтирование
+    uint32_t t0 = millis();  
+    while (millis() - t0 < 1500) {  // пауза с кормлением watchdog 
+      watchdog_update();  
+      delay(50);  
+    } 
+  usb_msc.setUnitReady(true); 
 }

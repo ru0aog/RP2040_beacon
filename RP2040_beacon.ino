@@ -287,6 +287,15 @@ void check_serial_commands() {
               log_file_write_line("флэш-диск отформатирован. Все установки сброшены");
             }
           }
+
+          else if (command.equalsIgnoreCase("remount")) {  
+            Serial.println(F("[Система] Перемонтирование USB-диска..."));  
+            is_transmitting = false;                     // на всякий случай глушим эфир  
+            log_file_write_line("Перемонтирование диска по команде оператора");  
+            remount_usb_disk();
+            Serial.println(F("[Система] Диск перемонтирован."));  
+          }
+
           else if (command.equalsIgnoreCase("sched") || command.equalsIgnoreCase("schedule")) {  
             print_schedule();  
           }
@@ -324,6 +333,7 @@ void check_serial_commands() {
           Serial.println(F("start ifkp      - Немедленно запустить внеочередной сеанс IFKP"));
           Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
           Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));
+          Serial.println(F("remount         - Переподключить USB-диск (обновление в Проводнике)"));
           Serial.println(F("stop            - Экстренная остановка передачи маяка"));
           Serial.println(F("restart         - Мягкий виртуальный перезапуск маяка"));
           Serial.println(F("reset           - Жесткий аппаратный сброс процессора RP2040"));

@@ -899,7 +899,7 @@ void update_info_config_from_console(String marker, String new_value) {
   }
   
   if (target_tag != nullptr) {
-    // ИСПРАВЛЕНО: Теперь позиция записи вычисляется динамически — встаем строго за знак '='
+    // позиция записи вычисляется динамически — встаем строго за знак '='
     uint8_t* write_ptr = (uint8_t*)strchr((const char*)target_tag, '=') + 1; 
     
     uint8_t* end_of_old_line = (uint8_t*)strpbrk((const char*)write_ptr, "\r\n");
@@ -933,9 +933,9 @@ void update_info_config_from_console(String marker, String new_value) {
       set_dir_timestamp(0, false);  // INFO.TXT — только write time/date
 
       // Сохраняем образ диска во Flash-память RP2040 и обновляем переменные в ОЗУ
+      set_dir_timestamp(0, false);   // INFO.TXT
       save_ram_to_flash();
       read_and_parse_INFO_txt();
-      
       // Принудительно перезапускаем сессию для Windows
       remount_usb_disk();
       
@@ -1008,6 +1008,7 @@ void log_file_write_line(String message) {
   ram_disk_buffer[log_entry_offset + 30] = (uint8_t)((new_size >> 16) & 0xFF);
   ram_disk_buffer[log_entry_offset + 31] = (uint8_t)((new_size >> 24) & 0xFF);
 
+  set_dir_timestamp(2,false);
   save_ram_to_flash();
   Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
@@ -1072,8 +1073,7 @@ void save_hardware_settings_to_file(String scan_results) {
   ram_disk_buffer[set_entry_offset + 30] = 0x00;
   ram_disk_buffer[set_entry_offset + 31] = 0x00;
 
-  set_dir_timestamp(1, false);
-
+  set_dir_timestamp(1, false);   // SET.TXT
   save_ram_to_flash();
   // Сообщаем ОС, что накопитель переподключен
   remount_usb_disk(); 

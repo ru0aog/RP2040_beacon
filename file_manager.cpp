@@ -832,7 +832,8 @@ void update_info_config_from_console(String marker, String new_value) {
       usb_msc.setUnitReady(false); // Сообщаем ОС, что накопитель извлечен
       // Даем операционной системе ПК ровно 1.5 секунды, чтобы она гарантированно 
       // закрыла файл в Блокноте, удалила кэш секторов и поняла, что флешку вынули!
-      delay(1500);                 
+      watchdog_update(); // сброс сторожевого таймера
+      delay(1500);
       usb_msc.setUnitReady(true);  // Сообщаем Windows, что вставлен новый исправный диск
       
       Serial.print("[Система] Изменение успешно записано! ["); Serial.print(marker); 
@@ -868,7 +869,8 @@ void log_file_clear() {
   save_ram_to_flash();
   Serial.println("[Журнал]  Файл LOG.TXT успешно очищен.");
   // Сообщаем ОС, что накопитель переподключен
-  usb_msc.setUnitReady(false); 
+  usb_msc.setUnitReady(false);
+  watchdog_update(); // сброс сторожевого таймера
   delay(1500); 
   usb_msc.setUnitReady(true);
 }
@@ -910,7 +912,8 @@ void log_file_write_line(String message) {
   Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
   // Сообщаем ОС, что накопитель переподключен
-  usb_msc.setUnitReady(false); 
+  usb_msc.setUnitReady(false);
+  watchdog_update(); // сброс сторожевого таймера
   delay(1500); 
   usb_msc.setUnitReady(true); 
 }
@@ -1075,7 +1078,8 @@ void save_hardware_settings_to_file(String scan_results) {
 
   save_ram_to_flash();
   // Сообщаем ОС, что накопитель переподключен
-  usb_msc.setUnitReady(false); 
+  usb_msc.setUnitReady(false);
+  watchdog_update(); // сброс сторожевого таймера
   delay(1500); 
   usb_msc.setUnitReady(true); 
 }
@@ -1145,6 +1149,7 @@ void force_reset_to_default_disk() {
   
   // 3. Жестко уведомляем Windows, чтобы он перечитал файловую систему
   usb_msc.setUnitReady(false);
+  watchdog_update(); // сброс сторожевого таймера
   delay(1500); 
   usb_msc.setUnitReady(true);
   
@@ -1192,7 +1197,8 @@ void log_file_write_block(const String& block) {
   Serial.print("[Журнал]  Блок добавлен, объем: ");  
   Serial.println(new_size);  
   
-  usb_msc.setUnitReady(false);      // <-- одно перемонтирование  
+  usb_msc.setUnitReady(false);      // <-- одно перемонтирование
+  watchdog_update(); // сброс сторожевого таймера
   delay(1500);  
   usb_msc.setUnitReady(true);  
 }

@@ -54,6 +54,7 @@
 #include "lcd.h"
 #include "vfo_hardware.h"
 #include "led_blink.h"
+#include <hardware/watchdog.h>
 
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;
@@ -132,6 +133,7 @@ static void cw_delay(uint32_t ms) {
         
         // Короткая микропауза, чтобы не перегружать ядро процессора в пустом цикле
         delayMicroseconds(500); 
+        watchdog_update(); // сброс сторожевого таймера в процессе передачи
     }
 }
 

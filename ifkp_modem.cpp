@@ -60,6 +60,7 @@
 #include "scheduler.h"
 #include "vfo_hardware.h"
 #include "led_blink.h"
+#include <hardware/watchdog.h>
 
 uint32_t IFKP_Base_freq = 3601307;
 // Глобальные переменные для хранения сетки частот IFKP (33 тона)
@@ -122,6 +123,7 @@ void send_delta(uint8_t delta) {
         }
         // Опрашиваем CLI. Любые задержки внутри CLI больше не ломают общую длительность тона
         check_serial_commands();
+        watchdog_update(); // сброс сторожевого таймера в процессе передачи
         
         // гасим светодиод на экваторе длительности (250 мс)
         if (!led_half_turned_off && (micros() - IFKP_start_time >= IFKP_halftone_duration_us)) {

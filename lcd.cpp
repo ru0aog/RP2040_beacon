@@ -254,6 +254,7 @@ void LCD_init(bool deep_init) {
     // На старте жестко переводим линии в высокое безопасное состояние
     i2c_high(device_DL[2]);
     i2c_high(device_DL[3]);
+    watchdog_update(); // сброс сторожевого таймера
     //delay(500); // Ожидание полной стабилизации питания экрана
 
     // пошаговая инициализация HD44780 в 4-битном режиме
@@ -276,6 +277,7 @@ void LCD_print(const char* text, uint8_t row, uint8_t col) {
   if (device_DL[4] != LCD_ADDRESS) {
     return; // Если дисплея нет, выходим из функции
   }
+  watchdog_update(); // сброс сторожевого таймера
   // 1. Устанавливаем курсор в заданную позицию
   lcd_set_cursor(col, row); 
   // 2. Печатаем переданный текст

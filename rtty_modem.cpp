@@ -54,6 +54,7 @@
 #include "lcd.h"
 #include "led_blink.h"
 #include "vfo_hardware.h"
+#include <hardware/watchdog.h>
 
 // Внешние ссылки на глобальные переменные управления
 extern bool soft_restart_flag;
@@ -206,7 +207,8 @@ static void send_rtty_bit(TransmitterState state) {
             break;
         }
         // Даем процессору RP2040 слегка «подышать» (опционально)
-        delayMicroseconds(10); 
+        delayMicroseconds(10);
+        watchdog_update(); // сброс сторожевого таймера в процессе передачи
     }
 }
 

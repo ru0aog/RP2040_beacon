@@ -419,12 +419,12 @@ void setup() {
     digitalWrite(pin_amp_act, dev_TX_state);
   }
 
-  watchdog_enable(8000, true);   // 8 сек; true = не тикать при остановке по отладчику
+  watchdog_enable(15000, true);   // 15 сек; true = не тикать при остановке по отладчику
   if (wd_reboot_detected) {  
     Serial.println(F("[Watchdog] Обнаружен перезапуск по сторожевому таймеру!"));  
     log_file_write_line("Watchdog: аварийный перезапуск");   // попадёт в LOG.TXT с датой/временем RTC  
   }
-  else Serial.println(F("[Система] запуск сторожевого таймера - ок"));
+  else Serial.println(F("[Система] Запуск сторожевого таймера - ок"));
 
   //Serial.println(F("\n================================================================"));
   Serial.println(F("  АВТОМАТИЧЕСКИЙ РАДИОМАЯК ЗАПУЩЕН"));
@@ -1014,6 +1014,7 @@ void scanRP2040Ports() {
 
 
 void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
+  watchdog_update(); // сброс сторожевого таймера
   // сканер устройств на указанной шине I2C
   byte error, address;
   int nDevices = 0;

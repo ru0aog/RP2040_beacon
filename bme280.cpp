@@ -211,33 +211,6 @@ void init_AHT() {
   }
 }
 
-void get_AHT_data() { 
-  if (device_AH[0] == 1) {
-    I2C_AHT_restart();
-    TwoWire *pWire = (device_AH[1] == 1) ? &Wire1 : &Wire;
-    
-    if (AHT_Sensor == TYPE_AHT20) {
-      pWire->beginTransmission(AHT20_ADDRESS);
-      pWire->write(0xAC); pWire->write(0x33); pWire->write(0x00);
-      pWire->endTransmission();
-      delay(80); 
-
-      pWire->requestFrom(AHT20_ADDRESS, (uint8_t)7);
-      if (pWire->available() >= 7) {
-        uint8_t status = pWire->read(); (void)status;
-        
-        uint32_t b1 = pWire->read(); uint32_t b2 = pWire->read(); uint32_t b3 = pWire->read();
-        uint32_t b4 = pWire->read(); uint32_t b5 = pWire->read(); uint8_t crc = pWire->read(); (void)crc;
-        
-        uint32_t raw_humidity = (b1 << 12) | (b2 << 4) | (b3 >> 4);
-        uint32_t raw_temperature = ((b3 & 0x0F) << 16) | (b4 << 8) | b5;
-
-        AHT_humid = ((float)raw_humidity / 1048576.0f) * 100.0f;
-        AHT_temp  = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
-      }
-    }
-  }
-}
 
 // Инициализация и настройка BME280/BMP280/BMP180
 bool initBME280() {
@@ -305,7 +278,7 @@ void init_BME() {
     }
   }
 
-  initAHT20();
+  init_AHT();
 }
 
 
@@ -449,25 +422,30 @@ void get_BME_data() {
   }
 }
 
-void BME_read() {
-  get_BME_data();
-  if (device_BM[0] == 1 || device_AH[0] == 1) {
-    float temperature  = BME_temp;
-    float pressureMmHg = BME_press;
-    float humidity     = BME_humid;
+void get_AHT_data() { 
+  if (device_AH[0] == 1) {
+    I2C_AHT_restart();
+    TwoWire *pWire = (device_AH[1] == 1) ? &Wire1 : &Wire;
+    
+    if (AHT_Sensor == TYPE_AHT20) {
+      pWire->beginTransmission(AHT20_ADDRESS);
+      pWire->write(0xAC); pWire->write(0x33); pWire->write(0x00);
+      pWire->endTransmission();
+      delay(80); 
 
-    Serial.print(" - темп.     : "); Serial.print(temperature, 1);  Serial.println(" °C");
-    
-    if (BME_Sensor == TYPE_BME280) {
-      Serial.print(" - влажность : "); Serial.print(humidity, 1);     Serial.println(" %");
-    } else {
-      Serial.println(" - влажность : нет в этой модели чипа Bosch");
-    }
-    
-    if (device_BM[0] == 1) {
-      Serial.print(" - давление  : "); Serial.print(pressureMmHg, 1);  Serial.println(" мм рт. ст.");
-    } else {
-      Serial.println(" - давление  : в системе отсутствует барометр");
+      pWire->requestFrom(AHT20_ADDRESS, (uint8_t)7);
+      if (pWire->available() >= 7) {
+        uint8_t status = pWire->read(); (void)status;
+        
+        uint32_t b1 = pWire->read(); uint32_t b2 = pWire->read(); uint32_t b3 = pWire->read();
+        uint32_t b4 = pWire->read(); uint32_t b5 = pWire->read(); uint8_t crc = pWire->read(); (void)crc;
+        
+        uint32_t raw_humidity = (b1 << 12) | (b2 << 4) | (b3 >> 4);
+        uint32_t raw_temperature = ((b3 & 0x0F) << 16) | (b4 << 8) | b5;
+
+        AHT_humid = ((float)raw_humidity / 1048576.0f) * 100.0f;
+        AHT_temp  = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
+      }
     }
   }
 }

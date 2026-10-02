@@ -84,9 +84,9 @@ static void climate_take_sample() {
   
   ClimateSample &s = samples[sample_count];  
   snprintf(s.time, sizeof(s.time), "%s", get_current_time().c_str());  
-  s.temp  = bme_temp;  
-  s.press = bme_press;  
-  s.humid = bme_humid;  
+  s.temp  = BME_temp;  
+  s.press = BME_press;  
+  s.humid = BME_humid;  
   sample_count++;  
   
 #if DEBUG_CLIMATE_LOG  

@@ -26,9 +26,12 @@
 #define BMP180_ADDRESS 0x77
 #define AHT20_ADDRESS  0x38  // Адрес климатического датчика AHT20
 
-extern float  bme_humid;
-extern float  bme_temp;
-extern float  bme_press;
+extern float  BME_humid;
+extern float  BME_temp;
+extern float  BME_press;
+
+extern float  AHT_temp;
+extern float  AHT_humid;
 
 extern uint8_t device_BM[5]; // номер шины, пин SDA, пин SCL, адрес
 

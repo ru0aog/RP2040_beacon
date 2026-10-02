@@ -398,9 +398,9 @@ String get_telemetry_string() {
 
   char tele_buf[48];
   if (device_DS[0] == 1 && activeRtc == RTC_DS3231) {
-    snprintf(tele_buf, sizeof(tele_buf), "T_DS=%.1fC T_CPU=%.1fC", rtc_temp, mcu_temp);
+    snprintf(tele_buf, sizeof(tele_buf), "T_DS =%.1fC T_CPU=%.1fC", rtc_temp, mcu_temp);
   } else {
-    snprintf(tele_buf, sizeof(tele_buf), "T_DS=N/A T_CPU=%.1fC", mcu_temp);
+    snprintf(tele_buf, sizeof(tele_buf), "T_CPU=%.1fC", mcu_temp);
   }
   
   return String(tele_buf);

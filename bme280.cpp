@@ -428,27 +428,67 @@ void get_AHT_data() {
     TwoWire *pWire = (device_AH[1] == 1) ? &Wire1 : &Wire;
     
     if (AHT_Sensor == TYPE_AHT20) {
+      // Отправляем команду на запуск измерения
       pWire->beginTransmission(AHT20_ADDRESS);
       pWire->write(0xAC); pWire->write(0x33); pWire->write(0x00);
       pWire->endTransmission();
-      delay(80); 
 
-      pWire->requestFrom(AHT20_ADDRESS, (uint8_t)7);
-      if (pWire->available() >= 7) {
-        uint8_t status = pWire->read(); (void)status;
-        
-        uint32_t b1 = pWire->read(); uint32_t b2 = pWire->read(); uint32_t b3 = pWire->read();
-        uint32_t b4 = pWire->read(); uint32_t b5 = pWire->read(); uint8_t crc = pWire->read(); (void)crc;
-        
-        uint32_t raw_humidity = (b1 << 12) | (b2 << 4) | (b3 >> 4);
-        uint32_t raw_temperature = ((b3 & 0x0F) << 16) | (b4 << 8) | b5;
+      // Опрос статуса готовности вместо жесткого delay(80)
+      uint32_t start_time = millis();
+      bool data_ready = false;
+      
+      while (millis() - start_time < 100) { // Таймаут 100 мс
+        pWire->requestFrom(AHT20_ADDRESS, (uint8_t)1);
+        if (pWire->available()) {
+          uint8_t status = pWire->read();
+          if ((status & 0x80) == 0) { // Бит 7 == 0 означает, что измерение завершено
+            data_ready = true;
+            break;
+          }
+        }
+        delay(2); // Небольшая пауза между опросами статуса, чтобы не спамить шину
+      }
 
-        AHT_humid = ((float)raw_humidity / 1048576.0f) * 100.0f;
-        AHT_temp  = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
+      // Если датчик успел отдать данные вовремя
+      if (data_ready) {
+        pWire->requestFrom(AHT20_ADDRESS, (uint8_t)7);
+        if (pWire->available() >= 7) {
+          uint8_t status = pWire->read(); (void)status; 
+          
+          uint32_t b2 = pWire->read(); // Humid [19:12]
+          uint32_t b3 = pWire->read(); // Humid [11:4]
+          uint32_t b4 = pWire->read(); // Humid [3:0] / Temp [19:16]
+          uint32_t b5 = pWire->read(); // Temp [15:8]
+          uint32_t b6 = pWire->read(); // Temp [7:0]
+          uint8_t crc = pWire->read(); (void)crc; 
+          
+          // Исправленная склейка 20-битных значений
+          uint32_t raw_humidity    = (b2 << 12) | (b3 << 4) | (b4 >> 4);
+          uint32_t raw_temperature = ((b4 & 0x0F) << 16) | (b5 << 8) | b6;
+
+          // Расчет физических величин
+          float h_calc = ((float)raw_humidity / 1048576.0f) * 100.0f;
+          float t_calc = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
+
+          // Санити-чек (Sanity check) для фильтрации явного «мусора» на шине
+          if (h_calc >= 0.0f && h_calc <= 100.0f && t_calc >= -40.0f && t_calc <= 85.0f) {
+            AHT_humid = h_calc;
+            AHT_temp  = t_calc;
+          } else {
+            if (debug_flag) {
+              Serial.print("[Система] Ошибка: Климатические данные AHT20 вышли за рамки разумного диапазона!\n");
+            }
+          }
+        }
+      } else {
+        if (debug_flag) {
+          Serial.print("[Система] Ошибка: Таймаут ожидания готовности AHT20!\n");
+        }
       }
     }
   }
 }
+
 
 // Функция для чтения телеметрии (климатические данные)
 String get_climate_telemetry() {
@@ -456,8 +496,39 @@ String get_climate_telemetry() {
   get_AHT_data();
 
   char tele_buf[128]; 
-  
-  snprintf(tele_buf, sizeof(tele_buf), "T_BME=%.1fC P_BME=%.1fmm H_BME=%.1f%% T_AHT=%.1fC H_AHT=%.1f%%", BME_temp, BME_press, BME_humid, AHT_temp, AHT_humid);
+  tele_buf[0] = '\0'; // Безопасная инициализация пустой строки
+
+  bool has_BME = (BME_Sensor == TYPE_BME280);
+  bool has_BMP = (BME_Sensor == TYPE_BMP280 || BME_Sensor == TYPE_BMP180);
+  bool has_AHT = (AHT_Sensor == TYPE_AHT20 && device_AH[0] == 1);
+
+  // 1. Подключены оба датчика (Bosch + AHT)
+  if (has_BME && has_AHT) {
+    snprintf(tele_buf, sizeof(tele_buf), "T_BME=%.1fC T_AHT=%.1fC P_BME=%.1fmm H_AHT=%.1f%% H_BME=%.1f%%",
+             BME_temp, AHT_temp, BME_press, AHT_humid, BME_humid);
+  } 
+  else if (has_BMP && has_AHT) {
+    snprintf(tele_buf, sizeof(tele_buf), "T_BMP=%.1fC T_AHT=%.1fC P_BMP=%.1fmm H_AHT=%.1f%%",
+             BME_temp, AHT_temp, BME_press, AHT_humid);
+  } 
+  // 2. Подключен только датчик Bosch
+  else if (has_BME && !has_AHT) {
+    snprintf(tele_buf, sizeof(tele_buf), "T_BME=%.1fC P_BME=%.1fmm H_BME=%.1f%%", 
+             BME_temp, BME_press, BME_humid);
+  } 
+  else if (has_BMP && !has_AHT) {
+    snprintf(tele_buf, sizeof(tele_buf), "T_BMP=%.1fC P_BMP=%.1fmm", 
+             BME_temp, BME_press);
+  }
+  // 3. Подключен только датчик влажности AHT20
+  else if (!has_BME && !has_BMP && has_AHT) {
+    snprintf(tele_buf, sizeof(tele_buf), "T_AHT=%.1fC H_AHT=%.1f%%", 
+             AHT_temp, AHT_humid);
+  }
+  // 4. Все датчики отключены / неисправны
+  else {
+    snprintf(tele_buf, sizeof(tele_buf), "CLIMATE_ERROR");
+  }
 
   return String(tele_buf);
 }

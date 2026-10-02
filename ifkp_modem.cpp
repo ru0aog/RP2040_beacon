@@ -49,7 +49,7 @@
  *  Длительность тона выдерживается активным циклом на micros() с вызовом  
  *  check_serial_commands() (CLI не ломает тайминг). Передача мгновенно  
  *  прерывается по флагам pc_file_written / soft_restart_flag с гашением выхода  
- *  (CLK_OFF_si5351 или vfo_set_cw_key(false)). Индикация — LED_BUILTIN и  
+ *  (VFO_TX_OFF или vfo_operation_set(false)). Индикация — LED_BUILTIN и  
  *  ZERO_LED_BLUE (гаснут на середине знака, эффект мигания).  
  *  
  *  СЕРВИС  
@@ -85,15 +85,14 @@ extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 static void set_ifkp_tone(uint8_t tone_index) {
     if (tone_index > 32) return;
     uint8_t* data = DATA_IFKP[tone_index];
-    setFrq_si5351(data, 0); // установить частоту для CLK0
+    setFrq_si5351(data); // установить частоту
 }
 
 // Передача разницы (дельта) частоты с микрозадержками и мгновенным выходом
 void send_delta(uint8_t delta) {
     // Прерываем работу, если зафиксирована активность ПК или подан сигнал рестарта
     if (pc_file_written || soft_restart_flag) {
-      digitalWrite(LED_BUILTIN, LOW);
-      if (SI_FAIL == false) CLK_OFF_si5351(0); // Глушим синтезатор
+      VFO_TX_OFF();            // отключить выход частоты TX
       return;
     }
     
@@ -107,7 +106,6 @@ void send_delta(uint8_t delta) {
     }
 
     // Включаем светодиод индикации передачи
-    digitalWrite(LED_BUILTIN, HIGH);
     ZERO_LED_BLUE_ON();
     uint32_t IFKP_start_time = micros();
     uint32_t IFKP_tone_duration_us = 500000; // 500 миллисекунд в микросекундах
@@ -118,10 +116,8 @@ void send_delta(uint8_t delta) {
     while (micros() - IFKP_start_time < IFKP_tone_duration_us) {
         // Прерываем работу, если зафиксирована активность ПК или подан сигнал рестарта
         if (pc_file_written || soft_restart_flag) {
-            digitalWrite(LED_BUILTIN, LOW);
             ZERO_LED_OFF();
-            if (device_SI[0] && SI_FAIL == false) CLK_OFF_si5351(0);
-            else vfo_set_cw_key(false);
+            VFO_TX_OFF();            // отключить выход частоты TX
             return;
         }
         // Опрашиваем CLI. Любые задержки внутри CLI больше не ломают общую длительность тона
@@ -130,7 +126,6 @@ void send_delta(uint8_t delta) {
         
         // гасим светодиод на экваторе длительности (250 мс)
         if (!led_half_turned_off && (micros() - IFKP_start_time >= IFKP_halftone_duration_us)) {
-            digitalWrite(LED_BUILTIN, LOW);
             ZERO_LED_OFF();
             led_half_turned_off = true;
         }
@@ -146,7 +141,7 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
     // ЕСЛИ СИНТЕЗАТОР ОТСУТСТВУЕТ - ИНИЦИАЛИЗИРУЕМ PIO ЯДРО И ВЫХОДИМ
     if (!device_SI[0] || SI_FAIL == true) {
         vfo_hardware_init(base_hz, IFKP_STEP_HZ);
-        vfo_set_cw_key(true); // Открываем ВЧ-выход ноги 28 в эфир
+        vfo_operation_set(true);    // запустить генерацию программного VFO
         vfo_set_tone_instant(0);
         if (debug_flag) {
             Serial.println(F("[IFKP_PIO] Аппаратное PIO-ядро готово."));
@@ -324,11 +319,7 @@ void send_ifkp_string(const char* str) {
   if (str == nullptr) return;
   
   // Включаем физический выход ВЧ генерации
-  if (device_SI[0] && SI_FAIL == false) {
-    CLK_ON_si5351(0); 
-  } else {
-    vfo_set_cw_key(true);
-  }
+  VFO_TX_ON();             // запустить выход частоты TX
     
     int i = 0;
     while (str[i] != '\0') {
@@ -354,15 +345,7 @@ void send_ifkp_string(const char* str) {
         i++;
     }
 
-  // Выключаем физический выход ВЧ генерации (Уходим в Z-состояние / Паузу)
-  if (device_SI[0] && SI_FAIL == false) {
-    CLK_OFF_si5351(0); 
-  } else {
-    vfo_set_cw_key(false);
-  }
-
-    CLK_OFF_si5351(0); // Корректно тушим чип
-    digitalWrite(LED_BUILTIN, LOW);
+    VFO_TX_OFF();            // отключить выход частоты TX
     ZERO_LED_OFF();
     Serial.println(""); 
 }
@@ -377,11 +360,7 @@ void send_ifkp_string(String str) {
 void send_ifkp_calibration_ladder() {
     
     // Включаем физический ВЧ-выход с корректной проверкой флага
-    if (device_SI[0] && SI_FAIL == false) {
-        CLK_ON_si5351(0); 
-    } else {
-        vfo_set_cw_key(true);
-    }
+    VFO_TX_ON();             // запустить выход частоты TX
 
     // Последовательный перебор всех тонов вверх
     for (uint8_t i = 0; i < 33; i++) {
@@ -400,7 +379,6 @@ void send_ifkp_calibration_ladder() {
         Serial.print(F(".")); 
 
         // Индикация начала тона
-        digitalWrite(LED_BUILTIN, HIGH);
         ZERO_LED_BLUE_ON(); 
         bool led_half_turned_off = false;
 
@@ -410,16 +388,14 @@ void send_ifkp_calibration_ladder() {
 
         while (millis() - start_ms < tone_duration_ms) {
             if (pc_file_written || soft_restart_flag) {
-                digitalWrite(LED_BUILTIN, LOW);
                 ZERO_LED_OFF();
-                if (device_SI[0] && SI_FAIL == false) CLK_OFF_si5351(0); else vfo_set_cw_key(false);
+                VFO_TX_OFF();            // отключить выход частоты TX
                 return;
             }
             check_serial_commands();
             watchdog_update();   // кормление сторожевого таймера на лесенке
             
             if (!led_half_turned_off && (millis() - start_ms >= halftone_duration_ms)) {
-                digitalWrite(LED_BUILTIN, LOW);
                 ZERO_LED_OFF(); 
                 led_half_turned_off = true;
             }
@@ -428,13 +404,7 @@ void send_ifkp_calibration_ladder() {
     }
 
     // Выключаем физический ВЧ-выход по завершении теста
-    if (device_SI[0] && SI_FAIL == false) {
-        CLK_OFF_si5351(0); 
-    } else {
-        vfo_set_cw_key(false);
-    }
-    
-    digitalWrite(LED_BUILTIN, LOW);
+    VFO_TX_OFF();            // отключить выход частоты TX
     ZERO_LED_OFF();
 }
 

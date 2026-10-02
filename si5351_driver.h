@@ -21,7 +21,7 @@
  *    si5351_write_reg(reg, data) — запись регистра с повторами при сбое I2C.  
  *    setFrq_si5351(SI_FREQ[], CLK_NO) — быстрая отправка 8-байтного пакета  
  *                                       частоты на CLK0/CLK1.  
- *    CLK_ON_si5351 / CLK_OFF_si5351(CLK_NO) — вкл/выкл выхода (или VFO-ключ).  
+ *    VFO_TX_ON / VFO_TX_OFF()     — вкл/выкл выхода (или VFO-ключ).  
  *    SI_POWER_ON / SI_POWER_OFF() — подача/снятие питания с выходов.  
  *    make_freq_with_space(FREQ)  — строковое форматирование частоты.  
  * ============================================================================  
@@ -40,10 +40,10 @@ extern uint8_t device_SI[5];
 
 // Прототипы функций модуля
 void I2C_SI_restart(); // переключить шину Wire1 на устройство Si5351
-void CLK_OFF_si5351(uint8_t CLK_NO); // выключить выход CLK_NO
-void CLK_ON_si5351(uint8_t CLK_NO);  // включить  выход CLK_NO
+void VFO_TX_ON();             // запустить выход частоты TX
+void VFO_TX_OFF();            // отключить выход частоты TX
 void init_si5351();
-void setFrq_si5351(uint8_t SI_FREQ[], uint8_t CLK_NO);
+void setFrq_si5351(uint8_t SI_FREQ[]);
 void SI_POWER_ON();
 void SI_POWER_OFF();
 bool si5351_write_reg(uint8_t reg, uint8_t data);

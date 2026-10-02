@@ -110,6 +110,6 @@ extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_
 // === НАБОР ФУНКЦИЙ УПРАВЛЕНИЯ ВЧ-ЭФИРОМ (Low-Level API) ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
-void vfo_set_cw_key(bool key_down);
+void vfo_operation_set(bool key_down);          // функция активации программного VFO
 
 #endif // VFO_HARDWARE_H

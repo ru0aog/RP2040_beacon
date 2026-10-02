@@ -94,6 +94,7 @@ String my_FAT             = "";
 String scan_exclude_list  = "";
 String scan_result_data   = "";
 String my_debug_var       = "";
+String s_led_enable       = "";
 
 // Физическое выделение памяти под инженерные переменные железа
 // Значения по умолчанию, если теги не найдены
@@ -124,6 +125,8 @@ uint32_t current_max_seq     = 0;  // число перезаписей
 
 volatile bool pc_file_written = false;
 
+bool led_enable_flag = true;    // По умолчанию LED-индикация включена
+int si5351_clk_tx_out = 0;      // По умолчанию частота TX выдается на CLK0
 
 
 // Выделение памяти под буфер диска в ОЗУ
@@ -361,6 +364,8 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "=== ИНЖЕНЕРНЫЕ НАСТРОЙКИ МАЯКА ===\r\n";
   dynamic_set_content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
   dynamic_set_content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
+  dynamic_set_content += "// Выходной канал частоты передачи Si5351: 0 = CLK0, 1 = CLK1, 2 = CLK2\r\n";
+  dynamic_set_content += "[SI5351_CLK_OUT]=" + String(si5351_clk_tx_out) + "\r\n\r\n";
   dynamic_set_content += "// Пины кода поддиапазона (4 пина)\r\n";
   dynamic_set_content += "[PIN_SUBBAND_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
   dynamic_set_content += "[PIN_SUBBAND_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
@@ -375,6 +380,8 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
   dynamic_set_content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
   dynamic_set_content += "[DEBUG]=1\r\n\r\n";   // 0/1 — режим отладки
+  dynamic_set_content += "// Управление светодиодной индикацией: 1 — включена, 0 — выключена\r\n";
+  dynamic_set_content += "[LED_ENABLE]=" + String(led_enable_flag ? 1 : 0) + "\r\n\r\n"; 
   dynamic_set_content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
   dynamic_set_content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
   dynamic_set_content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
@@ -627,6 +634,8 @@ void read_and_parse_SET_txt() {
   scan_exclude_list = "";
   scan_result_data  = "";
   my_debug_var      = "";
+  s_led_enable = "";
+  String s_si_clk = "";
 
   uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
   uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
@@ -653,18 +662,20 @@ void read_and_parse_SET_txt() {
             if (c != ' ') tag += c;  
           }
 
-          if      (tag == "PIN_FREQ_OUT")  target_str = &s_freq_out;  
-          else if (tag == "PIN_AMP_ACT")   target_str = &s_amp_act;  
-          else if (tag == "PIN_SUBBAND_0") target_str = &s_subband[0];  
-          else if (tag == "PIN_SUBBAND_1") target_str = &s_subband[1];  
-          else if (tag == "PIN_SUBBAND_2") target_str = &s_subband[2];  
-          else if (tag == "PIN_SUBBAND_3") target_str = &s_subband[3];  
-          else if (tag == "PIN_PWR_SI")    target_str = &s_pwr_si;  
-          else if (tag == "PIN_PWR_DS")    target_str = &s_pwr_ds;  
-          else if (tag == "PIN_PWR_BM")    target_str = &s_pwr_bm;  
-          else if (tag == "PIN_PWR_DL")    target_str = &s_pwr_dl;  
-          else if (tag == "SCAN_EXCLUDE")  target_str = &scan_exclude_list;  
-          else if (tag == "DEBUG")         target_str = &my_debug_var; 
+          if      (tag == "PIN_FREQ_OUT")   target_str = &s_freq_out;  
+          else if (tag == "PIN_AMP_ACT")    target_str = &s_amp_act;
+          else if (tag == "SI5351_CLK_OUT") target_str = &s_si_clk;
+          else if (tag == "LED_ENABLE")     target_str = &s_led_enable;
+          else if (tag == "PIN_SUBBAND_0")  target_str = &s_subband[0];  
+          else if (tag == "PIN_SUBBAND_1")  target_str = &s_subband[1];  
+          else if (tag == "PIN_SUBBAND_2")  target_str = &s_subband[2];  
+          else if (tag == "PIN_SUBBAND_3")  target_str = &s_subband[3];  
+          else if (tag == "PIN_PWR_SI")     target_str = &s_pwr_si;  
+          else if (tag == "PIN_PWR_DS")     target_str = &s_pwr_ds;  
+          else if (tag == "PIN_PWR_BM")     target_str = &s_pwr_bm;  
+          else if (tag == "PIN_PWR_DL")     target_str = &s_pwr_dl;  
+          else if (tag == "SCAN_EXCLUDE")   target_str = &scan_exclude_list;  
+          else if (tag == "DEBUG")          target_str = &my_debug_var; 
 
           if (target_str != nullptr) {  
             start_idx = close_bracket_idx + 1;  // значение начинается сразу после ']'  
@@ -701,6 +712,9 @@ void read_and_parse_SET_txt() {
   pin_pwr_ds = (s_pwr_ds.length() > 0) ? parse_pin_value(s_pwr_ds) : -1;
   pin_pwr_bm = (s_pwr_bm.length() > 0) ? parse_pin_value(s_pwr_bm) : -1;
   pin_pwr_dl = (s_pwr_dl.length() > 0) ? parse_pin_value(s_pwr_dl) : -1;
+  led_enable_flag = (s_led_enable.length() > 0) ? (s_led_enable.toInt() != 0) : true;
+  int parsed_clk = (s_si_clk.length() > 0) ? s_si_clk.toInt() : 0;
+  si5351_clk_tx_out = (parsed_clk >= 0 && parsed_clk <= 2) ? parsed_clk : 0;
 
   if (debug_flag) {
     Serial.println("[Система] парсинг SET.TXT");
@@ -732,6 +746,7 @@ void print_current_settings() {
   // Вывод аппаратной конфигурации пинов из SET.TXT
   Serial.println("--- Аппаратная конфигурация (SET.TXT) ---");
   Serial.print("Пин ВЧ-выхода   (FREQ_OUT): "); Serial.println(pin_freq_out);
+  Serial.print("Выход частоты TX  (Si5351): CLK"); Serial.println(si5351_clk_tx_out);
   Serial.print("Пин активации УМ (AMP_ACT): "); Serial.println(pin_amp_act);
   Serial.print("Пины поддиапазонов        : ");
   for (int k = 0; k < 4; k++) {
@@ -1053,8 +1068,6 @@ void log_file_write_line(String message) {
 
 // Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
 // Сохранение настроек железа на Сектор 25
-// Автоматическая сборка структуры SET.TXT и запись её в сектор данных RAM-диска
-// Сохранение настроек железа на Сектор 25
 void save_hardware_settings_to_file(String scan_results) {
   uint32_t root_offset = SECTOR_SIZE * 2;
   uint32_t set_entry_offset = root_offset + 32; 
@@ -1072,6 +1085,8 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "=== ИНЖЕНЕРНЫЕ НАСТРОЙКИ МАЯКА ===\r\n";
   content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
   content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
+  content += "// Выходной канал частоты передачи Si5351: 0 = CLK0, 1 = CLK1, 2 = CLK2\r\n";
+  content += "[SI5351_CLK_OUT]=" + String(si5351_clk_tx_out) + "\r\n\r\n";
   content += "// Пины кода поддиапазона (4 пина)\r\n";
   content += "[PIN_SUBBAND_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
   content += "[PIN_SUBBAND_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
@@ -1085,7 +1100,9 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "// Исключения из сканирования шин\r\n";
   content += "[SCAN_EXCLUDE ]=" + scan_exclude_list + "\r\n\r\n";
   content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
-  content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n"; 
+  content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n";
+  content += "// Управление светодиодной индикацией: 1 — включена, 0 — выключена\r\n";
+  content += "[LED_ENABLE]=" + String(led_enable_flag ? 1 : 0) + "\r\n\r\n";
   content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
   
   // ИСПРАВЛЕНО: Сюда выгружаются СТРОГО чистые результаты сканирования

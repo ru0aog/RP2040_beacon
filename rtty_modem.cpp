@@ -171,7 +171,7 @@ void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) 
     
     vfo_hardware_init(mark_hz, rtty_shift);
     vfo_set_tone_instant(1);
-    vfo_set_cw_key(true);
+    vfo_operation_set(true);    // запустить генерацию программного VFO
     if (debug_flag) {
         Serial.println(F("[RTTY_ГОТОВ] Программный DDS VFO инициализирован!"));
         Serial.print(F("            MARK :  ")); Serial.print(format_freq(mark_hz)); Serial.println(F(" Гц"));
@@ -186,24 +186,22 @@ static void send_rtty_bit(TransmitterState state) {
     if (pc_file_written || soft_restart_flag) return;
       if (device_SI[0]) {
         uint8_t* data = (state == MARK) ? rtty_reg_mark : rtty_reg_space;
-        setFrq_si5351(data, 0); // установить частоту для CLK0
-        CLK_ON_si5351(0);       // разрешить выход частоты на CLK0 
+        setFrq_si5351(data); // установить частоту
+        VFO_TX_ON();            // запустить выход частоты TX
       }
       else {
         if (state == MARK) {
             vfo_set_tone_instant(0);
-            vfo_set_cw_key(true);
+            vfo_operation_set(true);    // запустить генерацию программного VFO
         } else {
             vfo_set_tone_instant(1);
-            vfo_set_cw_key(true);
+            vfo_operation_set(true);    // запустить генерацию программного VFO
         }
       }
 
     if (state == MARK) {
-        digitalWrite(LED_BUILTIN, HIGH);
         ZERO_LED_GREEN_ON();
     } else {
-        digitalWrite(LED_BUILTIN, LOW);
         ZERO_LED_RED_ON();
     }
 
@@ -301,7 +299,6 @@ void send_rtty_raw(const char* s) {
         send_rtty_code(0x02); // CR
         send_rtty_code(0x08); // LF
     }
-    digitalWrite(LED_BUILTIN, LOW);
     ZERO_LED_OFF();
     Serial.println("");
 }
@@ -326,9 +323,8 @@ void send_rtty_string(String str) {
         send_rtty_bit(MARK);
     }
     // Отключаем выход генерации Si5351
-    CLK_OFF_si5351(0);
-    vfo_set_cw_key(false);
-    digitalWrite(LED_BUILTIN, LOW);
+    VFO_TX_OFF();               // отключить выход частоты TX
+    vfo_operation_set(false);   // отключить генерацию программного VFO
     ZERO_LED_OFF();
   }
 }

@@ -134,6 +134,9 @@ void log_file_write_block(const String& block);  // запись многост�
 bool is_pin_excluded_from_scan(int pin);
 
 
+extern bool led_enable_flag;    // Флаг включения светодиодной индикации (1 — вкл, 0 — выкл)
+extern int  si5351_clk_tx_out;  // Номер активного выхода Si5351 на TX (0 = CLK0, 1 = CLK1, 2 = CLK2)
+
 
 
 #endif

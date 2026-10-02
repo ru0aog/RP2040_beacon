@@ -1,7 +1,7 @@
 ﻿/**
  * ============================================================================  
  *  RP2040_beacon.ino — Главный диспетчер и инициализация радиомаяка
- *  Версия 2.12 от 2026-10-01, автор RU0AOG  
+ *  Версия 2.13 от 2026-10-02, автор RU0AOG  
  * ============================================================================  
  *  
  *  НАЗНАЧЕНИЕ  
@@ -75,8 +75,8 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-String BCN_VER = "2.12";
-String BCN_DAT = "2026-10-01";
+String BCN_VER = "2.13";
+String BCN_DAT = "2026-10-02";
 
 bool dev_TX_state  = false;
 
@@ -875,8 +875,8 @@ void loop() {
     force_cw_transmission = false;
     is_transmitting = true; 
     
-    char time_buf[128];
-    if (debug_flag) {
+    if (debug_flag) {  
+      char time_buf[128];
       snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса CW! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
       Serial.println(time_buf);
     }

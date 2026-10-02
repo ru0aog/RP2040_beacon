@@ -14,9 +14,9 @@
  *  ----------------------------------------  
  *  - При наличии Si5351: Несущая частота выставляется один раз на MultiSynth0.  
  *    Манипуляция (нажатие/отжатие) выполняется включением/выключением драйвера  
- *    выхода командами CLK_ON_si5351 / CLK_OFF_si5351 (регистр 0x10).  
+ *    выхода командами VFO_TX_ON / VFO_TX_OFF.  
  *  - При работе через PIO DDS: Частота генерируется программно, а ключ  
- *    vfo_set_cw_key динамически меняет направление пина PIO и синхронно  
+ *    vfo_operation_set динамически меняет направление пина PIO и синхронно  
  *    коммутирует питание оконечного каскада УМ (pin_amp_act) для исключения шума.  
  *  
  *  ТАЙМИНГИ И ПРАВИЛА МОРЗЕ  
@@ -91,14 +91,12 @@ const cw_map_t morse_table[] = {
 
 // Функция подготовки частоты CW (8-байтный пакет, совместимый с УКВ 144 МГц)
 void prepare_cw_frequency(uint32_t freq_hz) {
+  VFO_TX_OFF();            // отключить выход частоты TX
   if (device_SI[0]) {
-    if (pc_file_written || soft_restart_flag) return;
-    cw_frequency_hz = freq_hz;
-    uint64_t freq_mHz = (uint64_t)cw_frequency_hz * 1000ULL;
+    uint64_t freq_mHz = (uint64_t)freq_hz * 1000ULL;
     static uint8_t cw_reg_buffer[8]; 
     calculate_freq_bytes_mHz(freq_mHz, cw_reg_buffer);
-    CLK_OFF_si5351(0);               // отключить CLK0
-    setFrq_si5351(cw_reg_buffer, 0); // установить частоту для CLK0
+    setFrq_si5351(cw_reg_buffer); // установить частоту
     if (debug_flag) {
         Serial.println(F("[RTTY_ГОТОВ] Аппаратный VFO CW инициализирован!"));
         Serial.print("[CW_ГОТОВ] Частота несущей CW готова: "); 
@@ -112,7 +110,7 @@ void prepare_cw_frequency(uint32_t freq_hz) {
         Serial.print(format_freq(freq_hz)); Serial.println(" Гц");
     }
     vfo_hardware_init(freq_hz, 10.0);
-    vfo_set_cw_key(false);
+    vfo_operation_set(false);   // отключить генерацию программного VFO
   }
 }
 
@@ -149,18 +147,16 @@ static void send_cw_element(bool is_dash) {
     if (pc_file_written || soft_restart_flag) return;
 
 
-    // НАЖАТИЕ КЛЮЧА: Открываем выход генерации CLK0
-    CLK_ON_si5351(0);
-    digitalWrite(LED_BUILTIN, HIGH);
+    // НАЖАТИЕ КЛЮЧА: Открываем выход генерации
+    VFO_TX_ON();             // запустить выход частоты TX
     ZERO_LED_RED_ON();
 
     // Длина тире равна 3-м точкам
     uint32_t duration = is_dash ? (CW_DOT_TIME_MS * 3) : CW_DOT_TIME_MS;
     cw_delay(duration);
 
-    // ОТЖАТИЕ КЛЮЧА: Глушим выход генерации CLK0
-    CLK_OFF_si5351(0);
-    digitalWrite(LED_BUILTIN, LOW);
+    // ОТЖАТИЕ КЛЮЧА: Глушим выход генерации
+    VFO_TX_OFF();            // отключить выход частоты TX
     ZERO_LED_OFF();
 
     // Обязательная пауза между элементами одного знака = 1 точка
@@ -217,7 +213,6 @@ void send_cw_string(const char* str) {
         }
     }
     
-    digitalWrite(LED_BUILTIN, LOW);
     Serial.println("");
 }
 

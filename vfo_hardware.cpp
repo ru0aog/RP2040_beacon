@@ -69,6 +69,8 @@
 #include "hardware/structs/sio.h"
 #include "pico/multicore.h"
 
+
+
 // Структура для возврата найденных физических коэффициентов PLL
 struct PllConfig {
     uint32_t fbdiv;
@@ -615,12 +617,16 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 }
 
 // Синхронное управление ключом PIO и усилителем мощности (УМ) из SET.TXT
-void __not_in_flash_func(vfo_set_cw_key)(bool key_down) {
-    extern int pin_amp_act; // Пробрасываем переменную пина активации УМ из file_manager.cpp
-
+void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, key_down);
-    
+}
+
+
+
+/*
+extern int pin_amp_act; // пин активации УМ из file_manager.cpp
+
     // 2. Синхронно коммутируем питание оконечного каскада усилителя
     if (key_down) {
         // Нажатие: включаем реле/ключ питания УМ (выставляем HIGH, у вас это GPIO 17)
@@ -633,5 +639,4 @@ void __not_in_flash_func(vfo_set_cw_key)(bool key_down) {
         
         current_active_tone = VFO_TONE_NONE;
     }
-}
-
+*/

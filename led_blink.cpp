@@ -61,6 +61,7 @@
 
 #include <hardware/gpio.h>
 #include "led_blink.h"
+#include "file_manager.h"
 
 // Определяем маски пинов для всех трех типов плат одновременно
 // GPIO16 (Zero), GPIO23 (YD-RP2040), GPIO25 (Обычная Pico / LED_BUILTIN)
@@ -95,6 +96,12 @@ void __time_critical_func(send_raw_byte_parallel)(uint8_t byte_val) {
 
 // Универсальная функция установки состояния индикаторов
 void set_rgb_parallel(uint8_t r, uint8_t g, uint8_t b) {
+    // если включено гашение индикации - выйти
+    if (!led_enable_flag) {
+        sio_hw->gpio_clr = ALL_PINS_MASK; // Принудительно сбрасываем пины 16, 23 и 25 в ноль
+        return;                           // Экстренный выход без bit-bang трансляции
+    }
+
     // 1. Отправляем битовую посылку на адресные светодиоды
     noInterrupts();
     send_raw_byte_parallel(g); // WS2812B принимает первым байт зеленого (G)

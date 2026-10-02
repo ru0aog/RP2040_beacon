@@ -25,8 +25,8 @@
  *  АРХИТЕКТУРНЫЙ ОБХОД (Резервирование)  
  *  ------------------------------------  
  *  Если при старте сканер не обнаружил чип Si5351 на шине (флаг SI_FAIL = true),  
- *  методы управления выходом CLK_ON_si5351 / CLK_OFF_si5351 прозрачно перенаправляют  
- *  команды на ключевание программного DDS VFO (`vfo_set_cw_key`).  
+ *  методы управления выходом VFO_TX_ON / VFO_TX_OFF прозрачно перенаправляют  
+ *  команды на ключевание программного DDS VFO (`vfo_operation_set`).  
  * ============================================================================  
  *  
  *  ИНИЦИАЛИЗАЦИЯ (init_si5351)  
@@ -47,8 +47,8 @@
  *  
  *  УПРАВЛЕНИЕ ВЫХОДОМ  
  *  ------------------  
- *  CLK_ON_si5351 / CLK_OFF_si5351 — вкл/выкл драйвера CLK0/CLK1 (регистры  
- *  0x10/0x11); при отсутствии чипа вызывают vfo_set_cw_key(true/false).  
+ *  VFO_TX_ON / VFO_TX_OFF — вкл/выкл драйвера CLK0/CLK1 (регистры  
+ *  0x10/0x11); при отсутствии чипа вызывают vfo_operation_set(true/false).  
  *  SI_POWER_ON / SI_POWER_OFF — подача/снятие питания с выходов и сброс PLL.  
  *  format_freq() — форматирование частоты для вывода (МГц,кГц.Гц).  
  * ============================================================================  
@@ -59,6 +59,7 @@
 #include "file_manager.h" // Обеспечиваем доступ к переменной pin_pwr_si
 
 extern bool dev_TX_state; 
+extern int  pin_pwr_si;
 
 bool SI_FAIL = true;
 uint64_t Xtal_freq  = 25000000;
@@ -105,7 +106,7 @@ bool si5351_write_reg(uint8_t reg, uint8_t data) {
 return false;
 }
 
-void setFrq_si5351(uint8_t *SI_FREQ_DATA, uint8_t CLK_NO) {
+void setFrq_si5351(uint8_t *SI_FREQ_DATA) {
   //быстрая отправка данных частоты
   if (device_SI[0]) {
     // Si5351 присутствует
@@ -113,8 +114,9 @@ void setFrq_si5351(uint8_t *SI_FREQ_DATA, uint8_t CLK_NO) {
     // Выбираем нужный интерфейс Wire
     TwoWire *pWire = (device_SI[1] == 1) ? &Wire1 : &Wire;
     pWire->beginTransmission(SI5351_I2C_ADDR);
-    if (CLK_NO==0) {pWire->write(0x2A);}
-    if (CLK_NO==1) {pWire->write(0x32);}
+    if (si5351_clk_tx_out==0) {pWire->write(0x2A);}
+    if (si5351_clk_tx_out==1) {pWire->write(0x32);}
+    if (si5351_clk_tx_out==2) {pWire->write(0x3A);}
     for (uint8_t i = 0; i < 8; i++) {
       pWire->write(SI_FREQ_DATA[i]);
     }
@@ -122,37 +124,33 @@ void setFrq_si5351(uint8_t *SI_FREQ_DATA, uint8_t CLK_NO) {
   }
 }
 
-void CLK_OFF_si5351(uint8_t CLK_NO) {
-  //отключить выход
+void VFO_TX_ON() {
+  // включает выход CLK_X
+  // включает питание драйвера
+  // источник тактов - MultiSynth 0
+  // ток 8 мА
   if (device_SI[0]) {
-    if (CLK_NO==0) {si5351_write_reg(0x10, 0x80);} // отключить драйвер CLK0
-    if (CLK_NO==1) {si5351_write_reg(0x11, 0x80);} // отключить драйвер CLK1
+    if (si5351_clk_tx_out==0) {si5351_write_reg(0x10, 0x0F);} // включить драйвер CLK0
+    if (si5351_clk_tx_out==1) {si5351_write_reg(0x11, 0x0F);} // включить драйвер CLK1
+    if (si5351_clk_tx_out==2) {si5351_write_reg(0x12, 0x0F);} // включить драйвер CLK2
   }
   else {
-    //fractGen_OFF();
-    vfo_set_cw_key(false);
+    vfo_operation_set(true);    // запустить генерацию программного VFO
+    // потом заменить на загрузку инструкций ядра1
   }
 }
 
-void CLK_ON_si5351(uint8_t CLK_NO) {
-  //включить выход
+void VFO_TX_OFF() {
+  // отключает выход CLK_X
+  // выключить питание драйвера
   if (device_SI[0]) {
-    if (CLK_NO==0) {si5351_write_reg(0x10, 0x0F);} // включить драйвер CLK0
-    if (CLK_NO==1) {si5351_write_reg(0x11, 0x0F);} // включить драйвер CLK1
+    if (si5351_clk_tx_out==0) {si5351_write_reg(0x10, 0x80);} // отключить драйвер CLK0
+    if (si5351_clk_tx_out==1) {si5351_write_reg(0x11, 0x80);} // отключить драйвер CLK1
+    if (si5351_clk_tx_out==2) {si5351_write_reg(0x12, 0x80);} // отключить драйвер CLK2
   }
   else {
-    //fractGen_ON();
-    vfo_set_cw_key(true);
+    vfo_operation_set(false);   // отключить генерацию программного VFO
   }
-}
-
-void setFr() {
-  //установка частоты с расчётом коэффициентов
-  static uint32_t frequency11_hz = 1000000;
-  uint64_t freq11_mHz = (uint64_t)frequency11_hz * 1000ULL;
-  static uint8_t frq_buffer[8]; 
-  calculate_freq_bytes_mHz(freq11_mHz, frq_buffer);
-  setFrq_si5351(frq_buffer, 0);
 }
 
 // Инициализация si5351
@@ -231,7 +229,7 @@ void init_si5351() {
       si5351_write_reg(0x39, 0xC0); //MS1_P2[7:0]
       //17:включить CLK1 в дробном режиме от MultiSynth 1, источник PLL_A, нагрузка 8 мА.
       si5351_write_reg(0x11, 0x0F);
-      CLK_OFF_si5351(0);
+      VFO_TX_OFF();            // отключить выход частоты TX
       //03:активировать выходы
       si5351_write_reg(0x03, 0x00);
       //Serial.println(" - инит CLK0 : ОК");
@@ -269,9 +267,24 @@ void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
     out_data[7] = p2 & 0xFF;
 }
 
-// Функция включения питания si5351
+// Функция разделения частоты пробелами
+String format_freq(uint32_t FREQ) {
+  uint32_t mhz  = FREQ / 1000000;          
+  uint32_t khz  = (FREQ % 1000000) / 1000; 
+  uint32_t hz   = FREQ % 1000;             
+
+  char freq_buf[32];
+  snprintf(freq_buf, sizeof(freq_buf), "%lu,%03lu.%03lu", mhz, khz, hz);
+  
+  return String(freq_buf);
+}
+
+
+
+
+// Функция включения питания VFO
 void SI_POWER_ON() {
-  extern int pin_pwr_si;
+  
   if (device_SI[0]) {
     // запуск питания
     if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, HIGH); // Включаем генератор
@@ -320,9 +333,7 @@ void SI_POWER_OFF() {
     if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, LOW); // Выключаем генератор
   }
   else {
-    //fractGen_OFF();
-    //set_sys_clock_khz(125000, true);
-    vfo_set_cw_key(false);
+    vfo_operation_set(false);   // отключить генерацию программного VFO
     if (debug_flag) {
       Serial.print("[Питание] DDS-генератор RP2040 на пине "); Serial.print(VFO_OUTPUT_PIN); Serial.println(" остановлен.");
     }
@@ -330,15 +341,5 @@ void SI_POWER_OFF() {
 }
 
 
-// Функция разделения частоты пробелами
-String format_freq(uint32_t FREQ) {
-  uint32_t mhz  = FREQ / 1000000;          
-  uint32_t khz  = (FREQ % 1000000) / 1000; 
-  uint32_t hz   = FREQ % 1000;             
 
-  char freq_buf[32];
-  snprintf(freq_buf, sizeof(freq_buf), "%lu,%03lu.%03lu", mhz, khz, hz);
-  
-  return String(freq_buf);
-}
 

@@ -400,7 +400,7 @@ void computeBMP180(int32_t ut, int32_t up, float &temp, float &pressPa) {
 
 // Основная функция сбора данных BME280/BMP280/BMP180
 void get_BME_data() {
-  if (device_BM[0] == 1) {  // ИСПРАВЛЕНО: Добавлен индекс [0]
+  if (device_BM[0] == 1) {
     I2C_BME_restart();
     TwoWire *pWire = (device_BM[1] == 1) ? &Wire1 : &Wire;
     uint8_t addr = device_BM[4];
@@ -443,6 +443,8 @@ void get_BME_data() {
       BME_temp = temperature;
       BME_humid = 0;
       BME_press = pressurePa * 0.00750063755F;
+
+      return;
     }
 
     // --- Опрос BME280 / BMP280 (Потоковый режим) ---

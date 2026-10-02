@@ -25,10 +25,76 @@ struct ClimateSample {
 static ClimateSample samples[MAX_SAMPLES]; 
 static uint8_t  sample_count   = 0; 
 static uint32_t last_sample_ms = 0; 
-static uint32_t last_report_ms = 0; 
+static uint32_t last_report_ms = 0;
+
+// --- НОВОЕ: аккумуляторы для усреднения 10 подзамеров в один замер таблицы ---  
+#define SUB_SAMPLES_COUNT 10   // количество подзамеров на один замер таблицы  
   
-// Снимок доступных датчиков в кольцевой буфер  
+static float   acc_temp    = 0.0f;  
+static float   acc_press   = 0.0f;  
+static float   acc_humid   = 0.0f;  
+static uint8_t sub_count   = 0;        // сколько подзамеров уже накоплено (0..10)  
+static uint32_t last_sub_sample_ms = 0; // время последнего подзамера
+
+// Одиночный опрос датчиков — без записи в таблицу (из тела старого climate_take_sample)  
+static bool climate_poll_sensors() {  
+  bool has_BM = (device_BM[0] == 1);  
+  bool has_AH = (device_AH[0] == 1);  
+  
+  if (!has_BM && !has_AH) return false;   // логировать нечего  
+  
+  if (has_BM) get_BME_data();  
+  if (has_AH) get_AHT_data();  
+  
+  // Накапливаем суммы по той же логике приоритетов, что и раньше:  
+  acc_press += has_BM ? BME_press : 0.0f;  
+  acc_humid += has_AH ? AHT_humid : BME_humid; // влажность: приоритет AHT20  
+  acc_temp  += has_BM ? BME_temp  : AHT_temp;  // температура: приоритет Bosch  
+  
+  sub_count++;  
+  return true;  
+}  
+  
+// Снимок в кольцевой буфер — теперь пишет ОСРЕДНЁННОЕ значение  
 static void climate_take_sample() {  
+  if (sub_count == 0) {              // не было ни одного удачного подзамера  
+    if (debug_flag) {  
+      Serial.println(F("[Климат] Замер пропущен: ни один климатический датчик не обнаружен"));  
+    }  
+    return;  
+  }  
+  
+  if (sample_count >= MAX_SAMPLES) {  
+    // Буфер полон до вывода таблицы — сдвигаем, выбрасывая самый старый  
+    memmove(&samples[0], &samples[1], sizeof(ClimateSample) * (MAX_SAMPLES - 1));  
+    sample_count = MAX_SAMPLES - 1;  
+  }  
+  
+  ClimateSample &s = samples[sample_count];  
+  snprintf(s.time, sizeof(s.time), "%s", get_current_time().c_str());  
+  
+  float n = (float)sub_count;  
+  s.press = acc_press / n;  
+  s.humid = acc_humid / n;  
+  s.temp  = acc_temp  / n;  
+  
+  // Сброс аккумулятора для следующего цикла усреднения  
+  acc_temp = acc_press = acc_humid = 0.0f;  
+  sub_count = 0;  
+  
+  sample_count++;  
+  
+  if (debug_flag) {  
+    Serial.printf("[Климат] Замер %2d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",  
+                  sample_count, s.time, s.temp, s.press, s.humid);  
+  }  
+}
+
+
+
+
+// Снимок доступных датчиков в кольцевой буфер  
+static void climate_take_sample1() {  
   // ИСПРАВЛЕНО: Проверка флага активности через индекс [0] для массивов
   bool has_BM = (device_BM[0] == 1);
   bool has_AH = (device_AH[0] == 1);
@@ -100,7 +166,7 @@ static void climate_write_report() {
   String table; 
   table.reserve(sample_count * 48 + 96);  
   table += "=== КЛИМАТ за " + get_current_date() + " ===\r\n"; 
-  table += "TIME      T(C)   P(mm)  H(%)\r\n"; 
+  table += "TIME       T(C)   P(mm)  H(%)\r\n"; 
   for (uint8_t i = 0; i < sample_count; i++) {  
     char line[48]; 
     snprintf(line, sizeof(line), "%s  %5.1f  %6.1f  %4.1f\r\n", 
@@ -117,8 +183,51 @@ static void climate_write_report() {
   }
 }
 
+
+
+// Проверка времени (вызывается из loop() каждую итерацию)  
+void climate_log_update() {  
+  uint32_t now = millis();  
+  
+  if (is_transmitting) {  
+    last_sample_ms      = now;  
+    last_report_ms      = now;  
+    last_sub_sample_ms  = now;          // НОВОЕ  
+    sample_count = 0;  
+    sub_count = 0;                      // НОВОЕ: сброс и аккумулятора  
+    acc_temp = acc_press = acc_humid = 0.0f;  
+    return;  
+  }  
+  
+  uint32_t sample_interval_ms = climate_sample_interval_min * 60UL * 1000UL;  
+  uint32_t report_interval_ms = climate_report_interval_min * 60UL * 1000UL;  
+  
+  // Подинтервал опроса датчиков — в 10 раз чаще записи в таблицу  
+  uint32_t sub_interval_ms = sample_interval_ms / SUB_SAMPLES_COUNT;  
+  if (sub_interval_ms == 0) sub_interval_ms = 1;   // защита при CLIM_SAMPLE_MIN=0  
+  
+  // Подзамер: опрос датчиков и накопление в аккумулятор  
+  if (now - last_sub_sample_ms >= sub_interval_ms) {  
+    last_sub_sample_ms = now;  
+    climate_poll_sensors();  
+  }  
+  
+  // Полный замер: среднее из накопленных подзамеров -> строка таблицы  
+  if (now - last_sample_ms >= sample_interval_ms) {  
+    last_sample_ms = now;  
+    climate_take_sample();  
+  }  
+  
+  if (now - last_report_ms >= report_interval_ms) {  
+    last_report_ms = now;  
+    climate_write_report();  
+  }  
+}
+
+
+
 // Проверка времени (вызывается из loop() каждую итерацию)
-void climate_log_update() { 
+void climate_log_update1() { 
   uint32_t now = millis(); 
   
   if (is_transmitting) { 
@@ -154,7 +263,7 @@ String climate_build_current_table() {
   String table;
   table.reserve(sample_count * 48 + 64);
   table += "=== КЛИМАТ ЗА " + get_current_date() + " ===\r\n";
-  table += "TIME      T(C)   P(mm)  H(%)\r\n";
+  table += "TIME       T(C)   P(mm)  H(%)\r\n";
   for (uint8_t i = 0; i < sample_count; i++) {
     char line[48];
     snprintf(line, sizeof(line), "%s  %5.1f  %6.1f  %4.1f\r\n",

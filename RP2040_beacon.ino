@@ -306,6 +306,15 @@ void check_serial_commands() {
             Serial.println(F("[Система] Диск перемонтирован."));  
           }
 
+          // ПРАВКА: Новая команда мониторинга климатической таблицы
+          else if (command.equalsIgnoreCase("CLIM")) {
+            climate_print_table_to_console();
+          }
+          else if (command.equalsIgnoreCase("CLIM_TX")) {
+            climate_send_table_to_air();
+          }
+
+
           else if (command.equalsIgnoreCase("sched") || command.equalsIgnoreCase("schedule")) {  
             print_schedule();  
           }
@@ -342,6 +351,7 @@ void check_serial_commands() {
           Serial.println(F("start rtty      - Немедленно запустить внеочередной сеанс RTTY"));
           Serial.println(F("start ifkp      - Немедленно запустить внеочередной сеанс IFKP"));
           Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
+          Serial.println(F("clim            - Вывод таблицы собранных климатических данных"));
           Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));
           Serial.println(F("remount         - Переподключить USB-диск (обновление в Проводнике)"));
           Serial.println(F("stop            - Экстренная остановка передачи маяка"));

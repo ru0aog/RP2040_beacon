@@ -13,10 +13,7 @@
 extern uint8_t device_BM[5];
 extern uint8_t device_AH[5];
 
-// ---------- Периоды ----------  
-#define CLIMATE_DEBUG     0   // 0 — отключить быстрый тестовый опрос
-#define DEBUG_CLIMATE_LOG 0   // 0 — отключить вывод в порт    
-#define MAX_SAMPLES       80
+#define MAX_SAMPLES       35
 
 struct ClimateSample {  
   char   time[9];   // "HH:MM:SS" 
@@ -38,9 +35,10 @@ static void climate_take_sample() {
 
   // Если в системе вообще нет ни одного климатического датчика — логгировать нечего
   if (!has_BM && !has_AH) {  
-#if DEBUG_CLIMATE_LOG  
-    Serial.println(F("[Климат] Замер пропущен: ни один климатический датчик не обнаружен"));  
-#endif  
+    if (debug_flag) {
+      // вывод сообщения 
+      Serial.println(F("[Климат] Замер пропущен: ни один климатический датчик не обнаружен"));  
+    }
     return;  
   }  
   
@@ -77,23 +75,27 @@ static void climate_take_sample() {
   
   sample_count++; 
   
-#if DEBUG_CLIMATE_LOG  
-  Serial.printf("[Климат] Замер %2d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",  
-                sample_count, s.time, s.temp, s.press, s.humid);  
-#endif  
+  if (debug_flag) {
+    // вывод сообщения
+    Serial.printf("[Климат] Замер %2d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",
+                sample_count, s.time, s.temp, s.press, s.humid);
+  }
+
 }
   
 static void climate_write_report() {  
   if (sample_count == 0) { 
-#if DEBUG_CLIMATE_LOG  
-    Serial.println(F("[Климат] Отчёт пропущен: буфер пуст"));  
-#endif  
+    if (debug_flag) {
+      // вывод сообщения
+      Serial.println(F("[Климат] Отчёт пропущен: буфер пуст"));
+    }
     return;  
   }  
   
-#if DEBUG_CLIMATE_LOG  
-  Serial.printf("[Климат] Формирую таблицу: %d замеров -> LOG.TXT... \r\n", sample_count);  
-#endif  
+  if (debug_flag) {
+    // вывод сообщения 
+    Serial.printf("[Климат] Формирую таблицу: %d замеров -> LOG.TXT... \r\n", sample_count);
+  }
   
   String table; 
   table.reserve(sample_count * 48 + 96);  
@@ -109,9 +111,10 @@ static void climate_write_report() {
   log_file_write_block(table);   // Одна запись во Flash на всю таблицу 
   sample_count = 0; 
   
-#if DEBUG_CLIMATE_LOG  
-  Serial.println(F("[Климат] готово"));  
-#endif  
+  if (debug_flag) {
+    // вывод сообщения 
+    Serial.println(F("[Климат] готово"));
+  }
 }
 
 // Проверка времени (вызывается из loop() каждую итерацию)
@@ -138,5 +141,51 @@ void climate_log_update() {
     last_report_ms = now; 
     climate_write_report(); 
   }  
+}
+
+
+
+// Сборка текущей таблицы в String (универсальный буфер)
+String climate_build_current_table() {
+  if (sample_count == 0) {
+    return "=== КЛИМАТИЧЕСКИЙ БУФЕР ПУСТ ===";
+  }
+
+  String table;
+  table.reserve(sample_count * 48 + 64);
+  table += "=== КЛИМАТ ЗА " + get_current_date() + " ===\r\n";
+  table += "TIME      T(C)   P(mm)  H(%)\r\n";
+  for (uint8_t i = 0; i < sample_count; i++) {
+    char line[48];
+    snprintf(line, sizeof(line), "%s  %5.1f  %6.1f  %4.1f\r\n",
+             samples[i].time, samples[i].temp, samples[i].press, samples[i].humid);
+    table += line;
+  }
+  return table;
+}
+
+// Вывод таблицы в консоль UART
+void climate_print_table_to_console() {
+  Serial.println(climate_build_current_table());
+}
+
+// Принудительная отправка сформированной таблицы в эфир через планировщик
+void climate_send_table_to_air() {
+  if (sample_count == 0) {
+    if (debug_flag) Serial.println(F("[Климат] Отмена TX: нет данных в буфере"));
+    return;
+  }
+
+  // Строим таблицу (убираем спецсимволы \r, оставляя только \n для экономии времени передачи)
+  String tx_table = climate_build_current_table();
+  tx_table.replace("\r", ""); 
+
+  if (debug_flag) {
+    Serial.println(F("[Система] Передаю климатическую таблицу в эфир..."));
+  }
+
+  // Передаем сформированный блок текста в текущую активную моду (например, CW или RTTY)
+  // Метод интеграции зависит от структуры вашего модулятора, обычно вызывается:
+  // queue_text_for_transmission(tx_table);
 }
 

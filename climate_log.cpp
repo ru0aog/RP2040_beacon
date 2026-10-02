@@ -15,6 +15,10 @@ extern uint8_t device_AH[5];
 
 #define MAX_SAMPLES       35
 
+// --- Отладка подзамеров: 1 = печатать каждый подзамер в Serial, 0 = тихо ---  
+#define CLIM_SUB_DEBUG 1
+
+
 struct ClimateSample {  
   char   time[9];   // "HH:MM:SS" 
   float  temp;  
@@ -50,7 +54,17 @@ static bool climate_poll_sensors() {
   acc_press += has_BM ? BME_press : 0.0f;  
   acc_humid += has_AH ? AHT_humid : BME_humid; // влажность: приоритет AHT20  
   acc_temp  += has_BM ? BME_temp  : AHT_temp;  // температура: приоритет Bosch  
-  
+
+#if CLIM_SUB_DEBUG  
+  // Промежуточные значения — то, что реально вернули датчики  
+  Serial.printf("[Климат]  Подзамер %u/%d: T=%.1fC P=%.1fмм H=%.1f%% | "  
+                "AHT: T=%.1fC H=%.1f%% | сумма: T=%.1f P=%.1f H=%.1f (n=%u)\n",  
+                sub_count + 1, SUB_SAMPLES_COUNT,  
+                BME_temp, BME_press, BME_humid,  
+                AHT_temp, AHT_humid,  
+                acc_temp, acc_press, acc_humid, (uint32_t)(sub_count + 1));  
+#endif  
+
   sub_count++;  
   return true;  
 }  
@@ -59,7 +73,7 @@ static bool climate_poll_sensors() {
 static void climate_take_sample() {  
   if (sub_count == 0) {              // не было ни одного удачного подзамера  
     if (debug_flag) {  
-      Serial.println(F("[Климат] Замер пропущен: ни один климатический датчик не обнаружен"));  
+      Serial.println(F("[Климат]  Замер пропущен: ни один климатический датчик не обнаружен"));  
     }  
     return;  
   }  
@@ -85,7 +99,7 @@ static void climate_take_sample() {
   sample_count++;  
   
   if (debug_flag) {  
-    Serial.printf("[Климат] Замер %2d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",  
+    Serial.printf("[Климат]  Замер %2d: %s  T=%.1f C  P=%.1f мм  H=%.1f %%\n",  
                   sample_count, s.time, s.temp, s.press, s.humid);  
   }  
 }
@@ -95,14 +109,14 @@ static void climate_write_report() {
   if (sample_count == 0) { 
     if (debug_flag) {
       // вывод сообщения
-      Serial.println(F("[Климат] Отчёт пропущен: буфер пуст"));
+      Serial.println(F("[Климат]  Отчёт пропущен: буфер пуст"));
     }
     return;  
   }  
   
   if (debug_flag) {
     // вывод сообщения 
-    Serial.printf("[Климат] Формирую таблицу: %d замеров -> LOG.TXT... \r\n", sample_count);
+    Serial.printf("[Климат]  Формирую таблицу: %d замеров -> LOG.TXT... \r\n", sample_count);
   }
   
   String table; 
@@ -121,7 +135,7 @@ static void climate_write_report() {
   
   if (debug_flag) {
     // вывод сообщения 
-    Serial.println(F("[Климат] готово"));
+    Serial.println(F("[Климат]  Готово"));
   }
 }
 
@@ -194,13 +208,13 @@ String climate_build_current_table() {
 
 // Вывод таблицы в консоль UART
 void climate_print_table_to_console() {
-  Serial.println(climate_build_current_table());
+  Serial.print(climate_build_current_table());
 }
 
 // Принудительная отправка сформированной таблицы в эфир через планировщик
 void climate_send_table_to_air() {
   if (sample_count == 0) {
-    if (debug_flag) Serial.println(F("[Климат] Отмена TX: нет данных в буфере"));
+    if (debug_flag) Serial.println(F("[Климат]  Отмена TX: нет данных в буфере"));
     return;
   }
 

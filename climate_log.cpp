@@ -128,42 +128,48 @@ static void climate_write_report() {
 
 
 // Проверка времени (вызывается из loop() каждую итерацию)  
-void climate_log_update() {  
-  uint32_t now = millis();  
+void climate_log_update() {    
+  uint32_t now = millis();    
+    
+  if (is_transmitting) {    
+    last_sample_ms      = now;    
+    last_sub_sample_ms  = now;  
+    sample_count = 0;    
+    sub_count = 0;  
+    acc_temp = acc_press = acc_humid = 0.0f;    
+    return;    
+  }    
+    
+  uint32_t sample_interval_ms = climate_sample_interval_min * 60UL * 1000UL;    
+    
+  // Подинтервал опроса датчиков — в 10 раз чаще записи в таблицу    
+  uint32_t sub_interval_ms = sample_interval_ms / SUB_SAMPLES_COUNT;    
+  if (sub_interval_ms == 0) sub_interval_ms = 1;  
+    
+  // Подзамер: опрос датчиков и накопление в аккумулятор — НЕ ТРОГАЕМ  
+  if (now - last_sub_sample_ms >= sub_interval_ms) {    
+    last_sub_sample_ms = now;    
+    climate_poll_sensors();    
+  }    
+    
+  // Полный замер: среднее из подзамеров -> строка таблицы  
+  if (now - last_sample_ms >= sample_interval_ms) {    
+    last_sample_ms = now;    
+    climate_take_sample();    
   
-  if (is_transmitting) {  
-    last_sample_ms      = now;  
-    last_report_ms      = now;  
-    last_sub_sample_ms  = now;          // НОВОЕ  
-    sample_count = 0;  
-    sub_count = 0;                      // НОВОЕ: сброс и аккумулятора  
-    acc_temp = acc_press = acc_humid = 0.0f;  
-    return;  
-  }  
-  
-  uint32_t sample_interval_ms = climate_sample_interval_min * 60UL * 1000UL;  
-  uint32_t report_interval_ms = climate_report_interval_min * 60UL * 1000UL;  
-  
-  // Подинтервал опроса датчиков — в 10 раз чаще записи в таблицу  
-  uint32_t sub_interval_ms = sample_interval_ms / SUB_SAMPLES_COUNT;  
-  if (sub_interval_ms == 0) sub_interval_ms = 1;   // защита при CLIM_SAMPLE_MIN=0  
-  
-  // Подзамер: опрос датчиков и накопление в аккумулятор  
-  if (now - last_sub_sample_ms >= sub_interval_ms) {  
-    last_sub_sample_ms = now;  
-    climate_poll_sensors();  
-  }  
-  
-  // Полный замер: среднее из накопленных подзамеров -> строка таблицы  
-  if (now - last_sample_ms >= sample_interval_ms) {  
-    last_sample_ms = now;  
-    climate_take_sample();  
-  }  
-  
-  if (now - last_report_ms >= report_interval_ms) {
-    climate_write_report();
-    last_report_ms = now;
-  }
+    // ОТЧЁТ ПО ЗАПОЛНЕНИЮ: таблица уходит в LOG.TXT, когда собрано  
+    // ровно CLIM_REPORT_MIN / CLIM_SAMPLE_MIN строк  
+    uint8_t rows_per_report = 1;  
+    if (climate_sample_interval_min > 0) {  
+      uint32_t n = climate_report_interval_min / climate_sample_interval_min;  
+      if (n < 1) n = 1;  
+      if (n > MAX_SAMPLES) n = MAX_SAMPLES;  
+      rows_per_report = (uint8_t)n;  
+    }  
+    if (sample_count >= rows_per_report) {  
+      climate_write_report();   // собирает таблицу -> log_file_write_block() -> sample_count = 0  
+    }  
+  }    
 }
 
 

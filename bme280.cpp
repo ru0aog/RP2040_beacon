@@ -422,72 +422,89 @@ void get_BME_data() {
   }
 }
 
+// Компактная функция подсчета CRC-8 для AHT20 (Полином 0x31, Init 0xFF)
+uint8_t AHT20_CRC8(uint8_t *ptr, uint8_t len) {
+  uint8_t crc = 0xFF;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= ptr[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x80) {
+        crc = (crc << 1) ^ 0x31;
+      } else {
+        crc <<= 1;
+      }
+    }
+  }
+  return crc;
+}
+
 void get_AHT_data() { 
   if (device_AH[0] == 1) {
     I2C_AHT_restart();
     TwoWire *pWire = (device_AH[1] == 1) ? &Wire1 : &Wire;
     
     if (AHT_Sensor == TYPE_AHT20) {
-      // Отправляем команду на запуск измерения
       pWire->beginTransmission(AHT20_ADDRESS);
       pWire->write(0xAC); pWire->write(0x33); pWire->write(0x00);
       pWire->endTransmission();
 
-      // Опрос статуса готовности вместо жесткого delay(80)
+      // Неблокирующий опрос статуса готовности (таймаут 100 мс)
       uint32_t start_time = millis();
       bool data_ready = false;
-      
-      while (millis() - start_time < 100) { // Таймаут 100 мс
+      while (millis() - start_time < 100) {
         pWire->requestFrom(AHT20_ADDRESS, (uint8_t)1);
         if (pWire->available()) {
           uint8_t status = pWire->read();
-          if ((status & 0x80) == 0) { // Бит 7 == 0 означает, что измерение завершено
+          if ((status & 0x80) == 0) { // Бит 7 == 0 -> готово
             data_ready = true;
             break;
           }
         }
-        delay(2); // Небольшая пауза между опросами статуса, чтобы не спамить шину
+        delay(2);
       }
 
-      // Если датчик успел отдать данные вовремя
       if (data_ready) {
         pWire->requestFrom(AHT20_ADDRESS, (uint8_t)7);
         if (pWire->available() >= 7) {
-          uint8_t status = pWire->read(); (void)status; 
+          uint8_t raw_buffer[6];
           
-          uint32_t b2 = pWire->read(); // Humid [19:12]
-          uint32_t b3 = pWire->read(); // Humid [11:4]
-          uint32_t b4 = pWire->read(); // Humid [3:0] / Temp [19:16]
-          uint32_t b5 = pWire->read(); // Temp [15:8]
-          uint32_t b6 = pWire->read(); // Temp [7:0]
-          uint8_t crc = pWire->read(); (void)crc; 
-          
-          // Исправленная склейка 20-битных значений
-          uint32_t raw_humidity    = (b2 << 12) | (b3 << 4) | (b4 >> 4);
-          uint32_t raw_temperature = ((b4 & 0x0F) << 16) | (b5 << 8) | b6;
+          raw_buffer[0] = pWire->read(); // Byte 1: Статус
+          raw_buffer[1] = pWire->read(); // Byte 2: Humid [19:12]
+          raw_buffer[2] = pWire->read(); // Byte 3: Humid [11:4]
+          raw_buffer[3] = pWire->read(); // Byte 4: Humid [3:0] / Temp [19:16]
+          raw_buffer[4] = pWire->read(); // Byte 5: Temp [15:8]
+          raw_buffer[5] = pWire->read(); // Byte 6: Temp [7:0]
+          uint8_t received_crc  = pWire->read(); // Byte 7: CRC от датчика
 
-          // Расчет физических величин
-          float h_calc = ((float)raw_humidity / 1048576.0f) * 100.0f;
-          float t_calc = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
+          // Считаем эталонный CRC по байтам 1-6
+          uint8_t calculated_crc = AHT20_CRC8(raw_buffer, 6);
 
-          // Санити-чек (Sanity check) для фильтрации явного «мусора» на шине
-          if (h_calc >= 0.0f && h_calc <= 100.0f && t_calc >= -40.0f && t_calc <= 85.0f) {
-            AHT_humid = h_calc;
-            AHT_temp  = t_calc;
+          // Данные принимаются, только если контрольная сумма совпала
+          if (calculated_crc == received_crc) {
+            
+            // Склейка 20-битных значений строго по даташиту AHT20
+            uint32_t raw_humidity    = ((uint32_t)raw_buffer[1] << 12) | ((uint32_t)raw_buffer[2] << 4) | (raw_buffer[3] >> 4);
+            uint32_t raw_temperature = ((uint32_t)(raw_buffer[3] & 0x0F) << 16) | ((uint32_t)raw_buffer[4] << 8) | raw_buffer[5];
+
+            float h_calc = ((float)raw_humidity / 1048576.0f) * 100.0f;
+            float t_calc = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
+
+            // Санити-чек как дополнительный рубеж защиты
+            if (h_calc >= 0.0f && h_calc <= 100.0f && t_calc >= -40.0f && t_calc <= 85.0f) {
+              AHT_humid = h_calc;
+              AHT_temp  = t_calc;
+            }
           } else {
             if (debug_flag) {
-              Serial.print("[Система] Ошибка: Климатические данные AHT20 вышли за рамки разумного диапазона!\n");
+              Serial.print("[Система] Ошибка CRC-8 при чтении AHT20! Данные отброшены.\n");
             }
           }
-        }
-      } else {
-        if (debug_flag) {
-          Serial.print("[Система] Ошибка: Таймаут ожидания готовности AHT20!\n");
         }
       }
     }
   }
 }
+
 
 
 // Функция для чтения телеметрии (климатические данные)

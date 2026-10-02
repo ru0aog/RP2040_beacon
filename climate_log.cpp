@@ -14,19 +14,10 @@ extern uint8_t device_BM[5];
 extern uint8_t device_AH[5];
 
 // ---------- Периоды ----------  
-#define CLIMATE_DEBUG 0       // 0 — отключить быстрый тестовый опрос
+#define CLIMATE_DEBUG     0   // 0 — отключить быстрый тестовый опрос
 #define DEBUG_CLIMATE_LOG 0   // 0 — отключить вывод в порт    
-  
-#if CLIMATE_DEBUG  
-  #define SAMPLE_INTERVAL_MS   (10UL * 1000UL)        // 10 с  
-  #define REPORT_INTERVAL_MS   (5UL * 60UL * 1000UL)  // 5 мин  
-  #define MAX_SAMPLES          32   
-#else  
-  #define SAMPLE_INTERVAL_MS   (10UL * 60UL * 1000UL) // 10 мин  
-  #define REPORT_INTERVAL_MS   (60UL * 60UL * 1000UL) // 1 час  
-  #define MAX_SAMPLES          8    
-#endif  
-  
+#define MAX_SAMPLES       80
+
 struct ClimateSample {  
   char   time[9];   // "HH:MM:SS" 
   float  temp;  
@@ -127,8 +118,6 @@ static void climate_write_report() {
 void climate_log_update() { 
   uint32_t now = millis(); 
   
-  // Пауза на время сеанса передачи: сдвигаем оба таймера,  
-  // чтобы не было мгновенного догоняющего замера после эфира  
   if (is_transmitting) { 
     last_sample_ms = now; 
     last_report_ms = now; 
@@ -136,13 +125,18 @@ void climate_log_update() {
     return;  
   }  
   
-  if (now - last_sample_ms >= SAMPLE_INTERVAL_MS) { 
+  // ПРАВКА: Расчет интервалов «на лету» на основе считанных параметров из SET.TXT
+  uint32_t sample_interval_ms = climate_sample_interval_min * 60UL * 1000UL;
+  uint32_t report_interval_ms = climate_report_interval_min * 60UL * 1000UL;
+  
+  if (now - last_sample_ms >= sample_interval_ms) { 
     last_sample_ms = now; 
     climate_take_sample(); 
   }  
   
-  if (now - last_report_ms >= REPORT_INTERVAL_MS) { 
+  if (now - last_report_ms >= report_interval_ms) { 
     last_report_ms = now; 
     climate_write_report(); 
   }  
 }
+

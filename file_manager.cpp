@@ -101,6 +101,10 @@ String s_led_enable       = "";
 uint32_t CW_DOT_TIME_MS  = 60;              // Время точки в мс (по умолчанию ~20 WPM)
 volatile uint32_t RTTY_BIT_TIME_US = 22000; // Время одного бита RTTY в мкс (по умолчанию 45.45 Бод)
 
+// НОВЫЕ ДИНАМИЧЕСКИЕ ИНТЕРВАЛЫ КЛИМАТА
+uint32_t climate_sample_interval_min = 10; // По умолчанию замер каждые 10 мин
+uint32_t climate_report_interval_min = 60; // По умолчанию таблица каждый час
+
 int subband_pins[4] = {6, 7, 8, 9};  // пины шифра поддиапазона
 int pin_freq_out = 10;  // выход DDS-генератора
 int pin_amp_act  = 11;  // выход управления усилителем
@@ -359,37 +363,41 @@ static void create_default_fat_with_info_file() {
   };
 
   // Собираем дефолтное содержимое SET.TXT динамически из текущих переменных железа
-  String dynamic_set_content = "";
-  dynamic_set_content.reserve(512);
-  dynamic_set_content += "=== ИНЖЕНЕРНЫЕ НАСТРОЙКИ МАЯКА ===\r\n";
-  dynamic_set_content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
-  dynamic_set_content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
-  dynamic_set_content += "// Выходной канал частоты передачи Si5351: 0 = CLK0, 1 = CLK1, 2 = CLK2\r\n";
-  dynamic_set_content += "[SI5351_CLK_OUT]=" + String(si5351_clk_tx_out) + "\r\n\r\n";
-  dynamic_set_content += "// Пины кода поддиапазона (4 пина)\r\n";
-  dynamic_set_content += "[PIN_SUBBAND_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
-  dynamic_set_content += "[PIN_SUBBAND_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
-  dynamic_set_content += "[PIN_SUBBAND_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
-  dynamic_set_content += "[PIN_SUBBAND_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
-  dynamic_set_content += "// Пины питания шины (NC если не назначены)\r\n";
-  dynamic_set_content += "[PIN_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
-  dynamic_set_content += "[PIN_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
-  dynamic_set_content += "[PIN_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
-  dynamic_set_content += "[PIN_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
-  dynamic_set_content += "// Дополнительные исключения из сканирования шин\r\n";
-  dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
-  dynamic_set_content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
-  dynamic_set_content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n";   // 0/1 — режим отладки
-  dynamic_set_content += "// Управление светодиодной индикацией: 1 — включена, 0 — выключена\r\n";
-  dynamic_set_content += "[LED_ENABLE]=" + String(led_enable_flag ? 1 : 0) + "\r\n\r\n"; 
-  dynamic_set_content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
-  dynamic_set_content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
-  dynamic_set_content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
-  dynamic_set_content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
-  dynamic_set_content += "[SCAN_RESULT]\r\nСканирование не проводилось.\r\n\r\n";
-  dynamic_set_content += "[EOF]";
+  String content = "";
+  content.reserve(512);
+  content += "=== ИНЖЕНЕРНЫЕ НАСТРОЙКИ МАЯКА ===\r\n";
+  content += "[PIN_FREQ_OUT ]=" + pin_to_str(pin_freq_out) + "\r\n";
+  content += "[PIN_AMP_ACT  ]=" + pin_to_str(pin_amp_act) + "\r\n\r\n";
+  content += "// Выходной канал частоты передачи Si5351: 0 = CLK0, 1 = CLK1, 2 = CLK2\r\n";
+  content += "[SI5351_CLK_OUT]=" + String(si5351_clk_tx_out) + "\r\n\r\n";
+  content += "// Пины кода поддиапазона (4 пина)\r\n";
+  content += "[PIN_SUBBAND_0]=" + pin_to_str(subband_pins[0]) + "\r\n";
+  content += "[PIN_SUBBAND_1]=" + pin_to_str(subband_pins[1]) + "\r\n";
+  content += "[PIN_SUBBAND_2]=" + pin_to_str(subband_pins[2]) + "\r\n";
+  content += "[PIN_SUBBAND_3]=" + pin_to_str(subband_pins[3]) + "\r\n\r\n";
+  content += "// Пины питания шины (NC если не назначены)\r\n";
+  content += "[PIN_PWR_SI   ]=" + pin_to_str(pin_pwr_si) + "\r\n";
+  content += "[PIN_PWR_DS   ]=" + pin_to_str(pin_pwr_ds) + "\r\n";
+  content += "[PIN_PWR_BM   ]=" + pin_to_str(pin_pwr_bm) + "\r\n";
+  content += "[PIN_PWR_DL   ]=" + pin_to_str(pin_pwr_dl) + "\r\n\r\n";
+  content += "// Дополнительные исключения из сканирования шин\r\n";
+  content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
+  content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
+  content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n";   // 0/1 — режим отладки
+  content += "// Управление светодиодной индикацией: 1 — включена, 0 — выключена\r\n";
+  content += "[LED_ENABLE]=" + String(led_enable_flag ? 1 : 0) + "\r\n\r\n";
+  // СОХРАНЕНИЕ ТЕКУЩИХ ИНТЕРВАЛОВ ПРИ ПЕРЕЗАПИСИ ИЛИ ИНИЦИАЛИЗАЦИИ ДИСКА
+  content += "=== ПЕРИОДИЧНОСТЬ КЛИМАТИЧЕСКОГО МОНИТОРИНГА ===\r\n";
+  content += "[CLIM_SAMPLE_MIN]=" + String(climate_sample_interval_min) + "\r\n";
+  content += "[CLIM_REPORT_MIN]=" + String(climate_report_interval_min) + "\r\n\r\n";
+  content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
+  content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
+  content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
+  content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
+  content += "[SCAN_RESULT]\r\nСканирование не проводилось.\r\n\r\n";
+  content += "[EOF]";
   
-  uint32_t set_len = dynamic_set_content.length();
+  uint32_t set_len = content.length();
   ram_disk_buffer[set_entry_offset + 28] = (uint8_t)(set_len & 0xFF);
   ram_disk_buffer[set_entry_offset + 29] = (uint8_t)((set_len >> 8) & 0xFF);
 
@@ -411,7 +419,7 @@ static void create_default_fat_with_info_file() {
 
   // Сектор 25: Данные SET.TXT (5 + 20)
   uint32_t set_data_offset = SECTOR_SIZE * 25; // Сектор 25 (5 + 20)
-  memcpy(&ram_disk_buffer[set_data_offset], dynamic_set_content.c_str(), set_len);
+  memcpy(&ram_disk_buffer[set_data_offset], content.c_str(), set_len);
 
   // Сектор 45: Данные LOG.TXT (5 + 20 + 20)
   uint32_t log_data_offset = SECTOR_SIZE * 45; // Сектор 45 (5 + 20 + 20)
@@ -636,6 +644,7 @@ void read_and_parse_SET_txt() {
   my_debug_var      = "";
   s_led_enable = "";
   String s_si_clk = "";
+  String s_clim_sample = "", s_clim_report = "";
 
   uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
   uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
@@ -662,20 +671,22 @@ void read_and_parse_SET_txt() {
             if (c != ' ') tag += c;  
           }
 
-          if      (tag == "PIN_FREQ_OUT")   target_str = &s_freq_out;  
-          else if (tag == "PIN_AMP_ACT")    target_str = &s_amp_act;
-          else if (tag == "SI5351_CLK_OUT") target_str = &s_si_clk;
-          else if (tag == "LED_ENABLE")     target_str = &s_led_enable;
-          else if (tag == "PIN_SUBBAND_0")  target_str = &s_subband[0];  
-          else if (tag == "PIN_SUBBAND_1")  target_str = &s_subband[1];  
-          else if (tag == "PIN_SUBBAND_2")  target_str = &s_subband[2];  
-          else if (tag == "PIN_SUBBAND_3")  target_str = &s_subband[3];  
-          else if (tag == "PIN_PWR_SI")     target_str = &s_pwr_si;  
-          else if (tag == "PIN_PWR_DS")     target_str = &s_pwr_ds;  
-          else if (tag == "PIN_PWR_BM")     target_str = &s_pwr_bm;  
-          else if (tag == "PIN_PWR_DL")     target_str = &s_pwr_dl;  
-          else if (tag == "SCAN_EXCLUDE")   target_str = &scan_exclude_list;  
-          else if (tag == "DEBUG")          target_str = &my_debug_var; 
+          if      (tag == "PIN_FREQ_OUT")    target_str = &s_freq_out;  
+          else if (tag == "PIN_AMP_ACT")     target_str = &s_amp_act;
+          else if (tag == "SI5351_CLK_OUT")  target_str = &s_si_clk;
+          else if (tag == "LED_ENABLE")      target_str = &s_led_enable;
+          else if (tag == "PIN_SUBBAND_0")   target_str = &s_subband[0];  
+          else if (tag == "PIN_SUBBAND_1")   target_str = &s_subband[1];  
+          else if (tag == "PIN_SUBBAND_2")   target_str = &s_subband[2];  
+          else if (tag == "PIN_SUBBAND_3")   target_str = &s_subband[3];  
+          else if (tag == "PIN_PWR_SI")      target_str = &s_pwr_si;  
+          else if (tag == "PIN_PWR_DS")      target_str = &s_pwr_ds;  
+          else if (tag == "PIN_PWR_BM")      target_str = &s_pwr_bm;  
+          else if (tag == "PIN_PWR_DL")      target_str = &s_pwr_dl;  
+          else if (tag == "SCAN_EXCLUDE")    target_str = &scan_exclude_list;  
+          else if (tag == "DEBUG")           target_str = &my_debug_var;
+          else if (tag == "CLIM_SAMPLE_MIN") target_str = &s_clim_sample;
+          else if (tag == "CLIM_REPORT_MIN") target_str = &s_clim_report;
 
           if (target_str != nullptr) {  
             start_idx = close_bracket_idx + 1;  // значение начинается сразу после ']'  
@@ -715,7 +726,14 @@ void read_and_parse_SET_txt() {
   led_enable_flag = (s_led_enable.length() > 0) ? (s_led_enable.toInt() != 0) : true;
   int parsed_clk = (s_si_clk.length() > 0) ? s_si_clk.toInt() : 0;
   si5351_clk_tx_out = (parsed_clk >= 0 && parsed_clk <= 2) ? parsed_clk : 0;
-
+  if (s_clim_sample.length() > 0) {
+    uint32_t val = s_clim_sample.toInt();
+    climate_sample_interval_min = (val > 0) ? val : 1; // Защита от 0
+  }
+  if (s_clim_report.length() > 0) {
+    uint32_t val = s_clim_report.toInt();
+    climate_report_interval_min = (val > 0) ? val : 1; // Защита от 0
+  }
   if (debug_flag) {
     Serial.println("[Система] парсинг SET.TXT");
   }
@@ -1103,9 +1121,14 @@ void save_hardware_settings_to_file(String scan_results) {
   content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n";
   content += "// Управление светодиодной индикацией: 1 — включена, 0 — выключена\r\n";
   content += "[LED_ENABLE]=" + String(led_enable_flag ? 1 : 0) + "\r\n\r\n";
+  // СОХРАНЕНИЕ ТЕКУЩИХ ИНТЕРВАЛОВ ПРИ ПЕРЕЗАПИСИ ИЛИ ИНИЦИАЛИЗАЦИИ ДИСКА
+  content += "=== ПЕРИОДИЧНОСТЬ КЛИМАТИЧЕСКОГО МОНИТОРИНГА ===\r\n";
+  content += "[CLIM_SAMPLE_MIN]=" + String(climate_sample_interval_min) + "\r\n";
+  content += "[CLIM_REPORT_MIN]=" + String(climate_report_interval_min) + "\r\n\r\n";
+  content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
+  content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
+  content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
   content += "=== УСТРОЙСТВА НА ШИНЕ I2C ===\r\n";
-  
-  // ИСПРАВЛЕНО: Сюда выгружаются СТРОГО чистые результаты сканирования
   content += "[SCAN_RESULT]\r\n" + scan_results + "\r\n\r\n"; 
   content += "[EOF]";
 

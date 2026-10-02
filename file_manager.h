@@ -122,6 +122,9 @@ extern int pin_pwr_bm;
 extern int pin_pwr_dl;
 extern String scan_exclude_list;
 extern String scan_result_data;
+// НОВЫЕ ДИНАМИЧЕСКИЕ ИНТЕРВАЛЫ КЛИМАТА
+extern uint32_t climate_sample_interval_min; // Интервал снятия логов (минуты)
+extern uint32_t climate_report_interval_min; // Интервал сброса таблицы в LOG.TXT (минуты)
 
 // Прототип новой функции парсинга
 void read_hardware_settings();

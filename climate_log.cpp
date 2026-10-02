@@ -31,13 +31,13 @@ static ClimateSample samples[MAX_SAMPLES];
 static uint8_t  sample_count   = 0; 
 static uint32_t last_sample_ms = 0; 
 
-// --- НОВОЕ: аккумуляторы для усреднения 10 подзамеров в один замер таблицы ---  
+// --- НОВОЕ: аккумуляторы для усреднения подзамеров в один замер таблицы ---  
 #define SUB_SAMPLES_COUNT 10   // количество подзамеров на один замер таблицы  
   
 static float   acc_temp    = 0.0f;  
 static float   acc_press   = 0.0f;  
 static float   acc_humid   = 0.0f;  
-static uint8_t sub_count   = 0;        // сколько подзамеров уже накоплено (0..10)  
+static uint8_t sub_count   = 0;         // сколько подзамеров уже накоплено 
 static uint32_t last_sub_sample_ms = 0; // время последнего подзамера
 
 // Одиночный опрос датчиков — без записи в таблицу (из тела старого climate_take_sample)  

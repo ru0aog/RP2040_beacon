@@ -104,6 +104,7 @@ String device_DL_name = "дисплей LCD1602/1604";
 bool force_cw_transmission   = false; // Флаг ручного запуска CW
 bool force_rtty_transmission = false; // Флаг ручного запуска RTTY
 bool force_ifkp_transmission = false; // Флаг ручного запуска IFKP
+volatile bool system_ready = false;   // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 // --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
 const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
@@ -471,7 +472,7 @@ void setup() {
   Serial.print(F("  Текущая дата ")); Serial.print(get_current_date()); Serial.print(F(" время ")); Serial.println(get_current_time());
   Serial.println(F("  Введите команду или h для выхода в справочное меню."));
   Serial.println(F("=========================================================================="));
-
+  system_ready = true;
 }
 
 void loop() {

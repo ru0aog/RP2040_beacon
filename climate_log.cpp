@@ -12,6 +12,7 @@
 // ВНЕШНИЕ ССЫЛКИ: Приводим типы к массивам uint8_t[5] строго как в bme280.cpp
 extern uint8_t device_BM[5];
 extern uint8_t device_AH[5];
+extern volatile bool system_ready;
 
 #define MAX_SAMPLES       35
 
@@ -58,11 +59,10 @@ static bool climate_poll_sensors() {
 #if CLIM_SUB_DEBUG  
   // Промежуточные значения — то, что реально вернули датчики  
   Serial.printf("[Климат]  Подзамер %u/%d: T=%.1fC P=%.1fмм H=%.1f%% | "  
-                "AHT: T=%.1fC H=%.1f%% | сумма: T=%.1f P=%.1f H=%.1f (n=%u)\n",  
+                "AHT: T=%.1fC H=%.1f%%\n",  
                 sub_count + 1, SUB_SAMPLES_COUNT,  
                 BME_temp, BME_press, BME_humid,  
-                AHT_temp, AHT_humid,  
-                acc_temp, acc_press, acc_humid, (uint32_t)(sub_count + 1));  
+                AHT_temp, AHT_humid);  
 #endif  
 
   sub_count++;  
@@ -142,14 +142,16 @@ static void climate_write_report() {
 
 
 // Проверка времени (вызывается из loop() каждую итерацию)  
-void climate_log_update() {    
+void climate_log_update() {
+  if (!system_ready) return;   // климат не работает, пока setup не завершён
+
   uint32_t now = millis();    
     
   if (is_transmitting) {    
     last_sample_ms      = now;    
     last_sub_sample_ms  = now;  
     sample_count = 0;    
-    sub_count = 0;  
+    sub_count = 0;
     acc_temp = acc_press = acc_humid = 0.0f;    
     return;    
   }    

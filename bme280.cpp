@@ -21,19 +21,18 @@
 extern uint8_t device_BM[5];
 extern uint8_t device_AH[5];
 
-// --- НАСТРОЙКА ОДНОВРЕМЕННОЙ РАБОТЫ ДВУХ ДАТЧИКОВ ---
 enum SensorType { TYPE_UNKNOWN, TYPE_BMP280, TYPE_BME280, TYPE_BMP180, TYPE_AHT20 };
-SensorType mainBoschSensor = TYPE_UNKNOWN; // Хранит тип чипа на шине Bosch (0x76/0x77)
-SensorType detectedSensor = TYPE_UNKNOWN;  // ВОССТАНОВЛЕНО: Используется алгоритмами Bosch
-bool aht20_is_present = false;             // Флаг присутствия параллельного гигрометра AHT20
+SensorType BME_Sensor  = TYPE_UNKNOWN;  // тип датчика Bosch (BMP/BME)
+SensorType AHT_Sensor  = TYPE_UNKNOWN;  // тип датчика AHT
 
-// Раздельные переменные для предотвращения взаимного затирания данных
-float bmp_temp_data = 0.0f;
-float aht_temp_data = 0.0f;
+// считанные данные AHT
+float AHT_temp  = 0.0f;  // температура -/+ 0.3 C
+float AHT_humid = 0.0f;  // влажность   -/+ 2.0 %
 
-float bme_temp  = 0.0f; // Итоговая температура (усредненная или с приоритетного датчика)
-float bme_press = 0.0f; // Итоговое давление (снимается с BMP280)
-float bme_humid = 0.0f; // Итоговая влажность (снимается с AHT20)
+// считанные данные BME/BMP
+float BME_temp  = 0.0f;  // температура -/+ 0.5 C
+float BME_press = 0.0f;  // давление    -/+ 0.2 Pa
+float BME_humid = 0.0f;  // влажность   -/+ 1.0 %
 
 // Структура для хранения калибровочных данных из памяти датчика BME280/BMP280
 struct {
@@ -172,7 +171,7 @@ void readCalibrationDataBMP180() {
   calib180.mc  = readS16_BE(0xBC); calib180.md  = readS16_BE(0xBE);
 }
 
-// ИСПРАВЛЕНО: Функции AHT20 перенесены вверх файла, чтобы компилятор видел их в блоках init_BME и get_BME_data
+// Функции AHT20 перенесены вверх файла, чтобы компилятор видел их в блоках init_BME и get_BME_data
 void initAHT20() { 
   if (device_AH[0] == 1) {
     I2C_AHT_restart();
@@ -194,7 +193,20 @@ void initAHT20() {
         pWire->endTransmission();
         delay(10);
       }
-      detectedSensor = TYPE_AHT20;
+      AHT_Sensor = TYPE_AHT20;
+    }
+  }
+}
+
+void init_AHT() {
+  I2C_AHT_restart();
+  initAHT20();
+  
+  if (device_AH[0] == 1) {
+    initAHT20();
+    if (debug_flag) {
+      // вывод сообщения
+      Serial.print("[Система] Датчик AHT20 успешно запущен \n");
     }
   }
 }
@@ -204,7 +216,7 @@ void get_AHT_data() {
     I2C_AHT_restart();
     TwoWire *pWire = (device_AH[1] == 1) ? &Wire1 : &Wire;
     
-    if (detectedSensor == TYPE_AHT20) {
+    if (AHT_Sensor == TYPE_AHT20) {
       pWire->beginTransmission(AHT20_ADDRESS);
       pWire->write(0xAC); pWire->write(0x33); pWire->write(0x00);
       pWire->endTransmission();
@@ -220,8 +232,8 @@ void get_AHT_data() {
         uint32_t raw_humidity = (b1 << 12) | (b2 << 4) | (b3 >> 4);
         uint32_t raw_temperature = ((b3 & 0x0F) << 16) | (b4 << 8) | b5;
 
-        bme_humid = ((float)raw_humidity / 1048576.0f) * 100.0f;
-        bme_temp  = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
+        AHT_humid = ((float)raw_humidity / 1048576.0f) * 100.0f;
+        AHT_temp  = ((float)raw_temperature / 1048576.0f) * 200.0f - 50.0f;
       }
     }
   }
@@ -238,23 +250,20 @@ bool initBME280() {
     uint8_t chipID = read8(0xD0); 
 
     if (chipID == 0x60) {
-      detectedSensor = TYPE_BME280;
-      mainBoschSensor = TYPE_BME280;
+      BME_Sensor = TYPE_BME280;
     }
     else if (chipID == 0x58 || chipID == 0x56 || chipID == 0x57) {
-      detectedSensor = TYPE_BMP280;
-      mainBoschSensor = TYPE_BMP280;
+      BME_Sensor = TYPE_BMP280;
     }
     else if (chipID == 0x55) {
-      detectedSensor = TYPE_BMP180;
-      mainBoschSensor = TYPE_BMP180;
+      BME_Sensor = TYPE_BMP180;
     }
     else {
-      detectedSensor = TYPE_UNKNOWN;
+      BME_Sensor = TYPE_UNKNOWN;
       return false; 
     }
     
-    if (detectedSensor == TYPE_BMP180) {
+    if (BME_Sensor == TYPE_BMP180) {
       readCalibrationDataBMP180();
       return true;
     }
@@ -267,7 +276,7 @@ bool initBME280() {
 
     readCalibrationData();
 
-    if (detectedSensor == TYPE_BME280) {
+    if (BME_Sensor == TYPE_BME280) {
       pWire->beginTransmission(addr); pWire->write(0xF2); pWire->write(0x01); pWire->endTransmission();
     }
 
@@ -282,20 +291,25 @@ void init_BME() {
   I2C_BME_restart();
 
   if (!initBME280()) {
-    Serial.print("[Система] Внешний датчик BME/BMP не найден! \n");
     device_BM[0] = 0;
+    if (debug_flag) {
+      Serial.print("[Система] Внешний датчик BME/BMP не найден! \n");
+    }
   } else {
     device_BM[0] = 1;
-    if      (detectedSensor == TYPE_BME280) Serial.print("[Система] Датчик BME280 успешно запущен \n");
-    else if (detectedSensor == TYPE_BMP280) Serial.print("[Система] Датчик BMP280 успешно запущен \n");
-    else if (detectedSensor == TYPE_BMP180) Serial.print("[Система] Датчик BMP180 успешно запущен \n");
+    if (debug_flag) {
+      // вывод сообщения
+      if      (BME_Sensor == TYPE_BME280) Serial.print("[Система] Датчик BME280 успешно запущен \n");
+      else if (BME_Sensor == TYPE_BMP280) Serial.print("[Система] Датчик BMP280 успешно запущен \n");
+      else if (BME_Sensor == TYPE_BMP180) Serial.print("[Система] Датчик BMP180 успешно запущен \n");
+    }
   }
 
-  if (device_AH[0] == 1) {
-    initAHT20();
-    Serial.print("[Система] Датчик AHT20 успешно запущен \n");
-  }
+  initAHT20();
 }
+
+
+
 
 // Формулы компенсации для BME280/BMP280
 float compensateTemperature(int32_t adc_T) {
@@ -384,7 +398,7 @@ void get_BME_data() {
     uint8_t addr = device_BM[4];
 
     // --- Опрос BMP180 (Пошаговый режим) ---
-    if (detectedSensor == TYPE_BMP180) {
+    if (BME_Sensor == TYPE_BMP180) {
       // 1. Запрос несформированной температуры (UT)
       pWire->beginTransmission(addr); pWire->write(0xF4); pWire->write(0x2E); pWire->endTransmission();
       delay(5); 
@@ -405,22 +419,15 @@ void get_BME_data() {
       float temperature = 0; float pressurePa = 0;
       computeBMP180(ut, up, temperature, pressurePa);
 
-      bme_temp = temperature;
-      bme_humid = 0; 
-      bme_press = pressurePa * 0.00750063755F; 
-      
-      // Безопасное слияние шкал, если BMP180 работает в паре с AHT20
-      if (device_AH[0] == 1) { // ИСПРАВЛЕНО: Добавлен индекс [0]
-        bmp_temp_data = bme_temp; get_AHT_data(); aht_temp_data = bme_temp;
-        bme_temp = (bmp_temp_data + aht_temp_data) / 2.0f;
-      }
-      return;
+      BME_temp = temperature;
+      BME_humid = 0; 
+      BME_press = pressurePa * 0.00750063755F; 
     }
 
     // --- Опрос BME280 / BMP280 (Потоковый режим) ---
     pWire->beginTransmission(addr); pWire->write(0xF7); pWire->endTransmission();
     
-    uint8_t bytesToRead = (detectedSensor == TYPE_BME280) ? 8 : 6;
+    uint8_t bytesToRead = (BME_Sensor == TYPE_BME280) ? 8 : 6;
     pWire->requestFrom(addr, bytesToRead);
 
     if (pWire->available() >= bytesToRead) {
@@ -430,48 +437,34 @@ void get_BME_data() {
       int32_t adc_T = (t_msb << 12) | (t_lsb << 4) | (t_xlsb >> 4);
 
       int32_t adc_H = 0;
-      if (detectedSensor == TYPE_BME280 && pWire->available() >= 2) {
+      if (BME_Sensor == TYPE_BME280 && pWire->available() >= 2) {
         uint32_t h_msb  = pWire->read(); uint32_t h_lsb  = pWire->read();
         adc_H = (h_msb << 8) | h_lsb;
       }
 
-      bme_temp = compensateTemperature(adc_T);
-      bme_press = compensatePressure(adc_P) * 0.00750063755F;
-      bme_humid = (detectedSensor == TYPE_BME280) ? compensateHumidity(adc_H) : 0;
-    }
-  }
-
-  // Умный параллельный опрос без взаимного затирания шкал
-  if (device_AH[0] == 1) { // ИСПРАВЛЕНО: Добавлен индекс [0]
-    bmp_temp_data = bme_temp; 
-    get_AHT_data();           
-    aht_temp_data = bme_temp; 
-
-    // Если в системе обнаружен и запущен BMP280/BME280
-    if (device_BM[0] == 1 && mainBoschSensor != TYPE_UNKNOWN) { // ИСПРАВЛЕНО: Добавлен индекс [0]
-      bme_temp = (bmp_temp_data + aht_temp_data) / 2.0f; 
-    } else {
-      bme_temp = aht_temp_data; 
+      BME_temp = compensateTemperature(adc_T);
+      BME_press = compensatePressure(adc_P) * 0.00750063755F;
+      BME_humid = (BME_Sensor == TYPE_BME280) ? compensateHumidity(adc_H) : 0;
     }
   }
 }
 
 void BME_read() {
   get_BME_data();
-  if (device_BM[0] == 1 || device_AH[0] == 1) { // ИСПРАВЛЕНО: Добавлен индекс [0] к обоим массивам
-    float temperature = bme_temp;
-    float pressureMmHg = bme_press;
-    float humidity = bme_humid;
+  if (device_BM[0] == 1 || device_AH[0] == 1) {
+    float temperature  = BME_temp;
+    float pressureMmHg = BME_press;
+    float humidity     = BME_humid;
 
     Serial.print(" - темп.     : "); Serial.print(temperature, 1);  Serial.println(" °C");
     
-    if (detectedSensor == TYPE_BME280 || device_AH[0] == 1) { // ИСПРАВЛЕНО: Добавлен индекс [0]
+    if (BME_Sensor == TYPE_BME280) {
       Serial.print(" - влажность : "); Serial.print(humidity, 1);     Serial.println(" %");
     } else {
       Serial.println(" - влажность : нет в этой модели чипа Bosch");
     }
     
-    if (device_BM[0] == 1) { // ИСПРАВЛЕНО: Добавлен индекс [0]
+    if (device_BM[0] == 1) {
       Serial.print(" - давление  : "); Serial.print(pressureMmHg, 1);  Serial.println(" мм рт. ст.");
     } else {
       Serial.println(" - давление  : в системе отсутствует барометр");
@@ -482,12 +475,16 @@ void BME_read() {
 // Функция для чтения телеметрии (климатические данные)
 String get_climate_telemetry() {
   get_BME_data();
-  char tele_buf[64]; 
+  get_AHT_data();
+
+  char tele_buf[128]; 
   
-  if (detectedSensor == TYPE_BME280 || device_AH[0] == 1) { // ИСПРАВЛЕНО: Добавлен индекс [0]
-    snprintf(tele_buf, sizeof(tele_buf), "T_CL=%.1fC P_CL=%.1fmm H_CL=%.1f%%", bme_temp, bme_press, bme_humid);
-  } else {
-    snprintf(tele_buf, sizeof(tele_buf), "T_CL=%.1fC P_CL=%.1fmm", bme_temp, bme_press);
-  }
+  snprintf(tele_buf, sizeof(tele_buf), "T_BME=%.1fC P_BME=%.1fmm H_BME=%.1f%% T_AHT=%.1fC H_AHT=%.1f%%", BME_temp, BME_press, BME_humid, AHT_temp, AHT_humid);
+
   return String(tele_buf);
 }
+
+
+
+
+

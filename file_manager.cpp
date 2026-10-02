@@ -379,7 +379,7 @@ static void create_default_fat_with_info_file() {
   dynamic_set_content += "// Дополнительные исключения из сканирования шин\r\n";
   dynamic_set_content += "[SCAN_EXCLUDE ]=16,23,24,25\r\n\r\n";
   dynamic_set_content += "// Режим отладки: 1 — служебные сообщения в Serial, 0 — выкл\r\n";
-  dynamic_set_content += "[DEBUG]=1\r\n\r\n";   // 0/1 — режим отладки
+  dynamic_set_content += "[DEBUG]=" + String(debug_flag ? 1 : 0) + "\r\n\r\n";   // 0/1 — режим отладки
   dynamic_set_content += "// Управление светодиодной индикацией: 1 — включена, 0 — выключена\r\n";
   dynamic_set_content += "[LED_ENABLE]=" + String(led_enable_flag ? 1 : 0) + "\r\n\r\n"; 
   dynamic_set_content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";

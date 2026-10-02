@@ -208,15 +208,20 @@ void init_scheduler() {
 
       if ((testByte & 0x70) == 0x70) {
         activeRtc = RTC_DS1307;
-        Serial.println("[Система] Обнаружен стандартный чип DS1307A");
-        
+        if (debug_flag) {
+          // вывод сообщения
+          Serial.println("[Система] Обнаружен стандартный чип DS1307A");
+        }
         pWire->beginTransmission(RTC_I2C_ADDRESS);
         pWire->write(0x0F);
         pWire->write(0x00);
         pWire->endTransmission();
       } else {
         activeRtc = RTC_DS3231;
-        Serial.println("[Система] Обнаружен чип высокой точности DS3231");
+        if (debug_flag) {
+          // вывод сообщения
+          Serial.println("[Система] Обнаружен чип высокой точности DS3231");
+        }
       }
     } else {
       activeRtc = RTC_DS3231; 
@@ -240,14 +245,15 @@ void init_scheduler() {
     }
 
     update_scheduler();
-    char buf[34];
-    snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
-    Serial.println(buf);
-    snprintf(buf, sizeof(buf), " - время     : %02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
-    Serial.println(buf);
+    if (debug_flag) {
+      // вывод сообщения
+      char buf[34];
+      snprintf(buf, sizeof(buf), " - дата      : %02d.%02d.%04d", rtc_day, rtc_month, rtc_year);
+      Serial.println(buf);
+      snprintf(buf, sizeof(buf), " - время     : %02d:%02d:%02d", rtc_hour, rtc_min, rtc_sec);
+      Serial.println(buf);
+    }
   }
-
-// Serial.println("Прямой тест памяти: H=" + String(rtc_hour) + " M=" + String(rtc_min) + " S=" + String(rtc_sec));
 }
 
 

@@ -443,7 +443,11 @@ void setup() {
 
   watchdog_enable(15000, true);   // 15 сек; true = не тикать при остановке по отладчику
 
-  Serial.println(F("[Система] Запуск сторожевого таймера - ок"));
+  if (debug_flag) {
+    // вывод сообщения
+    Serial.println(F("[Система] Запуск сторожевого таймера - ок"));
+  }
+  
   Serial.println(F(""));
   print_schedule();
   Serial.println(F(""));
@@ -1026,7 +1030,11 @@ void I2C_Scanner() {
 
   // Записываем результат и обновляем файл на диске
   save_hardware_settings_to_file(results);
-  Serial.println(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
+  
+  if (debug_flag) {
+    // вывод сообщения
+    Serial.println(F("[Система] Результаты I2C сканирования экспортированы в SET.TXT"));
+  }
 }
 
 void scanRP2040Ports() {

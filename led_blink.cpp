@@ -124,23 +124,29 @@ void set_rgb_parallel(uint8_t r, uint8_t g, uint8_t b) {
 
 // Аппаратная инициализация всех трех каналов индикации
 void ZERO_LED_init() {
-  Serial.println("[Система] Индикация светодиодом: универсальный режим (YD-RP2040, Pico, Zero)");
+  if (led_enable_flag) {
+    // Инициализируем GPIO16
+    gpio_init(PIN_ZERO);
+    gpio_set_dir(PIN_ZERO, GPIO_OUT);
+    // Инициализируем GPIO23
+    gpio_init(PIN_YD);
+    gpio_set_dir(PIN_YD, GPIO_OUT);
+    // Инициализируем GPIO25
+    gpio_init(PIN_PICO);
+    gpio_set_dir(PIN_PICO, GPIO_OUT);
+    // Переводим все выводы в состояние LOW
+    sio_hw->gpio_clr = ALL_PINS_MASK;
+  }
 
-  // Инициализируем GPIO16
-  gpio_init(PIN_ZERO);
-  gpio_set_dir(PIN_ZERO, GPIO_OUT);
-
-  // Инициализируем GPIO23
-  gpio_init(PIN_YD);
-  gpio_set_dir(PIN_YD, GPIO_OUT);
-
-  // Инициализируем GPIO25
-  gpio_init(PIN_PICO);
-  gpio_set_dir(PIN_PICO, GPIO_OUT);
-  
-  // Переводим все выводы в состояние LOW
-  sio_hw->gpio_clr = ALL_PINS_MASK;
-  
+  if (debug_flag) {
+    // вывод сообщения
+    if (led_enable_flag) {
+      Serial.println("[Система] Индикация светодиодом: универсальный режим (YD-RP2040, Pico, Zero)"); }
+    else {
+      Serial.println("[Система] Индикация светодиодом: отключена");
+    }
+  }
+ 
   delay(200); 
 }
 

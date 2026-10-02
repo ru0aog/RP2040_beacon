@@ -192,7 +192,7 @@ void climate_log_update() {
 // Сборка текущей таблицы в String (универсальный буфер)
 String climate_build_current_table() {
   if (sample_count == 0) {
-    return "=== КЛИМАТИЧЕСКИЙ БУФЕР ПУСТ ===";
+    return "=== КЛИМАТИЧЕСКИЙ БУФЕР ПУСТ ===\r\n";
   }
 
   String table;

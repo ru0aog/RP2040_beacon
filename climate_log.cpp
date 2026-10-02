@@ -30,7 +30,6 @@ struct ClimateSample {
 static ClimateSample samples[MAX_SAMPLES]; 
 static uint8_t  sample_count   = 0; 
 static uint32_t last_sample_ms = 0; 
-static uint32_t last_report_ms = 0;
 
 // --- НОВОЕ: аккумуляторы для усреднения 10 подзамеров в один замер таблицы ---  
 #define SUB_SAMPLES_COUNT 10   // количество подзамеров на один замер таблицы  

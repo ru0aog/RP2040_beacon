@@ -34,10 +34,12 @@ extern float  AHT_temp;
 extern float  AHT_humid;
 
 extern uint8_t device_BM[5]; // номер шины, пин SDA, пин SCL, адрес
+extern uint8_t device_AH[5]; // номер шины, пин SDA, пин SCL, адрес
 
 void init_BME();
-void BME_read();
+void init_AHT();
 void get_BME_data();
+void get_AHT_data();
 String get_climate_telemetry();
 
 #endif

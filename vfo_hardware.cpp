@@ -513,33 +513,40 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                 if (test_pio_int < 2) continue; 
                 
                 uint32_t test_pio_frac = pio_div_fixed8 & 0xFFu;
-                
+
                 uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
                 uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
                 uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
                 uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
                 
-                // 1. Первичная метрика: Близость dds_step к целому числу (0 или 2^32)
+                // 1. Вычисляем физическое расстояние dds_step до ближайшего края (0 или 2^32)
                 uint32_t dist_dds_0 = test_dds_step;
                 uint32_t dist_dds_max = 0xFFFFFFFFu - test_dds_step;
                 uint32_t current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;
+
+                // ИСПРАВЛЕНИЕ: Защита ближней зоны. Если l_step != 0, но частота переполнения 
+                // аккумулятора падает ниже критических 50 кГц, мы искусственно штрафуем эту PLL-комбинацию.
+                // 50 кГц при F_s_dither ~5.3 МГц соответствует критической дистанции ~40000 единиц dds_step.
+                if (current_dds_metric > 0 && current_dds_metric < 40000u) {
+                    // Накладываем жесткий штрафной коэффициент, уводящий метрику из приоритета перебора
+                    current_dds_metric += 500000u; 
+                }
                 
                 // 2. Вторичная метрика: Близость pio_frac к целому числу (0 или 256)
                 uint32_t dist_frac_0 = test_pio_frac;
                 uint32_t dist_frac_max = 256 - test_pio_frac;
                 uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
 
-                // Условия многокритериального выбора:
-                bool is_better_dds = (current_dds_metric < min_dds_metric);
-                bool is_equal_dds = (current_dds_metric == min_dds_metric);
-                
+                // Многокритериальный выбор оптимального режима тактирования
+                bool is_better_dds  = (current_dds_metric < min_dds_metric);
+                bool is_equal_dds   = (current_dds_metric == min_dds_metric);
                 bool is_better_frac = (current_frac_metric < min_frac_metric);
-                bool is_equal_frac = (current_frac_metric == min_frac_metric);
+                bool is_equal_frac  = (current_frac_metric == min_frac_metric);
 
                 if (is_better_dds || 
                    (is_equal_dds && is_better_frac) ||
                    (is_equal_dds && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
-                    
+
                     min_dds_metric = current_dds_metric;
                     min_frac_metric = current_frac_metric;
                     

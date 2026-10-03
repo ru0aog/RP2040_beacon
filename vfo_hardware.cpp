@@ -256,9 +256,6 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
     // Прямой кэшированный указатель на регистр SM PIO
     volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
-    
-    // ДОБАВЛЕНО ДЛЯ ИСПРАВЛЕНИЯ ОШИБКИ СБОРКИ: Маска пина отладки
-    const uint32_t profile_pin_mask = (1u << VFO_PROFILE_PIN);
 
     while (true) {
         // Опрос флага смены тона (в ОЗУ смотрим только раз за сессию передачи)
@@ -515,11 +512,6 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
 
 // === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
-#ifdef VFO_DITHER_PROFILE
-    // Инициализация отладочного пина под замер частоты цикла дизеринга
-    gpio_init(VFO_PROFILE_PIN);
-    gpio_set_dir(VFO_PROFILE_PIN, GPIO_OUT);
-#endif
 
 #ifdef VFO_DITHER_ON_CORE1
     multicore_reset_core1(); 

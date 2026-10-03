@@ -66,7 +66,6 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     params.pwm_wrap = wrap;
 
     // Рассчитываем крупный clkdiv (формат 8.4) под выбранный маленький wrap
-    // Формула: clkdiv_fx4 = (clk_sys * 16 * 1000) / (2 * wrap * mhz_target)
     uint64_t clkdiv_fx4 = (clk_sys_hz * 16ULL * 1000ULL) / (2ULL * (uint64_t)wrap * mhz_target);
 
     // Жесткие лимиты аппаратного регистра CH_DIV (формат 8.4)
@@ -77,12 +76,12 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
     // Расчет 32-битного остатка ошибки относительно истинной текущей раскладки ШИМ
     uint64_t actual_div_scaled = clkdiv_fx4 * (uint64_t)wrap;
-    uint64_t pio_denom = mhz_target * 2ULL * actual_div_scaled;
-    uint64_t clk_sys_rem = ((clk_sys_hz * 16ULL * 1000ULL) % pio_denom);
+    uint64_t vfo_denom = mhz_target * 2ULL * actual_div_scaled;
+    uint64_t clk_sys_rem = ((clk_sys_hz * 16ULL * 1000ULL) % vfo_denom);
     
-    uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
-    uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
-    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
+    uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
+    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
+    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));
 
     return params;
 }
@@ -128,8 +127,9 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
 
 /**
  * Единичный шаг дизеринга (Эталонная Си-версия через ОЗУ)
+ * Убрана мертвая переменная local_wrap, добавлены двусторонние лимиты клемпа (16..4095)
  */
-static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_wrap, uint32_t local_div_fx4) {
+static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_div_fx4) {
     uint32_t step = local_step;
 
 #ifdef VFO_DITHER_RANDOMIZE
@@ -156,7 +156,10 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
 #endif
 
     int32_t final_div_fx4 = (int32_t)local_div_fx4 + total_correction;
-    if (final_div_fx4 < 16) final_div_fx4 = 16; 
+    
+    // Двусторонний аппаратный клемп 12-битного регистра CH_DIV (1.0 .. 255.15)
+    if (final_div_fx4 < 16)   final_div_fx4 = 16; 
+    if (final_div_fx4 > 4095) final_div_fx4 = 4095;
 
     pwm_hw->slice[uint_slice_num].div = (uint32_t)final_div_fx4;
 }
@@ -166,7 +169,6 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
     int32_t l_step = 0;
-    int32_t l_wrap = 2;
     int32_t l_div_fx4 = 16;
 
     uint32_t loc_acc1 = 0;
@@ -182,7 +184,6 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         if (__builtin_expect(tone_changed, 0)) {
             uint32_t save = spin_lock_blocking(vfo_spin_lock);
             l_step    = (int32_t)dds_step;
-            l_wrap    = (int32_t)target_pwm_wrap;
             l_div_fx4 = (int32_t)target_pwm_base_div;
             
             loc_acc1 = 0;
@@ -226,7 +227,10 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 #endif
 
         int32_t final_div_fx4 = l_div_fx4 + total_correction;
-        if (__builtin_expect(final_div_fx4 < 16, 0)) final_div_fx4 = 16;
+        
+        // Двусторонний аппаратный клемп 12-битного регистра CH_DIV (1.0 .. 255.15)
+        if (__builtin_expect(final_div_fx4 < 16, 0))   final_div_fx4 = 16;
+        if (__builtin_expect(final_div_fx4 > 4095, 0)) final_div_fx4 = 4095;
 
         *pwm_div_reg = (uint32_t)final_div_fx4;
 #else
@@ -234,7 +238,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 #ifdef VFO_USE_MASH2
         dds_accum_m2 = loc_acc2; m2_carry_prev = loc_m2_carry_prev;
 #endif
-        vfo_dither_step((uint32_t)l_step, (uint32_t)l_wrap, (uint32_t)l_div_fx4);
+        vfo_dither_step((uint32_t)l_step, (uint32_t)l_div_fx4);
         loc_acc1 = dds_accumulator; loc_rand_state = xorshift_state;
 #ifdef VFO_USE_MASH2
         loc_acc2 = dds_accum_m2; loc_m2_carry_prev = m2_carry_prev;
@@ -274,11 +278,14 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 12 * 1000000, 12 * 1000000);
     reset_block(RESETS_RESET_PLL_SYS_BITS);
     unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
+
     uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)best_fbdiv);
-    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2);
+    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2); 
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, (uint32_t)clk_sys_target_hz, (uint32_t)clk_sys_target_hz);
     restore_interrupts(ints_status);
+
     current_clk_sys_hz = (uint32_t)(((uint64_t)best_fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(best_p1 * best_p2));
+
     gpio_set_function(VFO_OUTPUT_PIN, GPIO_FUNC_PWM);
     uint_slice_num = pwm_gpio_to_slice_num(VFO_OUTPUT_PIN);
     uint_pwm_chan = pwm_gpio_to_channel(VFO_OUTPUT_PIN);
@@ -329,3 +336,4 @@ void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     pwm_set_enabled(uint_slice_num, key_down);
     dev_TX_state = key_down;
 }
+

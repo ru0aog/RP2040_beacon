@@ -34,6 +34,7 @@ static volatile uint32_t dds_step = 0;
 static volatile uint32_t target_pwm_wrap = 2;
 static volatile uint32_t target_pwm_base_div = 16;  
 static volatile bool tone_changed = false; 
+static volatile bool reset_phase = false; // Флаг принудительной фазовой когерентности
 
 // Резервное состояние для медленной Си-ветки
 static volatile uint32_t dds_accumulator = 0; 
@@ -186,11 +187,12 @@ static void __not_in_flash_func(vfo_core1_entry)() {
             l_step    = (int32_t)dds_step;
             l_div_fx4 = (int32_t)target_pwm_base_div;
             
+            // Полный сброс накопителей для фазовой когерентности
             loc_acc1 = 0;
             loc_rand_state = xorshift_state;
 #ifdef VFO_USE_MASH2
             loc_acc2 = 0;
-            loc_m2_carry_prev = 0;
+            loc_m2_carry_prev = 0; // Сбрасываем предыдущий перенос, чтобы первый шаг не дал ложной коррекции
 #endif
             tone_changed = false; 
             spin_unlock(vfo_spin_lock, save);
@@ -319,9 +321,18 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 
     VfoParameters t = ifkp_tones[tone_index];
 
+    // Синхронно сбрасываем резервные переменные медленной С-ветки (для тестов/сверки)
+    dds_accumulator = 0;
+#ifdef VFO_USE_MASH2
+    dds_accum_m2 = 0;
+    m2_carry_prev = 0;
+#endif
+
+    // Буферизированные аппаратно регистры периода ШИМ изменятся на rollover
     pwm_set_wrap(uint_slice_num, t.pwm_wrap);
     pwm_set_chan_level(uint_slice_num, uint_pwm_chan, t.pwm_wrap >> 1);
 
+    // Атомарно пушим уставки и требуем сброса фазы от конвейера Core 1
     uint32_t save = spin_lock_blocking(vfo_spin_lock);
     target_pwm_wrap     = t.pwm_wrap;
     target_pwm_base_div = t.pwm_base_div_fx4;
@@ -332,8 +343,134 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     current_active_tone = tone_index;
 }
 
+
+/**
+ * Синхронное управление ключом генератора с плавным формированием фронтов (CW Pulse Shaping).
+ * Защищает эфир от «щелчков» (key clicks) за счет плавного изменения скважности (Duty Cycle).
+ */
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
-    pwm_set_enabled(uint_slice_num, key_down);
-    dev_TX_state = key_down;
+    // Получаем текущее значение WRAP и целевой уровень 50% меандра для активного тона
+    uint32_t current_wrap = target_pwm_wrap;
+    uint32_t target_level = current_wrap >> 1;
+    
+    uint32_t total_shaping_time_us = VFO_CW_SHAPE_MS * 1000;
+
+    if (key_down && !dev_TX_state) {
+        // --- НАРАСТАНИЕ ФРОНТА (RISE) ---
+        // Сначала принудительно ставим скважность в 0% (тишина) и включаем генератор
+        pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
+        pwm_set_enabled(uint_slice_num, true);
+        dev_TX_state = true;
+
+        uint32_t start_time = time_us_32();
+        while (true) {
+            uint32_t elapsed = time_us_32() - start_time;
+            if (elapsed >= total_shaping_time_us) break;
+
+            // Вычисляем текущий уровень скважности пропорционально прошедшему времени
+            uint32_t current_level = (elapsed * target_level) / total_shaping_time_us;
+            pwm_set_chan_level(uint_slice_num, uint_pwm_chan, current_level);
+            
+            __compiler_memory_barrier(); // Защита от избыточной оптимизации компилятора
+        }
+        // Фиксируем чистый 50% меандр в конце фронта
+        pwm_set_chan_level(uint_slice_num, uint_pwm_chan, target_level);
+
+    } else if (!key_down && dev_TX_state) {
+        // --- СПАД ФРОНТА (FALL) ---
+        uint32_t start_time = time_us_32();
+        while (true) {
+            uint32_t elapsed = time_us_32() - start_time;
+            if (elapsed >= total_shaping_time_us) break;
+
+            // Плавно уменьшаем скважность от 50% вниз до 0%
+            int32_t current_level = (int32_t)target_level - (int32_t)((elapsed * target_level) / total_shaping_time_us);
+            if (current_level < 0) current_level = 0;
+            
+            pwm_set_chan_level(uint_slice_num, uint_pwm_chan, (uint32_t)current_level);
+            
+            __compiler_memory_barrier();
+        }
+        // Глушим ШИМ-генератор физически и снимаем флаг TX
+        pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
+        pwm_set_enabled(uint_slice_num, false);
+        dev_TX_state = false;
+        
+        current_active_tone = VFO_TONE_NONE;
+    }
 }
 
+
+/**
+ * Быстрая целочисленная таблица четверти периода синуса (scaled 0..256)
+ * Используется для косинусного сглаживания фронтов Raised Cosine
+ */
+static const uint16_t raised_cosine_table[65] = {
+    0,    6,    12,   19,   25,   31,   37,   44, 
+    50,   56,   62,   68,   74,   80,   86,   92, 
+    98,   103,  109,  115,  120,  126,  131,  136, 
+    142,  147,  152,  157,  162,  167,  171,  176, 
+    180,  185,  189,  193,  197,  201,  205,  208, 
+    212,  215,  219,  222,  225,  228,  231,  233, 
+    236,  238,  240,  242,  244,  246,  247,  249, 
+    250,  251,  252,  253,  254,  254,  255,  255, 
+    256
+};
+
+/**
+ * Синхронное управление ключом генератора с косинусным формированием фронтов (Raised Cosine).
+ * Обеспечивает кристально чистый эфир без побочных излучений («щелчков»).
+ */
+void __not_in_flash_func(vfo_operation_set_cos)(bool key_down) {
+    uint32_t current_wrap = target_pwm_wrap;
+    uint32_t target_level = current_wrap >> 1;
+    
+    uint32_t total_shaping_time_us = VFO_CW_SHAPE_MS * 1000;
+
+    if (key_down && !dev_TX_state) {
+        // --- КОСИНУСНОЕ НАРАСТАНИЕ ФРОНТА (RISE) ---
+        pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
+        pwm_set_enabled(uint_slice_num, true);
+        dev_TX_state = true;
+
+        uint32_t start_time = time_us_32();
+        while (true) {
+            uint32_t elapsed = time_us_32() - start_time;
+            if (elapsed >= total_shaping_time_us) break;
+
+            // Вычисляем индекс в таблице (0..64) пропорционально времени
+            uint32_t idx = (elapsed * 64) / total_shaping_time_us;
+            
+            // Интерполируем уровень: текущий_левел = (target_level * table[idx]) / 256
+            uint32_t current_level = (target_level * raised_cosine_table[idx]) >> 8;
+            
+            pwm_set_chan_level(uint_slice_num, uint_pwm_chan, current_level);
+            __compiler_memory_barrier();
+        }
+        // В конце фронта жестко фиксируем идеальные 50% меандра
+        pwm_set_chan_level(uint_slice_num, uint_pwm_chan, target_level);
+
+    } else if (!key_down && dev_TX_state) {
+        // --- КОСИНУСНЫЙ СПАД ФРОНТА (FALL) ---
+        uint32_t start_time = time_us_32();
+        while (true) {
+            uint32_t elapsed = time_us_32() - start_time;
+            if (elapsed >= total_shaping_time_us) break;
+
+            // ИСПРАВЛЕНИЕ: Инвертируем сам индекс. Время идет вперед (0->64), индекс назад (64->0)
+            uint32_t idx = 64 - ((elapsed * 64) / total_shaping_time_us);
+            
+            // Теперь просто умножаем на спадающий коэффициент таблицы без вычитания
+            uint32_t current_level = (target_level * raised_cosine_table[idx]) >> 8;
+            
+            pwm_set_chan_level(uint_slice_num, uint_pwm_chan, current_level);
+            __compiler_memory_barrier();
+        }
+        // Полностью обесточиваем выход ШИМ и выключаем слайс
+        pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
+        pwm_set_enabled(uint_slice_num, false);
+        dev_TX_state = false;
+        
+        current_active_tone = VFO_TONE_NONE;
+    }
+}

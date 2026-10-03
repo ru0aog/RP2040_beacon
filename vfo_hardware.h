@@ -36,6 +36,9 @@
 #define VFO_DITHER_FAST          // Высокоскоростной Си-конвейер Core 1
 #define VFO_DITHER_ON_CORE1      // Вынос горячего цикла на изолированное ядро
 
+// Настройка формирования фронтов CW (Pulse Shaping)
+#define VFO_CW_SHAPE_MS       5    // Время нарастания и спада фронта в миллисекундах (стандарт 4..6 мс)
+
 extern int pin_freq_out; 
 #define VFO_OUTPUT_PIN       (pin_freq_out)
 #define VFO_IFKP_TONES_COUNT 33            
@@ -53,9 +56,10 @@ struct VfoParameters {
 // Прецизионное размещение таблицы частот в RAM (Синхронизировано с .cpp)
 extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
 
-// Low-Level API
+// Обновленный API управления эфиром
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
-void vfo_operation_set(bool key_down);          
+void vfo_operation_set(bool key_down);     // Вызывается в реальном времени из основного цикла RTTY/IFKP
+void vfo_operation_set_cos(bool key_down); // Вызывается в реальном времени из основного цикла CW
 
 #endif // VFO_HARDWARE_H

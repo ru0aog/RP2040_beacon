@@ -35,7 +35,7 @@ static volatile uint32_t target_pwm_wrap = 2;
 static volatile uint32_t target_pwm_base_div = 16;  
 static volatile bool tone_changed = false; 
 
-// Глобальные переменные для эталонной медленной ветки (если выключен VFO_DITHER_FAST)
+// Резервное состояние для медленной Си-ветки
 static volatile uint32_t dds_accumulator = 0; 
 #ifdef VFO_USE_MASH2
 static volatile uint32_t dds_accum_m2 = 0;    
@@ -47,8 +47,8 @@ static volatile uint32_t xorshift_state = VFO_RAND_SEED_INIT;
 static uint32_t current_clk_sys_hz = 133000000;
 
 /**
- * Прецизионный расчет физических параметров PWM в миллигерцах (0.001 Гц).
- * Исключает накопление ошибки округления для шага сетки.
+ * ПЕРЕВЕРНУТАЯ ПАРАМЕТРИЗАЦИЯ ШИМ ПОД КВ (Миллигерцы)
+ * Фиксирует минимальный WRAP (2..4), уводя вес младшего бита FRAC в минимум.
  */
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {
     if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;
@@ -57,34 +57,26 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     VfoParameters params;
     params.target_freq_mhz = (uint32_t)mhz_target;
 
-    // Идеальный делитель в формате с фиксированной точкой 8.4 (умножение на 16)
-    // Масштаб 1000ULL компенсирует входные миллигерцы
-    uint64_t total_div_fixed4 = (clk_sys_hz * 16ULL * 1000ULL) / (2ULL * mhz_target);
-    uint64_t raw_div = total_div_fixed4 >> 4;
+    uint32_t wrap = 2; // Базовое жесткое КВ-окно для меандра
     
-    uint32_t wrap = 2;
-    uint32_t clkdiv_fx4 = 16; 
-
-    if (raw_div <= 2000) {
-        // Высокие частоты (КВ): фиксируем clkdiv около 1.0, играем значением WRAP
-        wrap = raw_div;
-        if (wrap < 2) wrap = 2;
-        // Пересчитываем точный clkdiv под выбранный фиксированный WRAP
-        clkdiv_fx4 = (clk_sys_hz * 16ULL * 1000ULL) / (2ULL * mhz_target * (uint64_t)wrap);
-    } else {
-        // Низкие частоты: фиксируем WRAP повыше для плавности, подбираем clkdiv
-        wrap = 2000;
-        clkdiv_fx4 = (clk_sys_hz * 16ULL * 1000ULL) / (2ULL * mhz_target * (uint64_t)wrap);
-    }
-
-    if (clkdiv_fx4 > 4095) clkdiv_fx4 = 4095; // Предел регистра (255.15)
-    if (clkdiv_fx4 < 16)   clkdiv_fx4 = 16;   // Минимум (1.0)
+    // На частотах ниже 10 МГц плавно увеличиваем wrap, чтобы разгрузить div_int (макс 255)
+    if (mhz_target < 5000000000ULL)  wrap = 4;
+    if (mhz_target < 2000000000ULL)  wrap = 8;
 
     params.pwm_wrap = wrap;
-    params.pwm_base_div_fx4 = clkdiv_fx4;
 
-    // Вычисление 32-битного остатка ошибки для программного MASH-движка
-    uint64_t actual_div_scaled = (uint64_t)clkdiv_fx4 * (uint64_t)wrap;
+    // Рассчитываем крупный clkdiv (формат 8.4) под выбранный маленький wrap
+    // Формула: clkdiv_fx4 = (clk_sys * 16 * 1000) / (2 * wrap * mhz_target)
+    uint64_t clkdiv_fx4 = (clk_sys_hz * 16ULL * 1000ULL) / (2ULL * (uint64_t)wrap * mhz_target);
+
+    // Жесткие лимиты аппаратного регистра CH_DIV (формат 8.4)
+    if (clkdiv_fx4 > 4095) clkdiv_fx4 = 4095; // Максимум 255.15
+    if (clkdiv_fx4 < 16)   clkdiv_fx4 = 16;   // Минимум 1.0
+
+    params.pwm_base_div_fx4 = (uint32_t)clkdiv_fx4;
+
+    // Расчет 32-битного остатка ошибки относительно истинной текущей раскладки ШИМ
+    uint64_t actual_div_scaled = clkdiv_fx4 * (uint64_t)wrap;
     uint64_t pio_denom = mhz_target * 2ULL * actual_div_scaled;
     uint64_t clk_sys_rem = ((clk_sys_hz * 16ULL * 1000ULL) % pio_denom);
     
@@ -96,7 +88,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 }
 
 /**
- * Многокритериальный автотюн PLL. Направлен на минимизацию ошибки dds_step.
+ * Оптимизация автотюна PLL под КВ-раскладку параметров
  */
 static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
@@ -135,7 +127,7 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
 }
 
 /**
- * Единичный шаг дизеринга (Эталонная медленная Си-версия через ОЗУ)
+ * Единичный шаг дизеринга (Эталонная Си-версия через ОЗУ)
  */
 static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_wrap, uint32_t local_div_fx4) {
     uint32_t step = local_step;
@@ -163,9 +155,8 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
     if (dds_accumulator < old_acc) total_correction = 1;
 #endif
 
-    // Применение линейной 12-битной знаковой коррекции напрямую к кадру регистра DIV
     int32_t final_div_fx4 = (int32_t)local_div_fx4 + total_correction;
-    if (final_div_fx4 < 16) final_div_fx4 = 16; // Защита от выхода за физический лимит < 1.0
+    if (final_div_fx4 < 16) final_div_fx4 = 16; 
 
     pwm_hw->slice[uint_slice_num].div = (uint32_t)final_div_fx4;
 }
@@ -185,7 +176,6 @@ static void __not_in_flash_func(vfo_core1_entry)() {
     uint32_t loc_m2_carry_prev = 0;
 #endif
 
-    // Прямой жесткий указатель на физический регистр CH_DIV вашего слайса ШИМ
     volatile uint32_t *pwm_div_reg = &pwm_hw->slice[uint_slice_num].div;
 
     while (true) {
@@ -206,7 +196,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         }
 
 #ifdef VFO_DITHER_FAST
-        // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ КОНВЕЙЕР (БЕЗ ОБРАЩЕНИЙ К ОЗУ) ===
+        // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ КОНВЕЙЕР MASH-2 ===
         int32_t step = l_step;
 
 #ifdef VFO_DITHER_RANDOMIZE
@@ -235,16 +225,11 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         if (loc_acc1 < old_acc) total_correction = 1;
 #endif
 
-        // Прямое сложение коррекции с 12-битной базой. Аппаратный сдвиг компилятор сделает сам.
         int32_t final_div_fx4 = l_div_fx4 + total_correction;
-        
-        // Предотвращаем падение делителя ниже критического физического минимума (1.0 = 16)
         if (__builtin_expect(final_div_fx4 < 16, 0)) final_div_fx4 = 16;
 
-        // Атомарная высокоскоростная STR-запись в шину периферии PWM
         *pwm_div_reg = (uint32_t)final_div_fx4;
 #else
-        // Медленная Си-версия (для верификации)
         dds_accumulator = loc_acc1; xorshift_state = loc_rand_state;
 #ifdef VFO_USE_MASH2
         dds_accum_m2 = loc_acc2; m2_carry_prev = loc_m2_carry_prev;
@@ -262,7 +247,7 @@ static void detach_peripheral_clock() {
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);
 }
 
-// === ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ И ЗАПУСК ГИБРИДНОГО ДВИЖКА ===
+// === ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     multicore_reset_core1(); 
     current_active_tone = VFO_TONE_NONE;
@@ -284,49 +269,42 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     clk_sys_target_hz = optimal_pll.clk_sys_hz;
 #endif
 
-    // Переконфигурация глобального тактирования микроконтроллера
     detach_peripheral_clock(); 
     uint32_t ints_status = save_and_disable_interrupts();
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 12 * 1000000, 12 * 1000000);
     reset_block(RESETS_RESET_PLL_SYS_BITS);
     unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
-
     uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)best_fbdiv);
-    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2); 
+    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2);
     clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, (uint32_t)clk_sys_target_hz, (uint32_t)clk_sys_target_hz);
     restore_interrupts(ints_status);
-
     current_clk_sys_hz = (uint32_t)(((uint64_t)best_fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(best_p1 * best_p2));
-
-    // Инициализация аппаратного периферийного блока PWM (ШИМ)
     gpio_set_function(VFO_OUTPUT_PIN, GPIO_FUNC_PWM);
     uint_slice_num = pwm_gpio_to_slice_num(VFO_OUTPUT_PIN);
     uint_pwm_chan = pwm_gpio_to_channel(VFO_OUTPUT_PIN);
 
-    // Заполнение таблицы IFKP-33 с прецизионным расчетом без накопления ошибки округления
+    // СЕТКА ТОНОВ С ЗАЩИТОЙ ОТ FLOATING POINT ОКРУГЛЕНИЯ И ЧЕСТНЫМ STEP_HZ
     for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
-        double exact_tone_freq = (double)base_freq_hz + ((double)(i * 386) / 33.0);
+        double exact_tone_freq = (double)base_freq_hz + ((double)i * step_hz);
         uint64_t tone_freq_mhz = (uint64_t)(exact_tone_freq * 1000.0);
         ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);
     }
 
-    // Первоначальный запуск аппаратного слайса с базовыми параметрами
     VfoParameters base_p = ifkp_tones[0];
     pwm_set_wrap(uint_slice_num, base_p.pwm_wrap);
     pwm_set_chan_level(uint_slice_num, uint_pwm_chan, base_p.pwm_wrap >> 1);
     pwm_set_clkdiv_int_frac(uint_slice_num, base_p.pwm_base_div_fx4 >> 4, base_p.pwm_base_div_fx4 & 0x0F);
     pwm_set_phase_correct(uint_slice_num, true);
-    pwm_set_enabled(uint_slice_num, false); // Ждем явную команду vfo_operation_set()
+    pwm_set_enabled(uint_slice_num, false); 
 
     vfo_set_tone_instant(0);
 
-    // Холодный старт дизеринг-конвейера на Core 1
     tone_changed = true;
     multicore_launch_core1(vfo_core1_entry); 
 }
 
 /**
- * Мгновенная атомарная смена тона передачи (защищена аппаратным спинлоком)
+ * Мгновенная атомарная смена тона передачи
  */
 void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     if (tone_index >= VFO_IFKP_TONES_COUNT) return; 
@@ -334,11 +312,9 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 
     VfoParameters t = ifkp_tones[tone_index];
 
-    // Синхронно обновляем дважды буферизированные регистры: WRAP и скважность 50%
     pwm_set_wrap(uint_slice_num, t.pwm_wrap);
     pwm_set_chan_level(uint_slice_num, uint_pwm_chan, t.pwm_wrap >> 1);
 
-    // Передаем новые опорные уставки для межъядерного конвейера Core 1
     uint32_t save = spin_lock_blocking(vfo_spin_lock);
     target_pwm_wrap     = t.pwm_wrap;
     target_pwm_base_div = t.pwm_base_div_fx4;
@@ -349,11 +325,7 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     current_active_tone = tone_index;
 }
 
-/**
- * Синхронное включение/выключение генерации (активация радиоэфира)
- */
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     pwm_set_enabled(uint_slice_num, key_down);
     dev_TX_state = key_down;
 }
-

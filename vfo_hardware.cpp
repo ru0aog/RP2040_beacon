@@ -184,11 +184,9 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
     uint32_t step = local_step;
 
 #ifdef VFO_DITHER_RANDOMIZE
-    int32_t r_bits = (int32_t)(vfo_xorshift32() & ((1u << VFO_DITHER_RAND_BITS) - 1));
-    int32_t r_dither = r_bits - (1 << (VFO_DITHER_RAND_BITS - 1));
-    if (r_dither == -(1 << (VFO_DITHER_RAND_BITS - 1))) {
-        r_dither = 0; 
-    }
+    // Синхронизировано с Core 1: Быстрый беспереходный дизер с мат. ожиданием строго 0.0
+    int32_t r_bits = (int32_t)(vfo_xorshift32() & 0x0Fu);
+    int32_t r_dither = (r_bits << 1) - 15; 
     step = (uint32_t)((int32_t)step + r_dither);
 #endif
 

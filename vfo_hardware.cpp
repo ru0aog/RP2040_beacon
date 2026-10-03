@@ -321,29 +321,26 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 
     VfoParameters t = ifkp_tones[tone_index];
 
-    // Захватываем аппаратный спинлок ДО изменения каких-либо параметров
     uint32_t save = spin_lock_blocking(vfo_spin_lock);
 
-    // 1. Атомарно обновляем буферизированные регистры ШИМ внутри критической секции
     pwm_set_wrap(uint_slice_num, t.pwm_wrap);
+    
+    // Гарантируем строгую установку 50% скважности для нового тона прямо во время хода счетчика
     pwm_set_chan_level(uint_slice_num, uint_pwm_chan, t.pwm_wrap >> 1);
+    pwm_hw->slice[uint_slice_num].ctr = 0;
 
-    // 2. Сбрасываем резервные переменные медленной С-ветки под защитой лока
     dds_accumulator = 0;
 #ifdef VFO_USE_MASH2
     dds_accum_m2 = 0;
     m2_carry_prev = 0;
 #endif
 
-    // 3. Пушим новые целевые уставки для регистрового конвейера Core 1
     target_pwm_wrap     = t.pwm_wrap;
     target_pwm_base_div = t.pwm_base_div_fx4;
     dds_step            = t.dds_step; 
     tone_changed        = true; 
 
-    // Освобождаем лок — теперь Core 1 мгновенно подхватит согласованный пакет данных
     spin_unlock(vfo_spin_lock, save);
-
     current_active_tone = tone_index;
 }
 

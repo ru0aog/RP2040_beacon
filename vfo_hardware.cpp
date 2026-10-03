@@ -1,6 +1,6 @@
 ﻿/**  
  * ============================================================================  
- *  vfo_hardware.cpp — Реализация гибридного PWM/MASH-2 двигателя КВ VFO
+ *  vfo_hardware.cpp — Реализация гибридного PWM/MASH-2 алгоритма КВ VFO
  * ============================================================================ 
  */
 
@@ -312,7 +312,8 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
 }
 
 /**
- * Мгновенная атомарная смена тона передачи
+ * Мгновенная атомарная смена тона передачи.
+ * Обеспечивает абсолютную фазовую когерентность IFKP за счет блокировки гонок ШИМ-буферов.
  */
 void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     if (tone_index >= VFO_IFKP_TONES_COUNT) return; 
@@ -320,27 +321,32 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 
     VfoParameters t = ifkp_tones[tone_index];
 
-    // Синхронно сбрасываем резервные переменные медленной С-ветки (для тестов/сверки)
+    // Захватываем аппаратный спинлок ДО изменения каких-либо параметров
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);
+
+    // 1. Атомарно обновляем буферизированные регистры ШИМ внутри критической секции
+    pwm_set_wrap(uint_slice_num, t.pwm_wrap);
+    pwm_set_chan_level(uint_slice_num, uint_pwm_chan, t.pwm_wrap >> 1);
+
+    // 2. Сбрасываем резервные переменные медленной С-ветки под защитой лока
     dds_accumulator = 0;
 #ifdef VFO_USE_MASH2
     dds_accum_m2 = 0;
     m2_carry_prev = 0;
 #endif
 
-    // Буферизированные аппаратно регистры периода ШИМ изменятся на rollover
-    pwm_set_wrap(uint_slice_num, t.pwm_wrap);
-    pwm_set_chan_level(uint_slice_num, uint_pwm_chan, t.pwm_wrap >> 1);
-
-    // Атомарно пушим уставки и требуем сброса фазы от конвейера Core 1
-    uint32_t save = spin_lock_blocking(vfo_spin_lock);
+    // 3. Пушим новые целевые уставки для регистрового конвейера Core 1
     target_pwm_wrap     = t.pwm_wrap;
     target_pwm_base_div = t.pwm_base_div_fx4;
     dds_step            = t.dds_step; 
     tone_changed        = true; 
+
+    // Освобождаем лок — теперь Core 1 мгновенно подхватит согласованный пакет данных
     spin_unlock(vfo_spin_lock, save);
 
     current_active_tone = tone_index;
 }
+
 
 
 /**

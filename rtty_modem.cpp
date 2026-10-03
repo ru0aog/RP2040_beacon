@@ -253,7 +253,9 @@ static void send_rtty_code(uint8_t code) {
 
 // Главная функция передачи текста кодом МТК-2
 void send_rtty_raw(const char* s) {
-    current_reg = LAT;  // Начинаем всегда с латинского регистра
+    // Начинаем всегда с латинского регистра
+    current_reg = LAT;
+    send_rtty_code(MTK2_LAT);
 
     while (*s) {
         if (pc_file_written || soft_restart_flag) break; 

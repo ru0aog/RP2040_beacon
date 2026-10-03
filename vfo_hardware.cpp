@@ -367,9 +367,50 @@ static void detach_peripheral_clock() {
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);
 }
 
+
+
+/**
+ * Прецизионный расчет параметров PIO в МИЛЛИГЕРЦАХ (0.001 Гц).
+ * Полностью исключает накопление ошибки округления для шага сетки тонов.
+ */
+static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {
+    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)
+    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;
+    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;
+
+    uint64_t clocks_per_period = 2ULL; 
+    uint64_t vfo_denom = mhz_target * clocks_per_period; 
+    
+    // Масштабирующий коэффициент 1000ULL переводит миллигерцы в базовые Герцы
+    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;
+    
+    VfoParameters params;
+    params.pio_int  = pio_div_fixed8 >> 8;
+    params.pio_frac = pio_div_fixed8 & 0xFFu;
+    
+    // Для совместимости со структурой сохраняем в chz (сантигерцах)
+    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL); 
+
+    if (params.pio_int < 2) { params.pio_int = 2; params.pio_frac = 0; }
+
+    // Расчет 32-битного остатка ошибки DDS
+    uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;
+    uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
+    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
+    
+    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));
+    
+    return params;
+}
+
+
+
+
+
 /**
  * Прецизионный целочисленный расчет параметров в сантигерцах.
  */
+ /*
 static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_target) {
     if (chz_target < 10000000ULL)   chz_target = 10000000ULL;
     if (chz_target > 3000000000ULL) chz_target = 3000000000ULL;
@@ -395,12 +436,13 @@ static VfoParameters calculate_raw_params_chz(uint64_t clk_sys_hz, uint64_t chz_
     
     return params;
 }
-
+*/
 
 /**
  * Расчет аппаратных коэффициентов частоты с Grid Snapping от внешней clk_sys_hz.
  * Изменено: Метрика оценивает исключительно ошибку dds_step.
  */
+ /*
 static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
 
@@ -428,6 +470,9 @@ static VfoParameters calculate_freq_params(uint64_t clk_sys_hz, unsigned int tar
     return calculate_raw_params_chz(clk_sys_hz, base_target_chz);
 #endif
 }
+*/
+
+
 
 
 /**
@@ -573,10 +618,43 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     pio_sm_init(lo_pio, lo_sm, lo_offset, &c);
     pio_sm_set_enabled(lo_pio, lo_sm, true);
 
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
-        unsigned int tone_freq = (unsigned int)(base_freq_hz + (i * step_hz));
-        ifkp_tones[i] = calculate_freq_params(current_clk_sys_hz, tone_freq);
+    // 1. Рассчитываем точную базовую частоту в сантигерцах
+    uint64_t base_target_chz = (uint64_t)base_freq_hz * 100ULL;
+    uint64_t snapped_base_chz = base_target_chz;
+
+#ifdef VFO_SNAP_TO_GRID
+    // Снаппим ТОЛЬКО базовый тон несущей в окне +-0.1 Гц (+-10 сантигерц)
+    uint32_t min_dds_metric = 0xFFFFFFFFu;
+    for (int32_t offset_chz = -10; offset_chz <= 10; offset_chz++) {
+        uint64_t candidate_chz = (uint64_t)((int64_t)base_target_chz + offset_chz);
+        
+        // Передаем current_clk_sys_hz и считаем параметры именно для candidate_chz, а не base
+        VfoParameters candidate_params = calculate_raw_params_mhz(current_clk_sys_hz, candidate_chz * 10ULL);
+        
+        uint32_t dstep = candidate_params.dds_step;
+        uint32_t dist_to_0 = dstep;
+        uint32_t dist_to_max = 0xFFFFFFFFu - dstep;
+        uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
+
+        if (current_metric < min_dds_metric) {
+            min_dds_metric = current_metric;
+            snapped_base_chz = candidate_chz;
+        }
     }
+#endif
+
+    // Переводим найденную идеальную опорную частоту обратно в миллигерцы
+    uint64_t base_freq_mhz = snapped_base_chz * 10ULL;
+    uint64_t step_mhz = (uint64_t)(step_hz * 1000.0);
+
+    // 2. Заполняем таблицу тонов: каждый следующий тон строго равен base + i * step
+    // Это гарантирует математически ровную сетку IFKP без рассинхронизации фазы
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
+        uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);
+        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);
+    }
+
+    vfo_set_tone_instant(0);
 
     // === ИСТИННЫЙ ДИАГНОСТИЧЕСКИЙ ВЫВОД ПАРАМЕТРОВ БАЗОВОГО ТОНА В SERIAL ===
     VfoParameters real_base_params = ifkp_tones[0]; // Берем параметры CW несущей из рантайм-таблицы

@@ -37,7 +37,9 @@
 #define VFO_DITHER_ON_CORE1      // Вынос горячего цикла на изолированное ядро
 
 // Настройка формирования фронтов CW (Pulse Shaping)
-#define VFO_CW_SHAPE_MS       5    // Время нарастания и спада фронта в миллисекундах (стандарт 4..6 мс)
+#define VFO_CW_SHAPE_MS       5    // Время фронта для CW (телеграф), мс
+#define VFO_DIGI_SHAPE_US     500  // Время фронта для RTTY/IFKP (цифра), мкс
+
 
 extern int pin_freq_out; 
 #define VFO_OUTPUT_PIN       (pin_freq_out)

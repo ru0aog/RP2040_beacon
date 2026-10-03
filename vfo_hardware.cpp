@@ -34,7 +34,6 @@ static volatile uint32_t dds_step = 0;
 static volatile uint32_t target_pwm_wrap = 2;
 static volatile uint32_t target_pwm_base_div = 16;  
 static volatile bool tone_changed = false; 
-static volatile bool reset_phase = false; // Флаг принудительной фазовой когерентности
 
 // Резервное состояние для медленной Си-ветки
 static volatile uint32_t dds_accumulator = 0; 
@@ -58,24 +57,23 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     VfoParameters params;
     params.target_freq_mhz = (uint32_t)mhz_target;
 
-    uint32_t wrap = 2; // Базовое жесткое КВ-окно для меандра
+    // Динамический компромиссный WRAP под разные КВ диапазоны
+    uint32_t wrap = 2; 
+    if (mhz_target < 4000000000ULL)   wrap = 32; // 80м: отличный шейпинг, девиация MASH ~700 Гц
+    else if (mhz_target < 8000000000ULL)  wrap = 16; // 40м: разумный баланс амплитуды и фазы
+    else if (mhz_target < 15000000000ULL) wrap = 4;  // 20м: приоритет чистоты спектра частоты
     
-    // На частотах ниже 10 МГц плавно увеличиваем wrap, чтобы разгрузить div_int (макс 255)
-    if (mhz_target < 5000000000ULL)  wrap = 4;
-    if (mhz_target < 2000000000ULL)  wrap = 8;
-
     params.pwm_wrap = wrap;
 
-    // Рассчитываем крупный clkdiv (формат 8.4) под выбранный маленький wrap
+    // Рассчитываем крупный clkdiv (формат 8.4) под выбранный компромиссный wrap
     uint64_t clkdiv_fx4 = (clk_sys_hz * 16ULL * 1000ULL) / (2ULL * (uint64_t)wrap * mhz_target);
 
-    // Жесткие лимиты аппаратного регистра CH_DIV (формат 8.4)
-    if (clkdiv_fx4 > 4095) clkdiv_fx4 = 4095; // Максимум 255.15
-    if (clkdiv_fx4 < 16)   clkdiv_fx4 = 16;   // Минимум 1.0
+    if (clkdiv_fx4 > 4095) clkdiv_fx4 = 4095; 
+    if (clkdiv_fx4 < 16)   clkdiv_fx4 = 16;   
 
     params.pwm_base_div_fx4 = (uint32_t)clkdiv_fx4;
 
-    // Расчет 32-битного остатка ошибки относительно истинной текущей раскладки ШИМ
+    // Расчет 32-битного остатка ошибки (исправлен нейминг на vfo_denom)
     uint64_t actual_div_scaled = clkdiv_fx4 * (uint64_t)wrap;
     uint64_t vfo_denom = mhz_target * 2ULL * actual_div_scaled;
     uint64_t clk_sys_rem = ((clk_sys_hz * 16ULL * 1000ULL) % vfo_denom);
@@ -86,6 +84,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
     return params;
 }
+
 
 /**
  * Оптимизация автотюна PLL под КВ-раскладку параметров
@@ -349,15 +348,13 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
  * Защищает эфир от «щелчков» (key clicks) за счет плавного изменения скважности (Duty Cycle).
  */
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
-    // Получаем текущее значение WRAP и целевой уровень 50% меандра для активного тона
     uint32_t current_wrap = target_pwm_wrap;
     uint32_t target_level = current_wrap >> 1;
     
-    uint32_t total_shaping_time_us = VFO_CW_SHAPE_MS * 1000;
+    // Переведено на микросекунды для защиты таймингов RTTY/IFKP
+    uint32_t total_shaping_time_us = VFO_DIGI_SHAPE_US; 
 
     if (key_down && !dev_TX_state) {
-        // --- НАРАСТАНИЕ ФРОНТА (RISE) ---
-        // Сначала принудительно ставим скважность в 0% (тишина) и включаем генератор
         pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
         pwm_set_enabled(uint_slice_num, true);
         dev_TX_state = true;
@@ -367,38 +364,31 @@ void __not_in_flash_func(vfo_operation_set)(bool key_down) {
             uint32_t elapsed = time_us_32() - start_time;
             if (elapsed >= total_shaping_time_us) break;
 
-            // Вычисляем текущий уровень скважности пропорционально прошедшему времени
             uint32_t current_level = (elapsed * target_level) / total_shaping_time_us;
             pwm_set_chan_level(uint_slice_num, uint_pwm_chan, current_level);
-            
-            __compiler_memory_barrier(); // Защита от избыточной оптимизации компилятора
+            __compiler_memory_barrier(); 
         }
-        // Фиксируем чистый 50% меандр в конце фронта
         pwm_set_chan_level(uint_slice_num, uint_pwm_chan, target_level);
 
     } else if (!key_down && dev_TX_state) {
-        // --- СПАД ФРОНТА (FALL) ---
         uint32_t start_time = time_us_32();
         while (true) {
             uint32_t elapsed = time_us_32() - start_time;
             if (elapsed >= total_shaping_time_us) break;
 
-            // Плавно уменьшаем скважность от 50% вниз до 0%
             int32_t current_level = (int32_t)target_level - (int32_t)((elapsed * target_level) / total_shaping_time_us);
             if (current_level < 0) current_level = 0;
             
             pwm_set_chan_level(uint_slice_num, uint_pwm_chan, (uint32_t)current_level);
-            
             __compiler_memory_barrier();
         }
-        // Глушим ШИМ-генератор физически и снимаем флаг TX
         pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
         pwm_set_enabled(uint_slice_num, false);
         dev_TX_state = false;
-        
         current_active_tone = VFO_TONE_NONE;
     }
 }
+
 
 
 /**
@@ -438,16 +428,12 @@ void __not_in_flash_func(vfo_operation_set_cos)(bool key_down) {
             uint32_t elapsed = time_us_32() - start_time;
             if (elapsed >= total_shaping_time_us) break;
 
-            // Вычисляем индекс в таблице (0..64) пропорционально времени
             uint32_t idx = (elapsed * 64) / total_shaping_time_us;
-            
-            // Интерполируем уровень: текущий_левел = (target_level * table[idx]) / 256
             uint32_t current_level = (target_level * raised_cosine_table[idx]) >> 8;
             
             pwm_set_chan_level(uint_slice_num, uint_pwm_chan, current_level);
             __compiler_memory_barrier();
         }
-        // В конце фронта жестко фиксируем идеальные 50% меандра
         pwm_set_chan_level(uint_slice_num, uint_pwm_chan, target_level);
 
     } else if (!key_down && dev_TX_state) {
@@ -457,20 +443,17 @@ void __not_in_flash_func(vfo_operation_set_cos)(bool key_down) {
             uint32_t elapsed = time_us_32() - start_time;
             if (elapsed >= total_shaping_time_us) break;
 
-            // ИСПРАВЛЕНИЕ: Инвертируем сам индекс. Время идет вперед (0->64), индекс назад (64->0)
+            // ИСПРАВЛЕНО: Инверсия индекса времени исключает залипание огибающей на ВЧ
             uint32_t idx = 64 - ((elapsed * 64) / total_shaping_time_us);
-            
-            // Теперь просто умножаем на спадающий коэффициент таблицы без вычитания
             uint32_t current_level = (target_level * raised_cosine_table[idx]) >> 8;
             
             pwm_set_chan_level(uint_slice_num, uint_pwm_chan, current_level);
             __compiler_memory_barrier();
         }
-        // Полностью обесточиваем выход ШИМ и выключаем слайс
         pwm_set_chan_level(uint_slice_num, uint_pwm_chan, 0);
         pwm_set_enabled(uint_slice_num, false);
         dev_TX_state = false;
-        
         current_active_tone = VFO_TONE_NONE;
     }
 }
+

@@ -411,7 +411,7 @@ static const uint16_t raised_cosine_table[65] = {
  * Синхронное управление ключом генератора с косинусным формированием фронтов (Raised Cosine).
  * Обеспечивает кристально чистый эфир без побочных излучений («щелчков»).
  */
-void __not_in_flash_func(vfo_operation_set_cos)(bool key_down) {
+void __not_in_flash_func(vfo_operation_set_cw)(bool key_down) {
     uint32_t current_wrap = target_pwm_wrap;
     uint32_t target_level = current_wrap >> 1;
     

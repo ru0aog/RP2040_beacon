@@ -62,6 +62,6 @@ extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
 void vfo_operation_set(bool key_down);     // Вызывается в реальном времени из основного цикла RTTY/IFKP
-void vfo_operation_set_cos(bool key_down); // Вызывается в реальном времени из основного цикла CW
+void vfo_operation_set_cw(bool key_down);  // Вызывается в реальном времени из основного цикла CW
 
 #endif // VFO_HARDWARE_H

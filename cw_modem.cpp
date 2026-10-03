@@ -110,7 +110,7 @@ void prepare_cw_frequency(uint32_t freq_hz) {
         Serial.print(format_freq(freq_hz)); Serial.println(" Гц");
     }
     vfo_hardware_init(freq_hz, 10.0);
-    vfo_operation_set(false);   // отключить генерацию программного VFO
+    vfo_operation_set_cw(false);   // отключить генерацию программного VFO для CW
   }
 }
 
@@ -146,9 +146,9 @@ static void cw_delay(uint32_t ms) {
 static void send_cw_element(bool is_dash) {
     if (pc_file_written || soft_restart_flag) return;
 
-
     // НАЖАТИЕ КЛЮЧА: Открываем выход генерации
-    VFO_TX_ON();             // запустить выход частоты TX
+    if (device_SI[0]) { VFO_TX_ON();   }        // запустить выход частоты TX
+        else { vfo_operation_set_cw(true); }    // запустить генерацию программного VFO для CW
     ZERO_LED_RED_ON();
 
     // Длина тире равна 3-м точкам
@@ -156,7 +156,8 @@ static void send_cw_element(bool is_dash) {
     cw_delay(duration);
 
     // ОТЖАТИЕ КЛЮЧА: Глушим выход генерации
-    VFO_TX_OFF();            // отключить выход частоты TX
+    if (device_SI[0]) { VFO_TX_OFF();   }       // отключить выход частоты TX
+        else { vfo_operation_set_cw(false); }   // отключить генерацию программного VFO для CW
     ZERO_LED_OFF();
 
     // Обязательная пауза между элементами одного знака = 1 точка

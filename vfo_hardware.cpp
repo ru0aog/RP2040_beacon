@@ -297,11 +297,13 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
         // Линейный беспереходный расчет дизера под фиксированные 4 бита (VFO_DITHER_RAND_BITS)
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
-        int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu);
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu);
+        int32_t r_bits = (int32_t)(loc_rand_state & 0x03u);
         
         // Умножаем на 2 и вычитаем 15. Получаем симметричный ряд нечетных чисел от -15 до +15.
         // Математическое ожидание строго равно 0.0
-        step += ((r_bits << 1) - 15); 
+        // step += ((r_bits << 1) - 15); 
+        step += ((r_bits << 1) - 3); // Ряд: -3, -1, +1, +3
 #endif
 
         int32_t total_correction = 0;

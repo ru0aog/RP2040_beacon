@@ -97,6 +97,7 @@
 #include <hardware/watchdog.h>
 #include <hardware/adc.h>
 #include "hardware/divider.h"
+#include "hardware/structs/ssi.h"   // ssi_hw->baudr — делитель XIP_SSI
 #include "pico/multicore.h"
 #include "vfo_hardware.h"
 #include "file_manager.h"
@@ -111,6 +112,8 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz); // Глобальный (без static)
 static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); // Синхронизировано имя
 static vreg_voltage vsel_for(uint64_t clk_hz);
+static uint64_t vfo_base_mhz = 0;   // базовый тон сетки, мГц  
+static uint64_t vfo_step_mhz = 0;   // шаг сетки, мГц
 
 
 // Глобальные профили тактирования (static полностью удалены для extern-связывания)
@@ -208,77 +211,73 @@ static uint32_t cached_base_freq_hz = 3500000;
  *  
  * @see vfo_hardware_init(), vfo_find_optimal_pll()  
  */
-static void detach_peripheral_clock() {
-    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);
+static void __not_in_flash_func(detach_peripheral_clock)() {  
+    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);  
 }
 
 
 
-/**
- * @brief Безопасное динамическое перепрограммирование pll_sys и напряжения ядра vreg.
- * 
- * Осуществляет двухранговый сдвиг частоты и питания. Защищено от зависания периферии
- * доменным детачем clk_peri и критической секцией запрета прерываний.
- * 
- * @param fbdiv  Коэффициент обратной связи PLL (30..150)
- * @param p1     Первый постделитель VCO (2..6)
- * @param p2     Второй постделитель VCO (1..2)
- * @param vsel   Целевое напряжение ядра (например, VREG_VOLTAGE_1_20 или VREG_VOLTAGE_DEFAULT)
- */
-static void vfo_set_clk_sys(const PllConfig& cfg, uint32_t vsel) {
-    // Вычисляем будущую целевую частоту процессора
-    uint32_t target_clk_hz = (uint32_t)cfg.clk_sys_hz;
-    
-    // Определяем направление изменения частоты шины
-    bool is_overclocking = (target_clk_hz > current_clk_sys_hz);
-
-    // [РАНГ 1: ПОВЫШЕНИЕ] Если гоним частоту вверх — СНАЧАЛА поднимаем напряжение питания ядра
-    if (is_overclocking) {
-        vreg_set_voltage((vreg_voltage)vsel);
-        busy_wait_us(500); // Даем время встроенному стабилизатору выйти на полку стабильности
-    }
-
-    // Изолируем домен периферии clk_peri от системного генератора
-    detach_peripheral_clock(); 
-
-    // Входим в критическую секцию ядра: запрет прерываний для защиты конвейера инструкций
-    uint32_t ints_status = save_and_disable_interrupts();
-
-    // Переводим clk_sys на стабильный опорный кварц XOSC (12 МГц)
-    clock_configure(clk_sys, 
-                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, 
-                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 
-                    12 * 1000000, 
-                    12 * 1000000);
-
-    // Сбрасываем и намертво останавливаем аппаратный блок PLL_SYS
-    reset_block(RESETS_RESET_PLL_SYS_BITS);
-    unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
-
-    // Рассчитываем номинал частоты VCO под выбранный fbdiv
-    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv);
-
-    // Переинициализируем аппаратные квадранты PLL с новыми делителями
-    pll_init(pll_sys, 1, vco_nominal_hz, cfg.p1, cfg.p2); 
-
-    // Возвращаем тактирование clk_sys на разогнанный PLL_SYS
-    clock_configure(clk_sys, 
-                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, 
-                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, 
-                    target_clk_hz, 
-                    target_clk_hz);
-
-    // Выходим из критической секции ядра, возвращая маску прерываний
-    restore_interrupts(ints_status);
-
-    // Фиксируем фактическую системную частоту в глобальной рантайм-переменной
-    current_clk_sys_hz = target_clk_hz;
-
-    // [РАНГ 2: ПОНИЖЕНИЕ] Если частоту сбросили вниз — ТОЛЬКО ТЕПЕРЬ безопасно понижаем вольтаж ядра
-    if (!is_overclocking) {
-        busy_wait_us(100); // Небольшая пауза для релаксации емкостей шины питания
-        vreg_set_voltage((vreg_voltage)vsel);
-    }
+/**  
+ * @brief Безопасное динамическое перепрограммирование pll_sys и напряжения ядра vreg.  
+ *  
+ * Осуществляет двухранговый сдвиг частоты и питания. Защищено от зависания  
+ * периферии доменным детачем clk_peri и критической секцией запрета прерываний.  
+ * Функция исполняется из SRAM (__not_in_flash_func): в разгоне XIP-доступ к  
+ * флэшу ненадёжен, и сам путь переключения не должен зависеть от него.  
+ *  
+ * Дополнительно пересчитывает делитель XIP_SSI (BAUDR) — частота QSPI  
+ * флэша равна clk_sys / BAUDR; при clk_sys > 200 МГц штатный делитель 2  
+ * выдаёт >100 МГц на SPI-линию, что выходит за пределы большинства  
+ * QSPI-флэшей (~104-133 МГц) и убивает XIP-доступ. Делитель выбирается  
+ * так, чтобы SCK <= VFO_FLASH_SCK_MAX_HZ; BAUDR на RP2040 всегда чётный.  
+ *  
+ * @param cfg   Конфигурация PLL: fbdiv, p1, p2, clk_sys_hz, vsel, is_oc  
+ * @param vsel  Целевое напряжение ядра (например, VREG_VOLTAGE_1_20)  
+ *  
+ * @note Смена BAUDR выполняется ПОКА clk_sys ещё на XOSC (12 МГц) —  
+ *       регистр пишется безопасно; после возврата clk_sys на PLL_SYS  
+ *       флэш-контроллер уже работает на новом делителе.  
+ */  
+static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel) {  
+    uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.p1 * cfg.p2));  
+    bool is_overclocking = (target_clk_hz > current_clk_sys_hz);  
+  
+    if (is_overclocking) {  
+        vreg_set_voltage((vreg_voltage)vsel);  
+        busy_wait_us(500);  
+    }  
+  
+    detach_peripheral_clock();  
+    uint32_t ints_status = save_and_disable_interrupts();  
+  
+    clock_configure(clk_sys,  
+                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
+                    VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
+  
+    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv);  
+    pll_init(pll_sys, 1, vco_nominal_hz, cfg.p1, cfg.p2);  
+  
+    clock_configure(clk_sys,  
+                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
+                    target_clk_hz, target_clk_hz);  
+  
+    // === ПЕРЕСЧЁТ ДЕЛИТЕЛЯ XIP/SSI: флэш не должен разгоняться вместе с ядром ===  
+    // SCK флэша = clk_sys / BAUDR. Держим SCK <= ~100 МГц — иначе XIP-выборки  
+    // (включая хвост самой этой функции после возврата на PLL) идут за спеком.  
+        uint32_t ssi_baud = (uint32_t)((target_clk_hz + 99999999ULL) / 100000000ULL) * 2u;  
+        if (ssi_baud < 2u)    ssi_baud = 2u;      // аппаратный минимум, только чётные  
+        if (ssi_baud > 34u)   ssi_baud = 34u;     // потолок 340 МГц -> 100 МГц SCK  
+        ssi_hw->baudr = ssi_baud;                 // ssi_hw из hardware/structs/ssi.h  
+  
+    restore_interrupts(ints_status);  
+    current_clk_sys_hz = target_clk_hz;  
+  
+    if (!is_overclocking) {  
+        busy_wait_us(100);  
+        vreg_set_voltage((vreg_voltage)vsel);  
+    }  
 }
 
 
@@ -302,7 +301,9 @@ void vfo_clk_boost_enter(void) {
   
     // 1. Частота и питание (внутри vfo_set_clk_sys — детач clk_peri, XOSC, сброс PLL)  
     vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);
-  
+    
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
+
     // 2. Обязательный пересчёт PIO-делителей под новую clk_sys (иначе частота уедет)  
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
     uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;  
@@ -315,7 +316,8 @@ void vfo_clk_boost_enter(void) {
     tone_changed = true;                   // Core 1 сбросит аккумуляторы  
     spin_unlock(vfo_spin_lock, save);  
   
-    clk_boosted = true;                    // флаг для диспетчера защиты loop()  
+    clk_boosted = true;                    // флаг для диспетчера защиты loop()
+    Serial.printf("[BOOST] clk_sys %lu MHz\n", (unsigned long)(pll_overclock.clk_sys_hz / 1000000ULL));
 }  
   
 /**  
@@ -324,9 +326,10 @@ void vfo_clk_boost_enter(void) {
  */  
 void vfo_clk_boost_exit(void) {  
     if (!clk_boosted) return;  
-    clk_boosted = false;  
   
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
+
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
   
     // Пересчёт таблицы тонов обратно под номинальную clk_sys  
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
@@ -338,7 +341,9 @@ void vfo_clk_boost_exit(void) {
     }  
     current_active_tone = VFO_TONE_NONE;  
     tone_changed = true;  
-    spin_unlock(vfo_spin_lock, save);  
+    spin_unlock(vfo_spin_lock, save);
+    clk_boosted = false;  
+    Serial.printf("[BOOST] clk_sys %lu MHz (nominal)\n", (unsigned long)(pll_nominal.clk_sys_hz / 1000000ULL)); 
 }
 
 
@@ -826,7 +831,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
     
     // Дефолтная безопасная конфигурация на случай сбоя сканирования
-    PllConfig best_pll = { 133, 6, 2, 133000000ULL, false };
+    PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
 
     uint32_t min_dds_metric = 0xFFFFFFFFu;
     uint32_t min_frac_metric = 255;
@@ -1086,9 +1091,9 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     }
 #endif
 
-    // Переводим найденную идеальную опорную частоту обратно в миллигерцы
-    uint64_t base_freq_mhz = snapped_base_chz * 10ULL;
-    uint64_t step_mhz = (uint64_t)(step_hz * 1000.0);
+    // Переводим найденную идеальную опорную частоту обратно в миллигерцы  
+    vfo_base_mhz = snapped_base_chz * 10ULL;  
+    vfo_step_mhz = (uint64_t)(step_hz * 1000.0);
 
     // 2. Заполняем таблицу тонов: каждый следующий тон строго равен base + i * step
     // Это гарантирует математически ровную сетку IFKP без рассинхронизации фазы

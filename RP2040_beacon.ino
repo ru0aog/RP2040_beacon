@@ -985,7 +985,7 @@ void loop() {
   // РЕЖИМ 3. ЦЕПОЧКА
   // =========================================================================
   // Проверка запуска трехмодовой цепочки из расписания
-  if (is_time_to_transmit(3) && !is_transmitting) {
+  if ((is_time_to_transmit(3) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
        Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
        is_transmitting = true;
        tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting

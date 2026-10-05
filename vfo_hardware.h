@@ -122,4 +122,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
 void vfo_operation_set(bool key_down);          // функция активации программного VFO
 
+void vfo_find_max_stable_clock(void);
+
 #endif // VFO_HARDWARE_H

@@ -99,6 +99,16 @@
 #include "file_manager.h"
 
 
+// ============================================================================
+// ПРОТОТИПЫ (ОБЪЯВЛЕНИЯ) ВНУТРЕННИХ ФУНКЦИЙ ФАЙЛА
+// ============================================================================
+static void detach_peripheral_clock();
+static void __not_in_flash_func(vfo_set_clk_sys)(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t vsel); // Исправлено имя
+static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
+static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, int run_stage); // Исправлен static
+static void vfo_fill_tones_table(); // Исправлен static
+
+
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
 static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };
 static const pio_program_t pio_square_program = { 
@@ -259,16 +269,62 @@ static void vfo_set_clk_sys(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t v
 
 
 
-
-
-
-
-
-
-
-
-
-
+/**  
+ * @brief Вход в режим boost: clk_sys -> pll_overclock только для PIO-DDS TX.  
+ *  
+ * Поднимает VREG (по уровню из профиля) ДО повышения частоты,  
+ * затем пересчитывает ifkp_tones под новую clk_sys под спинлоком  
+ * и сигнализирует Core 1 через tone_changed.  
+ */  
+void vfo_clk_boost_enter(void) {  
+    if (clk_boosted) return;  
+    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return; // OC-профиля нет  
+  
+    uint32_t vsel = VREG_VOLTAGE_1_30;  
+    if (pll_overclock.clk_sys_hz <= 200000000ULL)      vsel = VREG_VOLTAGE_1_20;  
+    else if (pll_overclock.clk_sys_hz <= 266000000ULL) vsel = VREG_VOLTAGE_1_25;  
+  
+    // 1. Частота и питание (внутри vfo_set_clk_sys — детач clk_peri, XOSC, сброс PLL)  
+    vfo_set_clk_sys(pll_overclock.fbdiv, pll_overclock.p1, pll_overclock.p2, vsel);  
+  
+    // 2. Обязательный пересчёт PIO-делителей под новую clk_sys (иначе частота уедет)  
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
+    uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;  
+    uint64_t step_mhz = (uint64_t)(cached_step_hz * 1000.0);  
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
+        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,  
+                                                 base_mhz + (uint64_t)i * step_mhz);  
+    }  
+    current_active_tone = VFO_TONE_NONE;   // принудительная перезагрузка тона  
+    tone_changed = true;                   // Core 1 сбросит аккумуляторы  
+    spin_unlock(vfo_spin_lock, save);  
+  
+    clk_boosted = true;                    // флаг для диспетчера защиты loop()  
+}  
+  
+/**  
+ * @brief Выход из boost: возврат на pll_nominal и штатное напряжение.  
+ * Понижение VREG выполняется ПОСЛЕ снижения частоты (логика в vfo_set_clk_sys).  
+ */  
+void vfo_clk_boost_exit(void) {  
+    if (!clk_boosted) return;  
+    clk_boosted = false;  
+  
+    vfo_set_clk_sys(pll_nominal.fbdiv, pll_nominal.p1, pll_nominal.p2,  
+                    VREG_VOLTAGE_DEFAULT);  
+  
+    // Пересчёт таблицы тонов обратно под номинальную clk_sys  
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
+    uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;  
+    uint64_t step_mhz = (uint64_t)(cached_step_hz * 1000.0);  
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
+        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,  
+                                                 base_mhz + (uint64_t)i * step_mhz);  
+    }  
+    current_active_tone = VFO_TONE_NONE;  
+    tone_changed = true;  
+    spin_unlock(vfo_spin_lock, save);  
+}
 
 
 
@@ -1048,6 +1104,132 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
 #endif
 }
 
+
+
+/**  
+ * @brief Стресс-тест: поиск максимальной стабильной clk_sys ядра.  
+ *  
+ * Поднимает напряжение ядра и последовательно перебирает валидные  
+ * конфигурации PLL по нарастающей clk_sys (от текущей номинальной до  
+ * VFO_CLK_SYS_MAX_HZ). На каждой ступени выполняется короткая проверка  
+ * стабильности; по завершении возвращает систему на pll_nominal и  
+ * записывает найденный максимум в pll_overclock.  
+ *  
+ * После КАЖДОГО успешно пройденного шага в Serial выводится строка  
+ * вида:  
+ *   [OCTEST] OK: clk_sys=300.00 MHz (fbdiv=125, p1=5, p2=1), VSEL=1.35V  
+ * Шаг, на котором тест упал (зависание/сброс watchdog) — при ребуте  
+ * печатается из scratch-регистра как FAIL с теми же параметрами.  
+ *  
+ * @note Вызов только вручную через консольную команду "OCTEST",  
+ *       вне передачи, при is_transmitting == false.  
+ */  
+// === СТРЕСС-ТЕСТ: ПОИСК ИНДИВИДУАЛЬНОГО ПОТОЛКА КРИСТАЛЛА ===  
+// Внимание: тест РАЗРУШИТЕЛЕН для текущего сеанса — зависание на сбойной  
+// ступени нормально, параметры последнего OK-шага сохраняются во Flash/RAM.  
+// Перед запуском: is_transmitting == false, Flash-операции запрещены.  
+void vfo_find_max_stable_clock(void) {  
+    // Стартовая точка — номинал; верхний предел — VFO_CLK_SYS_MAX_HZ (340)  
+    const uint64_t CLK_START_HZ = VFO_CLK_SYS_NOMINAL_HZ;  
+    const uint64_t CLK_CEIL_HZ  = VFO_CLK_SYS_MAX_HZ;  
+  
+    // Таблица порогов напряжения ядра: выше частоты — нужен более высокий VSEL  
+    struct VselStep { uint64_t max_hz; vreg_voltage vsel; };  
+    const VselStep vsel_table[] = {  
+        { 150000000ULL, VREG_VOLTAGE_1_15 },  
+        { 200000000ULL, VREG_VOLTAGE_1_20 },  
+        { 266000000ULL, VREG_VOLTAGE_1_25 },  
+        { 320000000ULL, VREG_VOLTAGE_1_30 },  
+        { 400000000ULL, VREG_VOLTAGE_1_30 },  
+    };  
+  
+    // Максимально плотная сетка кандидатов: для каждого fbdiv берём  
+    // наименьший допустимый делитель p1*p2 (сохраняя VCO в 750..1600 МГц)  
+    struct Candidate { uint32_t fbdiv, p1, p2; uint64_t clk_sys_hz; };  
+    Candidate cand[128];  
+    int cand_count = 0;  
+  
+    for (uint32_t fbdiv = 150; fbdiv >= 30 && cand_count < 128; fbdiv--) {  
+        uint64_t vco_hz = (uint64_t)fbdiv * VFO_CALIBRATED_XOSC_HZ;  
+        if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;  
+  
+        // p1*p2: ищем минимальный делитель, укладывающий clk_sys в потолок  
+        for (uint32_t p1 = 2; p1 <= 6; p1++) {  
+            for (uint32_t p2 = 1; p2 <= 2; p2++) {  
+                uint64_t clk_sys_hz = vco_hz / ((uint64_t)p1 * p2);  
+                if (clk_sys_hz <= CLK_START_HZ || clk_sys_hz > CLK_CEIL_HZ) continue;  
+                cand[cand_count].fbdiv = fbdiv;  
+                cand[cand_count].p1 = p1;  
+                cand[cand_count].p2 = p2;  
+                cand[cand_count].clk_sys_hz = clk_sys_hz;  
+                cand_count++;  
+            }  
+        }  
+    }  
+  
+    // Сортировка кандидатов по возрастанию clk_sys (пузырёк, N мало)  
+    for (int i = 0; i < cand_count - 1; i++)  
+        for (int j = 0; j < cand_count - 1 - i; j++)  
+            if (cand[j].clk_sys_hz > cand[j + 1].clk_sys_hz) {  
+                Candidate t = cand[j]; cand[j] = cand[j + 1]; cand[j + 1] = t;  
+            }  
+  
+    Serial.printf("[OCTEST] Старт: %u кандидатов от %llu до %llu МГц\n",  
+                  cand_count, CLK_START_HZ / 1000000ULL, CLK_CEIL_HZ / 1000000ULL);  
+  
+    // Маркер прогресса в scratch-регистре watchdog: если кристалл зависнет,  
+    // после ребута по нему восстановим сбойную ступень  
+    volatile uint32_t *scratch = &watchdog_hw->scratch[0];  
+  
+    bool max_ok = false;  
+  
+    for (int i = 0; i < cand_count; i++) {  
+        // Подбор VSEL по таблице для данной частоты  
+        vreg_voltage vsel = VREG_VOLTAGE_1_30;  
+        for (size_t k = 0; k < sizeof(vsel_table) / sizeof(vsel_table[0]); k++)  
+            if (cand[i].clk_sys_hz <= vsel_table[k].max_hz) {  
+                vsel = vsel_table[k].vsel; break;  
+            }  
+  
+        // Запоминаем ступень ДО перехода — при зависании увидим её после ребута  
+        *scratch = (uint32_t)i;  
+        watchdog_update();  
+  
+        PllConfig step_cfg = { cand[i].fbdiv, cand[i].p1, cand[i].p2,  
+                               cand[i].clk_sys_hz, true };  
+        vfo_set_clk_sys(step_cfg, (uint32_t)vsel, true);  
+        // Реальная частота, с которой работает кристалл на этой ступени  
+        uint64_t f_act = (uint64_t)cand[i].fbdiv * VFO_CALIBRATED_XOSC_HZ /  
+                         ((uint64_t)cand[i].p1 * cand[i].p2);  
+  
+        // Нагрузочный прогон: FPU+SRAM+GPIO ~100 мс, volatile — не выкидывается оптимизатором  
+        volatile float acc = 1.000001f;  
+        uint32_t t0 = millis();  
+        while (millis() - t0 < 100) {  
+            for (int n = 0; n < 2000; n++) acc = acc * acc + 0.5f;  
+        }  
+        (void)acc;  
+        watchdog_update();  
+  
+        // === ШАГ ПРОЙДЕН: печать параметров ===  
+        Serial.printf("[OCTEST] OK: clk_sys=%llu МГц (fbdiv=%u p1=%u p2=%u VSEL=0x%02X T_CPU=см.телеметрию) acc_crc=%lu\n",  
+                      f_act / 1000000ULL, cand[i].fbdiv, cand[i].p1, cand[i].p2,  
+                      (unsigned)vsel, (unsigned long)(*(volatile uint32_t*)&acc));  
+  
+        // Последний стабильный результат — в рабочий разгонный слот  
+        pll_overclock = step_cfg;  
+        max_ok = true;  
+    }  
+  
+    *scratch = 0xFFFFFFFFu; // тест завершён штатно  
+  
+    // Возврат на номинал вне зависимости от исхода  
+    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT, false);  
+    Serial.printf("[OCTEST] %s. Потолок: %llu МГц, возврат на %llu МГц\n",  
+                  max_ok ? "Готово" : "Ни одной ступени выше номинала",  
+                  pll_overclock.clk_sys_hz / 1000000ULL,  
+                  pll_nominal.clk_sys_hz / 1000000ULL);  
+}
 
 
 

@@ -107,6 +107,7 @@ bool force_ifkp_transmission = false; // Флаг ручного запуска 
 volatile bool system_ready = false;   // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 extern volatile bool tx_launching; 
+extern PllConfig pll_overclock;   // из vfo_hardware.cpp
 
 // --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
 const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
@@ -321,6 +322,29 @@ void check_serial_commands() {
           else if (command.equalsIgnoreCase("sched") || command.equalsIgnoreCase("schedule")) {  
             print_schedule();  
           }
+
+
+          // === OCTEST: стресс-тест поиска максимальной стабильной clk_sys ===  
+          else if (command.equalsIgnoreCase("OCTEST")) {  
+            if (is_transmitting || tx_launching) {  
+              Serial.println(F("[OCTEST] Отказ: идёт передача. Завершите TX и повторите."));  
+            } else {  
+              Serial.println(F("[OCTEST] Запуск стресс-теста ядра. Зависание на сбойной"));  
+              Serial.println(F("[OCTEST] ступени нормально - watchdog перезагрузит плату,"));  
+              Serial.println(F("[OCTEST] результат последнего OK-шага сохранится в pll_overclock."));  
+              Serial.flush();                        // гарантировать вывод до смены clk_sys  
+            
+              vfo_find_max_stable_clock();           // функция сама вернёт систему на pll_nominal  
+            
+              Serial.println(F("[OCTEST] Завершён. Рекомендованный потолок:"));  
+              Serial.printf("[OCTEST] clk_sys=%u Hz, fbdiv=%u, p1=%u, p2=%u, VSEL=0x%02X\n",  
+                            (unsigned)pll_overclock.clk_sys_hz, pll_overclock.fbdiv,  
+                            pll_overclock.p1, pll_overclock.p2, pll_overclock.vsel);  
+              Serial.flush();  
+            }  
+            break;
+          }
+
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();

@@ -20,9 +20,9 @@ struct PllConfig {
 };
 
 // --- Архитектурное разделение профилей тактирования ---
-extern PllConfig pll_nominal;     
-extern PllConfig pll_overclock;   
-extern PllConfig pll_ceiling;     
+extern PllConfig pll_nominal;     // Базовый гражданский режим (133 МГц)
+extern PllConfig pll_overclock;   // Активный boost-профиль ТЕКУЩЕГО сеанса передачи
+extern PllConfig pll_ceiling;     // Абсолютный жесткий потолок, доказанный OCTEST
 extern volatile bool clk_boosted; 
 
 struct VfoParameters {
@@ -45,16 +45,13 @@ struct VfoParameters {
 extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
 extern int pin_freq_out; 
 
-// ИСПРАВЛЕНО: Восстановлен жесткий макрос пина для совместимости с si5351_driver.cpp
 #define VFO_OUTPUT_PIN       (pin_freq_out)
 
-// ИСПРАВЛЕНО: Заданы аргументы по умолчанию в прототипах (только здесь!)
+// Прототипы с аргументами по умолчанию
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = VFO_CLK_SYS_MAX_HZ);
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
 void vfo_operation_set(bool key_down);
-
-// ИСПРАВЛЕНО: Сделан безопасный аргумент по умолчанию (3.5 МГц), если si5351 вызывает функцию без параметров
 void vfo_clk_boost_enter(unsigned int target_freq_hz = 3500000);
 void vfo_clk_boost_exit(void);
 void vfo_clk_thermal_guard(void);     

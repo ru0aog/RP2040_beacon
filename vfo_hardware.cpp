@@ -1082,9 +1082,17 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // ========================================================================
     // АРХИТЕКТУРНЫЙ АРБИТРАЖ ЧАСТОТЫ ШИНЫ
     // ========================================================================
+    // ========================================================================
+    // ИСПРАВЛЕНО: Честный сквозной автотюн при каждом старте (без эффекта памяти)
+    // ========================================================================
+
     if (clk_boosted) { 
-        // Если радиомаяк уже переведен в Boost-режим — фиксируем рабочую точку сессии
-        target_pll = pll_overclock; 
+        // Если активирован BOOST — запускаем матричный поиск ЛУЧШЕЙ частоты PLL
+        // строго под НОВУЮ целевую частоту в пределах стабильного потолка pll_ceiling
+        target_pll = vfo_find_optimal_pll(base_freq_hz, pll_ceiling.clk_sys_hz); 
+        
+        // Синхронизируем рабочий профиль оверклока для Термогуарда
+        pll_overclock = target_pll;
     } 
     else {
         // Если буст спит — производим штатный автотюнинг в пределах номинальных 133 МГц
@@ -1093,14 +1101,21 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         #else
             target_pll = pll_nominal;
         #endif
-        
-        uint32_t selected_vsel = target_pll.vsel;
-        if (selected_vsel == 0) selected_vsel = VREG_VOLTAGE_DEFAULT;
-        
-        // Физически программируем PLL чипа только для номинального режима
-        vfo_set_clk_sys(target_pll, selected_vsel);
     }
+
+    // Подбираем безопасное рантайм-напряжение ядра процессора (VREG)
+    uint32_t selected_vsel = target_pll.vsel;
+    if (selected_vsel == 0 || selected_vsel < (uint32_t)VREG_VOLTAGE_1_10) {
+        selected_vsel = (target_pll.clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ) 
+                        ? (uint32_t)vsel_for(target_pll.clk_sys_hz) 
+                        : (uint32_t)VREG_VOLTAGE_DEFAULT;
+    }
+
+    // Физически прошиваем выбранные делители в регистры PLL чипа RP2040
+    // (Этот вызов обновит и физическую частоту, и current_clk_sys_hz!)
+    vfo_set_clk_sys(target_pll, selected_vsel);
     // ========================================================================
+
 
     // Конфигурация и запуск конечного автомата (State Machine) PIO
     if (!pio_program_loaded) { 

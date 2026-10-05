@@ -149,6 +149,14 @@ static volatile uint32_t xorshift_state = VFO_RAND_SEED_INIT;
 
 static uint32_t current_clk_sys_hz = 120000000;
 
+// Реализация глобальных профилей тактирования в ОЗУ
+PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, false };
+PllConfig pll_overclock = { 133, 6, 2, 133000000ULL, true };
+volatile bool clk_boosted = false;
+
+static double cached_step_hz = 100.0;
+static uint32_t cached_base_freq_hz = 3500000;
+
 
 /**  
  * @brief Отсоединение периферийного домена clk_peri от системной шины.  
@@ -689,8 +697,12 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
     uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
     
-    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));
-    
+    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));  
+    // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1, период паттерна  
+    // переносов = 2^32 отсчётов -> дискретная гребёнка превращается в шумовую полку.  
+    // Ошибка 1 LSB остатка (~F_s/2^32 Гц) пренебрежима.  
+    if (params.dds_step != 0) params.dds_step |= 1u;
+
     return params;
 }
 
@@ -732,7 +744,9 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
  * @note Функция чистая: не программирует аппаратуру — применение PLL  
  *       выполняет вызывающий код через `set_sys_clock_pll()`.  
  *       Опорная частота берётся из @c VFO_CALIBRATED_XOSC_HZ.  
- *       Перебор ~700 комбинаций выполняется один раз на смену диапазона.  
+ *       Перебор ~700 комбинаций выполняется один раз на смену диапазона.
+ *       Четвёртый критерий — минимум хвостовых нулевых бит dds_step: 
+ *       предпочтение кандидата с длиннейшим периодом паттерна переносов.
  *  
  * @see calculate_raw_params_mhz(), vfo_hardware_init(), PllConfig  
  */
@@ -741,10 +755,11 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
     
     // Дефолтная безопасная конфигурация на случай сбоя сканирования
-    PllConfig best_pll = { 133, 6, 2, 133000000ULL, false }; 
+    PllConfig best_pll = { 133, 6, 2, 133000000ULL, false };
 
-    uint32_t min_dds_metric = 0xFFFFFFFFu;       
-    uint32_t min_frac_metric = 255;              
+    uint32_t min_dds_metric = 0xFFFFFFFFu;
+    uint32_t min_frac_metric = 255;
+    uint32_t min_ctz_metric  = 32;               // Мин. число нулевых хвостовых бит шага
     bool found_valid = false;
 
     // Скан-сессия разделена на 2 этапа: 0 - номинальный режим, 1 - экстремальный оверклокинг
@@ -787,42 +802,58 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                     uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
                     
                     uint32_t current_dds_metric = 0;
-
-                    // 1. АППАРАТНЫЙ ИДЕАЛ: Проверяем выход на чистое целое деление
-                    if (test_pio_frac == 0 && test_dds_step == 0) {
-                        current_dds_metric = 0; // Нулевой фазовый шум, дизеринг спит
-                    } else {
-                        uint32_t dist_dds_0 = test_dds_step;
-                        uint32_t dist_dds_max = 0xFFFFFFFFu - test_dds_step;
-                        current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;
-
-                        // 2. ДИНАМИЧЕСКИЙ ПЕРЕРАСЧЁТ СПУР-ФИЛЬТРА ПОД ЭФФЕКТИВНУЮ F_s_dither
-                        // Защитное окно в 2000 Гц масштабируется на лету от текущей clk_sys_hz
-                        uint32_t dynamic_spur_threshold = (uint32_t)(214748364800000ULL / clk_sys_hz);
-
-                        if (current_dds_metric > 0 && current_dds_metric < dynamic_spur_threshold) {
-                            // Штраф +80 млн гарантированно выкидывает кандидата со слышимым свистом в эфире
-                            current_dds_metric += 80000000u; 
-                        }
+       
+                    // 1. АППАРАТНЫЙ ИДЕАЛ: Проверяем выход на чистое целое деление  
+                    if (test_pio_frac == 0 && test_dds_step == 0) {  
+                        current_dds_metric = 0; // Нулевой фазовый шум, дизеринг спит  
+                    } else {  
+                        // Метрику считаем от ЭФФЕКТИВНОГО шага: в calculate_raw_params_mhz  
+                        // ненулевой шаг принудительно делается нечётным (|= 1)  
+                        uint32_t eff_dds_step = (test_dds_step == 0) ? 0 : (test_dds_step | 1u);  
+  
+                        uint32_t dist_dds_0 = eff_dds_step;  
+                        uint32_t dist_dds_max = 0xFFFFFFFFu - eff_dds_step;  
+                        current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;  
+  
+                        // 2. ДИНАМИЧЕСКИЙ ПЕРЕРАСЧЁТ СПУР-ФИЛЬТРА ПОД ЭФФЕКТИВНУЮ F_s_dither  
+                        // Защитное окно в 2000 Гц масштабируется на лету от текущей clk_sys_hz  
+                        uint32_t dynamic_spur_threshold = (uint32_t)(214748364800000ULL / clk_sys_hz);  
+  
+                        if (current_dds_metric > 0 && current_dds_metric < dynamic_spur_threshold) {  
+                            // Штраф +80 млн гарантированно выкидывает кандидата со слышимым свистом в эфире  
+                            current_dds_metric += 80000000u;   
+                        }  
                     }
 
-                    // Вторичная метрика: Близость pio_frac к краям сетки Брезенхема (0 или 256)
+                    // Вторичная метрика: Близость pio_frac к краям сетки Брезенхема (0 или 256)  
                     uint32_t dist_frac_0 = test_pio_frac;
                     uint32_t dist_frac_max = 256 - test_pio_frac;
                     uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
+  
+                    // Третичная метрика: число хвостовых нулевых бит dds_step.
+                    // Период паттерна переносов N = 2^32/gcd(step, 2^32): каждый
+                    // нулевой бит вдвое сокращает период и вдвое разносит
+                    // fractional-N гребёнку. 0 — у нулевого шага (идеал) и у
+                    // нечётных шагов (gcd=1 -> гребёнка в шумовую полку).
+                    uint32_t current_ctz_metric = (test_dds_step == 0) ? 0u  
+                                                  : (uint32_t)__builtin_ctz(test_dds_step);  
 
                     // Многокритериальный арбитраж
                     bool is_better_dds  = (current_dds_metric < min_dds_metric);
                     bool is_equal_dds   = (current_dds_metric == min_dds_metric);
                     bool is_better_frac = (current_frac_metric < min_frac_metric);
                     bool is_equal_frac  = (current_frac_metric == min_frac_metric);
+                    bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);
+                    bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);
 
-                    if (is_better_dds || 
+                    if (is_better_dds ||
                        (is_equal_dds && is_better_frac) ||
-                       (is_equal_dds && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
+                       (is_equal_dds && is_equal_frac && is_better_ctz) ||
+                       (is_equal_dds && is_equal_frac && is_equal_ctz && clk_sys_hz > best_pll.clk_sys_hz)) {
 
                         min_dds_metric = current_dds_metric;
                         min_frac_metric = current_frac_metric;
+                        min_ctz_metric  = current_ctz_metric;
                         
                         best_pll.fbdiv = fbdiv;
                         best_pll.p1 = p1;

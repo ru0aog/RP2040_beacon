@@ -66,7 +66,14 @@ struct PllConfig {
     bool is_oc;  // Флаг разгона: true, если частота требует поднятия VREG
 };
 
+// Глобальные конфигурации PLL, найденные автотюном
+extern PllConfig pll_nominal;
+extern PllConfig pll_overclock;
+extern volatile bool clk_boosted; // Сигнальный флаг для диспетчера защиты loop()
 
+// Прототипы функций предпускового оверклокингом радиомаяка на границах сессий
+void vfo_clk_boost_enter(void);
+void vfo_clk_boost_exit(void);
 
 // === Конфигурация механизмов снижения спуров ===
 #define VFO_USE_MASH2            // Включить Delta-Sigma 2-го порядка (MASH-1-1). Если выключено — 1-й порядок.

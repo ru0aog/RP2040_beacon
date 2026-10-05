@@ -103,16 +103,26 @@
 // ПРОТОТИПЫ (ОБЪЯВЛЕНИЯ) ВНУТРЕННИХ ФУНКЦИЙ ФАЙЛА
 // ============================================================================
 static void detach_peripheral_clock();
-static void __not_in_flash_func(vfo_set_clk_sys)(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t vsel);
+static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel);
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
-static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz);
-static void vfo_fill_tones_table();
+PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz); // Глобальный (без static)
+static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); // Синхронизировано имя
+static vreg_voltage vsel_for(uint64_t clk_hz);
 
-// Реализация глобальных профилей тактирования в ОЗУ
-PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, false };
-static PllConfig pll_overclock = { 133, 6, 2, 133000000ULL,  
-                                   (uint32_t)VREG_VOLTAGE_DEFAULT, false }; // до OCTEST разгон неактивен 
+
+// Глобальные профили тактирования (static полностью удалены для extern-связывания)
+PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
+PllConfig pll_overclock = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false }; 
 volatile bool clk_boosted = false;
+
+// Помощник автоматического определения напряжения ядра под частоту шины
+static vreg_voltage vsel_for(uint64_t clk_hz) {
+    if (clk_hz >= 280000000ULL)      return VREG_VOLTAGE_1_30; // Легальный максимум SDK
+    else if (clk_hz >= 200000000ULL) return VREG_VOLTAGE_1_25;
+    else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;
+    return VREG_VOLTAGE_DEFAULT;
+}
+
 
 
 
@@ -808,7 +818,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
  *  
  * @see calculate_raw_params_mhz(), vfo_hardware_init(), PllConfig  
  */
-static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
+PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
     
@@ -1031,7 +1041,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     }
 
     // Запуск безопасной двухранговой смены частоты шины
-    vfo_set_clk_sys(best_fbdiv, best_p1, best_p2, selected_vsel);
+    vfo_set_clk_sys(pll_nominal, selected_vsel);
 
     if (!pio_program_loaded) {
         lo_offset = pio_add_program(lo_pio, &pio_square_program);
@@ -1152,113 +1162,68 @@ static uint16_t vsel_to_mv(uint32_t vsel) {
 // ступени нормально, параметры последнего OK-шага сохраняются во Flash/RAM.  
 // Перед запуском: is_transmitting == false, Flash-операции запрещены.  
 void vfo_find_max_stable_clock(void) {  
-    // Стартовая точка — номинал; верхний предел — VFO_CLK_SYS_MAX_HZ (340)  
     const uint64_t CLK_START_HZ = VFO_CLK_SYS_NOMINAL_HZ;  
     const uint64_t CLK_CEIL_HZ  = VFO_CLK_SYS_MAX_HZ;  
-  
-    // Таблица порогов напряжения ядра: выше частоты — нужен более высокий VSEL  
+    
+    // Объявление флага и указателя на scratch-регистр для исправления ошибок компиляции
+    bool max_ok = false;  
+    volatile uint32_t *scratch = &watchdog_hw->scratch[0];  
+
     struct VselStep { uint64_t max_hz; vreg_voltage vsel; };  
     const VselStep vsel_table[] = {  
         { 150000000ULL, VREG_VOLTAGE_1_15 },  
         { 200000000ULL, VREG_VOLTAGE_1_20 },  
         { 266000000ULL, VREG_VOLTAGE_1_25 },  
         { 320000000ULL, VREG_VOLTAGE_1_30 },  
-        { 400000000ULL, VREG_VOLTAGE_1_30 },  
+        { 400000000ULL, VREG_VOLTAGE_1_30 }, 
     };  
-  
-    // Максимально плотная сетка кандидатов: для каждого fbdiv берём  
-    // наименьший допустимый делитель p1*p2 (сохраняя VCO в 750..1600 МГц)  
+
     struct Candidate { uint32_t fbdiv, p1, p2; uint64_t clk_sys_hz; };  
-    Candidate cand[128];  
-    int cand_count = 0;  
-  
+    Candidate cand[128]; int cand_count = 0;  
     for (uint32_t fbdiv = 150; fbdiv >= 30 && cand_count < 128; fbdiv--) {  
-        uint64_t vco_hz = (uint64_t)fbdiv * VFO_CALIBRATED_XOSC_HZ;  
-        if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;  
-  
-        // p1*p2: ищем минимальный делитель, укладывающий clk_sys в потолок  
+        uint64_t vco_hz = (uint64_t)fbdiv * VFO_CALIBRATED_XOSC_HZ; if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;  
         for (uint32_t p1 = 2; p1 <= 6; p1++) {  
             for (uint32_t p2 = 1; p2 <= 2; p2++) {  
-                uint64_t clk_sys_hz = vco_hz / ((uint64_t)p1 * p2);  
-                if (clk_sys_hz <= CLK_START_HZ || clk_sys_hz > CLK_CEIL_HZ) continue;  
-                cand[cand_count].fbdiv = fbdiv;  
-                cand[cand_count].p1 = p1;  
-                cand[cand_count].p2 = p2;  
-                cand[cand_count].clk_sys_hz = clk_sys_hz;  
-                cand_count++;  
+                uint64_t clk_sys_hz = vco_hz / ((uint64_t)p1 * p2); if (clk_sys_hz <= CLK_START_HZ || clk_sys_hz > CLK_CEIL_HZ) continue;  
+                cand[cand_count].fbdiv = fbdiv; cand[cand_count].p1 = p1; cand[cand_count].p2 = p2; cand[cand_count].clk_sys_hz = clk_sys_hz; cand_count++;  
             }  
         }  
     }  
-  
-    // Сортировка кандидатов по возрастанию clk_sys (пузырёк, N мало)  
-    for (int i = 0; i < cand_count - 1; i++)  
-        for (int j = 0; j < cand_count - 1 - i; j++)  
-            if (cand[j].clk_sys_hz > cand[j + 1].clk_sys_hz) {  
-                Candidate t = cand[j]; cand[j] = cand[j + 1]; cand[j + 1] = t;  
-            }  
-  
-    Serial.printf("[OCTEST] Старт: %u кандидатов от %llu до %llu МГц\n",  
-                  cand_count, CLK_START_HZ / 1000000ULL, CLK_CEIL_HZ / 1000000ULL);  
-  
-    // Маркер прогресса в scratch-регистре watchdog: если кристалл зависнет,  
-    // после ребута по нему восстановим сбойную ступень  
-    volatile uint32_t *scratch = &watchdog_hw->scratch[0];  
-  
-    bool max_ok = false;  
-  
     for (int i = 0; i < cand_count; i++) {  
-        // Подбор VSEL по таблице для данной частоты  
         vreg_voltage vsel = VREG_VOLTAGE_1_30;  
-        for (size_t k = 0; k < sizeof(vsel_table) / sizeof(vsel_table[0]); k++)  
-            if (cand[i].clk_sys_hz <= vsel_table[k].max_hz) {  
-                vsel = vsel_table[k].vsel; break;  
+        for (size_t k = 0; k < sizeof(vsel_table) / sizeof(vsel_table[0]); k++) {
+            if (cand[i].clk_sys_hz <= vsel_table[k].max_hz) { 
+                vsel = vsel_table[k].vsel; 
+                break; 
             }  
+        }
+        *scratch = (uint32_t)i; watchdog_update();  
   
-        // Запоминаем ступень ДО перехода — при зависании увидим её после ребута  
-        *scratch = (uint32_t)i;  
-        watchdog_update();  
+        // Сборка структуры с явной инициализацией всех полей (включая vsel и исправление is_oc)
+        PllConfig step_cfg = { 
+            .fbdiv      = cand[i].fbdiv, 
+            .p1         = cand[i].p1, 
+            .p2         = cand[i].p2, 
+            .clk_sys_hz = cand[i].clk_sys_hz, 
+            .vsel       = (uint32_t)vsel,
+            .is_oc      = true 
+        };  
+        
+        // Передаем структуру и вольтаж в обновленный метод тактирования
+        vfo_set_clk_sys(step_cfg, (uint32_t)vsel);
   
-        PllConfig step_cfg = { cand[i].fbdiv, cand[i].p1, cand[i].p2,  
-                               cand[i].clk_sys_hz, true };  
-        vfo_set_clk_sys(step_cfg, (uint32_t)step_vsel);
-
-
-        // Реальная частота, с которой работает кристалл на этой ступени  
-        uint64_t f_act = (uint64_t)cand[i].fbdiv * VFO_CALIBRATED_XOSC_HZ /  
-                         ((uint64_t)cand[i].p1 * cand[i].p2);  
+        volatile float acc = 1.000001f; uint32_t t0 = millis();  
+        while (millis() - t0 < 100) { for (int n = 0; n < 2000; n++) acc = acc * acc + 0.5f; }  
+        (void)acc; watchdog_update();  
   
-        // Нагрузочный прогон: FPU+SRAM+GPIO ~100 мс, volatile — не выкидывается оптимизатором  
-        volatile float acc = 1.000001f;  
-        uint32_t t0 = millis();  
-        while (millis() - t0 < 100) {  
-            for (int n = 0; n < 2000; n++) acc = acc * acc + 0.5f;  
-        }  
-        (void)acc;  
-        watchdog_update();  
-  
-        // === ШАГ ПРОЙДЕН: печать параметров ===  
-        // в печати OK-шага — вольты вместо кода enum:  
-        Serial.printf("[OCTEST] OK  clk_sys=%lu MHz  fbdiv=%lu p1=%lu p2=%lu  VSEL=%u mV\n",  
-                    (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL),  
-                    (unsigned long)step_cfg.fbdiv,  
-                    (unsigned long)step_cfg.p1,  
-                    (unsigned long)step_cfg.p2,  
-                    (unsigned)vsel_to_mv(step_vsel));  
-  
-        // Последний стабильный результат — в рабочий разгонный слот  
-        pll_overclock = step_cfg;  
-        max_ok = true;  
+        Serial.printf("[OCTEST] OK  clk_sys=%lu MHz  VSEL=%u mV\n",  
+                    (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL), (unsigned)vsel_to_mv((uint32_t)vsel));  
+        pll_overclock = step_cfg; max_ok = true;  
     }  
-  
-    *scratch = 0xFFFFFFFFu; // тест завершён штатно  
-  
-    // Возврат на номинал вне зависимости от исхода  
-    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
 
-    Serial.printf("[OCTEST] %s. Потолок: %llu МГц, возврат на %llu МГц\n",  
-                  max_ok ? "Готово" : "Ни одной ступени выше номинала",  
-                  pll_overclock.clk_sys_hz / 1000000ULL,  
-                  pll_nominal.clk_sys_hz / 1000000ULL);  
+    *scratch = 0xFFFFFFFFu;  
+    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
+    Serial.printf("[OCTEST] Тест окончен. Максимальный профиль зафиксирован в памяти.\n");
 }
 
 

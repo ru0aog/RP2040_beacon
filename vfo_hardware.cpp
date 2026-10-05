@@ -116,7 +116,7 @@ static uint64_t vfo_step_mhz = 0;   // шаг сетки, мГц
 
 // Глобальные профили тактирования (static полностью удалены для extern-связывания)
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
-PllConfig pll_overclock = { 107, 2, 2, 321000000ULL, (uint32_t)VREG_VOLTAGE_1_30, true };
+PllConfig pll_overclock = { 100, 3, 1, 400000000ULL, (uint32_t)VREG_VOLTAGE_1_30, true };
 volatile bool clk_boosted = false;
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
@@ -298,16 +298,20 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
 void vfo_clk_boost_enter(void) {
     // Нет проверенной OC-конфигурации или boost уже активен — выходим
     if (clk_boosted) return;
-    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz || !pll_overclock.is_oc) return;
     
-    uint32_t vsel = VREG_VOLTAGE_1_30;  
-    if (pll_overclock.clk_sys_hz <= 200000000ULL)      vsel = VREG_VOLTAGE_1_20;  
-    else if (pll_overclock.clk_sys_hz <= 266000000ULL) vsel = VREG_VOLTAGE_1_25;  
+    // Подбираем оптимальную clk_sys под реальную частоту сеанса  
+    PllConfig opt = vfo_find_optimal_pll(cached_base_freq_hz);  
   
-    // 1. Частота и питание (внутри vfo_set_clk_sys — детач clk_peri, XOSC, сброс PLL)  
-    vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);
-    
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
+    // Безопасность: оптимум не должен превышать измеренный потолок OCTEST  
+    if (opt.clk_sys_hz > pll_overclock.clk_sys_hz)  
+        opt = pll_overclock;   // упёрлись в кремний — едем на потолке  
+  
+    if (opt.clk_sys_hz <= pll_nominal.clk_sys_hz || !opt.is_oc) return;  
+  
+    vfo_set_clk_sys(opt, opt.vsel);  
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
+    vfo_set_tone_instant(0);  
+    clk_boosted = true;
 
     // 2. Обязательный пересчёт PIO-делителей под новую clk_sys (иначе частота уедет)  
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
@@ -1137,23 +1141,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     uint64_t base_freq_mhz = (uint64_t)base_freq_hz * 1000000ULL;  
     uint64_t step_mhz      = (uint64_t)step_hz * 1000000ULL;  
   
-    // Запоминаем в глобалах для vfo_rebuild_tone_table при boost  
-    vfo_base_mhz = base_freq_mhz;  
-    vfo_step_mhz = step_mhz;  
-  
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
-        uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);  
-        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
-    }
-
-    // 2. Заполняем таблицу тонов: каждый следующий тон строго равен base + i * step
-    // Это гарантирует математически ровную сетку IFKP без рассинхронизации фазы
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {
-        uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);
-        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);
-    }
-    vfo_set_tone_instant(0);
-
     // === ИСТИННЫЙ ДИАГНОСТИЧЕСКИЙ ВЫВОД ПАРАМЕТРОВ БАЗОВОГО ТОНА В SERIAL ===
     VfoParameters real_base_params = ifkp_tones[0]; // Берем параметры CW несущей из рантайм-таблицы
     

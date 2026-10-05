@@ -695,8 +695,29 @@ int32_t get_next_start_minute(uint8_t mode) {
 }
 
 
-// преобразование результата в строку "HH:MM" или "завтра HH:MM"  
-String fmt_next_start(int32_t abs_min) {  
+
+/**  
+ * @brief Форматирует абсолютное время ближайшего старта в строку "HH:MM".  
+ *  
+ * Преобразует результат @ref get_next_start_minute (абсолютное число минут  
+ * от текущих суток, может превышать 1440 — т.е. старт в следующих днях)  
+ * в человекочитаемую строку вида "HH:MM". Для старта не сегодня добавляет  
+ * суффикс: " (завтра)" при day_off == 1 и " (через дни)" при day_off >= 2.  
+ *  
+ * @param[in] abs_min  Абсолютное время старта в минутах от полуночи текущего  
+ *                     дня (может быть > 1440). Отрицательное значение  
+ *                     означает отсутствие подходящей задачи.  
+ *  
+ * @return Строка формата "HH:MM", "HH:MM (завтра)", "HH:MM (через дни)"  
+ *         либо "Не задан", если @p abs_min < 0.  
+ *  
+ * @note Функция чистая: не читает RTC и не изменяет глобальное состояние.  
+ *       Используется для отображения расписания в print_schedule() и веб/UI.  
+ *  
+ * @see get_next_start_minute(), print_schedule()  
+ */
+String fmt_next_start(int32_t abs_min) {
+// преобразование результата в строку "HH:MM" или "завтра HH:MM"
   if (abs_min < 0) return String("Не задан");  
   uint32_t day_off = abs_min / 1440;  
   uint32_t m = abs_min % 1440;  
@@ -707,19 +728,68 @@ String fmt_next_start(int32_t abs_min) {
 }  
   
 
-// scheduler.cpp — планировщик с диагностикой сработки  
+
+
+/**  
+ * @brief Проверяет, наступило ли время запуска передачи для заданного режима.  
+ *  
+ * Перебирает задачи расписания @ref beacon_schedule и проверяет, попадает ли  
+ * текущее время RTC (минуты от полуночи, @ref rtc_hour / @ref rtc_min) в окно  
+ * хотя бы одной активной задачи указанного режима @p mode.  
+ *  
+ * Поддерживаются два типа задач:  
+ * - разовый запуск (@c interval_min == 0): срабатывание точно в минуту старта;  
+ * - периодический запуск (@c interval_min > 0): срабатывание каждые  
+ *   @c interval_min минут внутри окна @c start..@c end, включая окно,  
+ *   переходящее через полночь.  
+ *  
+ * Дополнительно фильтруются задачи по дню недели (@c TaskItem::days)  
+ * и флагу активности (@c TaskItem::active). Повторный запуск одного режима  
+ * в пределах той же минуты блокируется статическим массивом @c last_min.  
+ *  
+ * При успешном совпадении функция записывает частоту задачи в  
+ * @ref scheduled_freq_hz и выводит диагностику в Serial. Если в момент  
+ * срабатывания установлен флаг @c is_transmitting, сеанс пропускается.  
+ *  
+ * @param[in] mode  Режим передачи: MODE_IFKP (0), MODE_RTTY (1), MODE_CW (2),  
+ *                  MODE_SEQ (3). Значения > 3 отклоняются.  
+ *  
+ * @return @c true  — задача совпала, передачу нужно запустить  
+ *                   (вызывающий код обязан выставить @c is_transmitting);  
+ * @return @c false — ни одна задача не совпала, либо шина занята,  
+ *                   либо сеанс этого режима уже был в текущей минуте.  
+ *  
+ * @note Сама функция не выполняет передачу — только детектирует момент  
+ *       и подготавливает @ref scheduled_freq_hz. Флаг @c is_transmitting  
+ *       выставляется вызывающим кодом после возврата @c true.  
+ *  
+ * @warning При пропуске сеанса из-за занятой шины @c last_min не  
+ *          обновляется — возможны повторные лог-сообщения и запоздалый  
+ *          запуск в той же минуте после освобождения эфира.  
+ *  
+ * @see get_next_start_minute(), TaskItem, beacon_schedule  
+ */
 bool is_time_to_transmit(uint8_t mode) {  
   extern bool is_transmitting;  
+  extern volatile bool tx_launching;   // флаг "передача запускается" — выставляется  
+                                       // вызывающим кодом СРАЗУ при получении true  
   uint32_t cur = rtc_hour * 60UL + rtc_min;  
   static uint32_t last_min[4] = {9999, 9999, 9999, 9999};  
   
   if (mode > 3) return false;  
-  if (cur == last_min[mode]) return false;               // один запуск на минуту  
+  if (cur == last_min[mode]) return false;   // один запуск (или пропуск) на минуту  
+  
+  // Проверка занятости ДО перебора задач — закрывает окно гонки  
+  // между опросами разных режимов и исключает спам лога при hit.  
+  if (is_transmitting || tx_launching) {  
+    // Ничего не логируем здесь — задачи ещё не проверены,  
+    // лог ниже сообщит, была ли реальная сработка.  
+  }  
   
   for (int i = 0; i < MAX_SCHEDULE_TASKS; i++) {  
     TaskItem& t = beacon_schedule[i];  
     if (!t.active || t.mode != mode) continue;  
-    if (t.days && !(t.days & (1 << rtc_dotw))) continue; // день не совпал  
+    if (t.days && !(t.days & (1 << rtc_dotw))) continue;   // день не совпал  
   
     uint32_t st = t.start_hour * 60UL + t.start_min;  
     uint32_t en = t.end_hour   * 60UL + t.end_min;  
@@ -727,24 +797,24 @@ bool is_time_to_transmit(uint8_t mode) {
     if (t.interval_min == 0) hit = (cur == st);  
     else {  
       hit = (en >= st) ? (cur >= st && cur <= en && (cur - st) % t.interval_min == 0)  
-                       : (cur >= st || cur <= en) &&                        // окно через полночь  
+                       : (cur >= st || cur <= en) &&        // окно через полночь  
                          ((cur >= st ? cur - st : cur + 1440 - st) % t.interval_min == 0);  
     }  
     if (!hit) continue;  
   
-    if (is_transmitting) {  
-      Serial.printf("[Планировщик] Задача %02d: шина занята, сеанс пропущен\n", i + 1);  
-      return false;  
+    if (is_transmitting || tx_launching) {  
+      Serial.printf("[Планировщик] Задача %02d: устройство занято, сеанс пропущен\n", i + 1);  
+      last_min[mode] = cur;   // фиксируем пропуск: без спама и без запоздалого  
+      return false;           // запуска в той же минуте после освобождения шины  
     }  
+  
     Serial.printf("[Планировщик] Задача %02d: запуск %s в %02d:%02d\n",  
-                  i + 1, mode_name(mode), rtc_hour, rtc_min); 
+                  i + 1, mode_name(mode), rtc_hour, rtc_min);  
     last_min[mode] = cur;  
-    scheduled_freq_hz = beacon_schedule[i].freq_hz;  // частота из задачи расписания 
+    scheduled_freq_hz = beacon_schedule[i].freq_hz;   // частота из задачи  
     return true;  
   }  
   return false;  
 }
-
-
 
 

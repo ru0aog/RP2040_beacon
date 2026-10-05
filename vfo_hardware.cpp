@@ -116,7 +116,7 @@ static uint64_t vfo_step_mhz = 0;   // шаг сетки, мГц
 
 // Глобальные профили тактирования (static полностью удалены для extern-связывания)
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
-PllConfig pll_overclock = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false }; 
+PllConfig pll_overclock = { 107, 2, 2, 321000000ULL, (uint32_t)VREG_VOLTAGE_1_30, true };
 volatile bool clk_boosted = false;
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
@@ -297,7 +297,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
  */  
 void vfo_clk_boost_enter(void) {
     // Нет проверенной OC-конфигурации или boost уже активен — выходим
-    if (clk_boosted) return;  
+    if (clk_boosted) return;
     if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz || !pll_overclock.is_oc) return;
     
     uint32_t vsel = VREG_VOLTAGE_1_30;  

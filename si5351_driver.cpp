@@ -362,7 +362,7 @@ void SI_POWER_ON() {
       Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
       Serial.print("[Питание] Запускаем внутренний DDS-генератор RP2040 на пине "); Serial.println(VFO_OUTPUT_PIN);
     }
-    if (SI_FAIL) vfo_clk_boost_enter();   // разгон только когда работает PIO-DDS
+    vfo_clk_boost_enter();   // разгон только когда работает PIO-DDS
   }
 }
 
@@ -388,11 +388,11 @@ void SI_POWER_OFF() {
     if (pin_pwr_si != -1) digitalWrite(pin_pwr_si, LOW); // Выключаем генератор
   }
   else {
-    vfo_operation_set(false);   // отключить генерацию программного VFO
     if (debug_flag) {
       Serial.print("[Питание] DDS-генератор RP2040 на пине "); Serial.print(VFO_OUTPUT_PIN); Serial.println(" остановлен.");
     }
-    if (SI_FAIL) vfo_clk_boost_exit();   // выход из режима разгона
+    vfo_operation_set(false);   // отключить генерацию программного VFO
+    vfo_clk_boost_exit();   // выход из режима разгона
   }
 }
 

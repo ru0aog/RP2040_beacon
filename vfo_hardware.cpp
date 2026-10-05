@@ -237,66 +237,47 @@ static void __not_in_flash_func(detach_peripheral_clock)() {
  *       флэш-контроллер уже работает на новом делителе.  
  */  
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel) {  
-    // Целевая частота ядра из конфигурации PLL  
     uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.p1 * cfg.p2));  
-  
-    // Направление сдвига: вверх — сначала напряжение, вниз — напряжение в конце  
     bool is_overclocking = (target_clk_hz > current_clk_sys_hz);  
   
-    // === РАНГ 1: ПОВЫШЕНИЕ — сначала поднимаем питание ядра ===  
     if (is_overclocking) {  
         vreg_set_voltage((vreg_voltage)vsel);  
-        busy_wait_us(500);  // время выхода встроенного стабилизатора на полку  
+        busy_wait_us(500);  
     }  
   
-    // Изолируем clk_peri от системного домена (защита UART/USB на время ретюна)  
     detach_peripheral_clock();  
-  
-    // Критическая секция: запрет прерываний на всё время смены частоты  
     uint32_t ints_status = save_and_disable_interrupts();  
   
-    // Переводим clk_sys на стабильный опорный XOSC (12 МГц)  
+    // clk_sys -> XOSC 12 МГц (SCK флэша 6 МГц, безопасно)  
     clock_configure(clk_sys,  
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
-                    VFO_CALIBRATED_XOSC_HZ,  
-                    VFO_CALIBRATED_XOSC_HZ);  
+                    VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
   
-    // Переинициализируем PLL_SYS с новыми коэффициентами  
     uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv);  
     pll_init(pll_sys, 1, vco_nominal_hz, cfg.p1, cfg.p2);  
   
-    // === ПЕРЕСЧЁТ ДЕЛИТЕЛЯ XIP/SSI — ПОКА clk_sys ЕЩЁ НА XOSC (12 МГц) ===  
-    // SCK флэша = clk_sys / BAUDR. Без этой правки при clk_sys > 200 МГц  
-    // штатный делитель 2 выдаёт >100 МГц на QSPI-линию — за пределами спека  
-    // большинства флэшей (~104-133 МГц), и любой XIP-доступ (включая хвост  
-    // кода после возврата на PLL) идёт по битым данным или вешает шину.  
-    // Делитель выбирается так, чтобы SCK <= VFO_FLASH_SCK_MAX_HZ.  
-    {  
-        uint32_t ssi_baud = (uint32_t)((target_clk_hz + VFO_FLASH_SCK_MAX_HZ - 1ULL)  
-                                     / VFO_FLASH_SCK_MAX_HZ);  
-        ssi_baud = (ssi_baud + 1u) & ~1u;    // вверх до чётного — на RP2040 BAUDR только чётный  
-        if (ssi_baud < 2u)  ssi_baud = 2u;   // аппаратный минимум  
-        if (ssi_baud > 34u) ssi_baud = 34u;  // потолок 340 МГц при SCK_MAX=100 МГц  
-        ssi_hw->baudr = ssi_baud;            // ssi_hw из hardware/structs/ssi.h  
-    }  
+    // === BAUDR: SSI принимает запись ТОЛЬКО при SSIENR=0 ===  
+    // Мы на XOSC, код в SRAM, прерывания запрещены — окно безопасно.  
+    uint32_t ssi_baud = (uint32_t)((target_clk_hz + VFO_FLASH_SCK_MAX_HZ - 1) / VFO_FLASH_SCK_MAX_HZ);  
+    ssi_baud = (ssi_baud + 1u) & ~1u;  
+    if (ssi_baud < 2u)  ssi_baud = 2u;  
+    if (ssi_baud > 34u) ssi_baud = 34u;  
+    ssi_hw->ssienr = 0;                 // выключить SSI — иначе baudr не запишется  
+    ssi_hw->baudr  = ssi_baud;  
+    ssi_hw->ssienr = 1;                 // включить обратно  
   
-    // Возвращаем clk_sys на переконфигурированный PLL_SYS  
+    // clk_sys -> PLL_SYS (целевая частота)  
     clock_configure(clk_sys,  
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                    target_clk_hz,  
-                    target_clk_hz);  
+                    target_clk_hz, target_clk_hz);  
   
-    // Выходим из критической секции  
     restore_interrupts(ints_status);  
-  
-    // Фиксируем фактическую частоту в глобальной переменной  
     current_clk_sys_hz = target_clk_hz;  
   
-    // === РАНГ 2: ПОНИЖЕНИЕ — сначала опускаем частоту, потом напряжение ===  
     if (!is_overclocking) {  
-        busy_wait_us(100);                  // релаксация ёмкостей шины питания  
+        busy_wait_us(100);  
         vreg_set_voltage((vreg_voltage)vsel);  
     }  
 }
@@ -1237,7 +1218,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
     const size_t vsel_table_size = sizeof(vsel_table) / sizeof(vsel_table[0]);  
   
     struct Candidate { uint32_t fbdiv, p1, p2; uint64_t clk_sys_hz; };  
-    static Candidate cand[256];  
+    static Candidate cand[768];  
     int cand_count = 0;  
   
     // Сбор всех валидных комбинаций выше номинала  
@@ -1249,7 +1230,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
             for (uint32_t p2 = 1; p2 <= 2; p2++) {  
                 uint64_t cs = vco_hz / ((uint64_t)p1 * p2);  
                 if (cs <= CLK_START_HZ || cs > CLK_CEIL_HZ) continue;  
-                if (cand_count >= 256) break;  
+                if (cand_count >= (sizeof(cand)/sizeof(cand[0]))) break;  // массив полон — дальше не пишем
                 cand[cand_count++] = { fbdiv, p1, p2, cs };  
             }  
         }  
@@ -1389,8 +1370,8 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
                 }  
             }  
             if (!div_ok) {  
-                Serial.printf("[OCTEST] FAIL (SIO divider) на clk_sys=%lu MHz\n",  
-                              (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL));  
+                Serial.printf("[OCTEST] FAIL clk_sys=%6.1f MHz (SRAM CRC)\n",  
+                                    (double)(step_cfg.clk_sys_hz / 1000000.0));
                 *scratch = (uint32_t)(step_cfg.clk_sys_hz / 1000000ULL);  
                 vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
                 return;  
@@ -1401,13 +1382,13 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
         watchdog_update();  
   
         // Ступень пройдена — печатаем её параметры и запоминаем как потолок  
-        Serial.printf("[OCTEST] OK  clk_sys=%.1f MHz  fbdiv=%lu p1=%lu p2=%lu  VSEL=%u mV  T_CPU=%.1f C\n",  
-                      step_cfg.clk_sys_hz / 1000000.0,
-                      (unsigned long)step_cfg.fbdiv,  
-                      (unsigned long)step_cfg.p1,  
-                      (unsigned long)step_cfg.p2,  
-                      (unsigned)vsel_to_mv((uint32_t)vsel),  
-                      (double)vfo_read_core_temp_c());  
+        Serial.printf("[OCTEST] OK  clk_sys=%6.1f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VSEL=%4u mV  T_CPU=%5.1f C\n",  
+                            (double)(step_cfg.clk_sys_hz / 1000000.0),  
+                            (unsigned long)step_cfg.fbdiv,  
+                            (unsigned long)step_cfg.p1,  
+                            (unsigned long)step_cfg.p2,  
+                            (unsigned)vsel_to_mv((uint32_t)vsel),  
+                            (double)vfo_read_core_temp_c());
         pll_overclock = step_cfg;  
         max_ok = true;  
     }  
@@ -1417,13 +1398,13 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
   
     if (max_ok) {  
-        Serial.printf("[OCTEST] Тест окончен. Потолок: %.1f МГц (fbdiv=%lu, p1=%lu, p2=%lu, VSEL=%u mV, T_CPU=%.1f C)\n",  
-                      (double)(pll_overclock.clk_sys_hz / 1000000.0), 
-                      (unsigned long)pll_overclock.fbdiv,  
-                      (unsigned long)pll_overclock.p1,  
-                      (unsigned long)pll_overclock.p2,  
-                      (unsigned)vsel_to_mv(pll_overclock.vsel),  
-                      (double)vfo_read_core_temp_c());  
+        Serial.printf("[OCTEST] Потолок: %6.1f МГц (fbdiv=%lu, p1=%lu, p2=%lu, VSEL=%u mV, T_CPU=%.1f C)\n",  
+                            (double)(pll_overclock.clk_sys_hz / 1000000.0),  
+                            (unsigned long)pll_overclock.fbdiv,  
+                            (unsigned long)pll_overclock.p1,  
+                            (unsigned long)pll_overclock.p2,  
+                            (unsigned)vsel_to_mv(pll_overclock.vsel),  
+                            (double)vfo_read_core_temp_c());
         Serial.println("[OCTEST] Для рабочего разгона рекомендуется запас 10-15% по частоте.");  
     } else {  
         Serial.println("[OCTEST] Ни одна ступень выше номинала не прошла. pll_overclock не изменён.");  

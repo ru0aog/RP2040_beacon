@@ -103,10 +103,16 @@
 // ПРОТОТИПЫ (ОБЪЯВЛЕНИЯ) ВНУТРЕННИХ ФУНКЦИЙ ФАЙЛА
 // ============================================================================
 static void detach_peripheral_clock();
-static void __not_in_flash_func(vfo_set_clk_sys)(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t vsel); // Исправлено имя
+static void __not_in_flash_func(vfo_set_clk_sys)(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t vsel);
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
-static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, int run_stage); // Исправлен static
-static void vfo_fill_tones_table(); // Исправлен static
+static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz);
+static void vfo_fill_tones_table();
+
+// Реализация глобальных профилей тактирования в ОЗУ
+PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, false };
+PllConfig pll_overclock = {133, 6, 2, 133000000ULL, false}; // до OCTEST разгон неактивен 
+volatile bool clk_boosted = false;
+
 
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
@@ -158,11 +164,6 @@ static volatile uint32_t m2_carry_prev = 0;
 static volatile uint32_t xorshift_state = VFO_RAND_SEED_INIT;
 
 static uint32_t current_clk_sys_hz = 120000000;
-
-// Реализация глобальных профилей тактирования в ОЗУ
-PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, false };
-PllConfig pll_overclock = { 133, 6, 2, 133000000ULL, true };
-volatile bool clk_boosted = false;
 
 static double cached_step_hz = 100.0;
 static uint32_t cached_base_freq_hz = 3500000;
@@ -276,10 +277,12 @@ static void vfo_set_clk_sys(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t v
  * затем пересчитывает ifkp_tones под новую clk_sys под спинлоком  
  * и сигнализирует Core 1 через tone_changed.  
  */  
-void vfo_clk_boost_enter(void) {  
+void vfo_clk_boost_enter(void) {
+    // Нет проверенной OC-конфигурации или boost уже активен — выходим
     if (clk_boosted) return;  
-    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return; // OC-профиля нет  
-  
+    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return; // OC-профиля нет
+    if (!pll_overclock.is_oc || pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return;
+    
     uint32_t vsel = VREG_VOLTAGE_1_30;  
     if (pll_overclock.clk_sys_hz <= 200000000ULL)      vsel = VREG_VOLTAGE_1_20;  
     else if (pll_overclock.clk_sys_hz <= 266000000ULL) vsel = VREG_VOLTAGE_1_25;  
@@ -927,6 +930,17 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
 
 
 
+// vfo_hardware.cpp — вынести блок заполнения в функцию:  
+static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {  
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
+        uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);  
+        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
+    }  
+    // Сбросить кэш активного тона, чтобы следующий vfo_set_tone_instant применил новые значения  
+    current_active_tone = VFO_TONE_NONE;  
+}
+
+
 
 /**  
  * @brief Полная инициализация и запуск аппаратного VFO (PLL + PIO + дизеринг).  
@@ -1103,6 +1117,13 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     timer_already_running = true;
 #endif
 }
+
+
+
+static uint16_t vsel_to_mv(uint32_t vsel) {  
+    // VREG_VOLTAGE_* идут с шагом 50 мВ от 0.80 В (0x00 = 0.80V)  
+    return 800 + vsel * 50;  
+}  
 
 
 

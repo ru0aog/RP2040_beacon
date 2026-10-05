@@ -318,8 +318,18 @@ void vfo_clk_boost_enter(void) {
     tone_changed = true;                   // Core 1 сбросит аккумуляторы  
     spin_unlock(vfo_spin_lock, save);  
   
-    clk_boosted = true;                    // флаг для диспетчера защиты loop()
-    Serial.printf("[BOOST] clk_sys %lu MHz\n", (unsigned long)(pll_overclock.clk_sys_hz / 1000000ULL));
+    clk_boosted = true;                    // флаг для диспетчера защиты loop()  
+  
+    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
+                  pll_overclock.clk_sys_hz / 1000000.0,  
+                  (unsigned long)pll_overclock.fbdiv,  
+                  (unsigned long)pll_overclock.p1,  
+                  (unsigned long)pll_overclock.p2,  
+                  (unsigned long)(pll_overclock.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
+                  (unsigned)vsel_to_mv(pll_overclock.vsel),  
+                  pll_overclock.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
+                  (unsigned)ssi_hw->baudr,  
+                  (double)vfo_read_core_temp_c());
 }  
   
 /**  
@@ -345,7 +355,16 @@ void vfo_clk_boost_exit(void) {
     tone_changed = true;  
     spin_unlock(vfo_spin_lock, save);
     clk_boosted = false;  
-    Serial.printf("[BOOST] clk_sys %lu MHz (nominal)\n", (unsigned long)(pll_nominal.clk_sys_hz / 1000000ULL)); 
+    Serial.printf("[BOOST] OFF  clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
+                  pll_nominal.clk_sys_hz / 1000000.0,  
+                  (unsigned long)pll_nominal.fbdiv,  
+                  (unsigned long)pll_nominal.p1,  
+                  (unsigned long)pll_nominal.p2,  
+                  (unsigned long)(pll_nominal.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
+                  (unsigned)vsel_to_mv((uint32_t)VREG_VOLTAGE_DEFAULT),  
+                  pll_nominal.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
+                  (unsigned)ssi_hw->baudr,  
+                  (double)vfo_read_core_temp_c());
 }
 
 

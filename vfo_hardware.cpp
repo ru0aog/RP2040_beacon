@@ -1184,7 +1184,7 @@ void vfo_find_max_stable_clock(void) {
     const VselStep vsel_table[] = {    
         { 150000000ULL, VREG_VOLTAGE_1_15 },    
         { 200000000ULL, VREG_VOLTAGE_1_20 },    
-        { 266000000ULL, VREG_VOLTAGE_1_25 },    
+        { 240000000ULL, VREG_VOLTAGE_1_25 },    
         { 400000000ULL, VREG_VOLTAGE_1_30 },   // максимум VREG, дальше только частотный предел  
     };
   

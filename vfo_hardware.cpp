@@ -1402,7 +1402,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
   
         // Ступень пройдена — печатаем её параметры и запоминаем как потолок  
         Serial.printf("[OCTEST] OK  clk_sys=%.1f MHz  fbdiv=%lu p1=%lu p2=%lu  VSEL=%u mV  T_CPU=%.1f C\n",  
-                      (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL),  
+                      step_cfg.clk_sys_hz / 1000000.0,
                       (unsigned long)step_cfg.fbdiv,  
                       (unsigned long)step_cfg.p1,  
                       (unsigned long)step_cfg.p2,  
@@ -1418,7 +1418,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
   
     if (max_ok) {  
         Serial.printf("[OCTEST] Тест окончен. Потолок: %.1f МГц (fbdiv=%lu, p1=%lu, p2=%lu, VSEL=%u mV, T_CPU=%.1f C)\n",  
-                      (unsigned long)(pll_overclock.clk_sys_hz / 1000000ULL),  
+                      (double)(pll_overclock.clk_sys_hz / 1000000.0), 
                       (unsigned long)pll_overclock.fbdiv,  
                       (unsigned long)pll_overclock.p1,  
                       (unsigned long)pll_overclock.p2,  

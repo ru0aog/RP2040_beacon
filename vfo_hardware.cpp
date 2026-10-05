@@ -336,17 +336,8 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
 
     tone_changed = true;
     multicore_launch_core1(vfo_core1_entry);
-    
-    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
-                  (double)current_clk_sys_hz / 1000000.0,
-                  (unsigned long)opt.fbdiv,    
-                  (unsigned long)opt.p1,    
-                  (unsigned long)opt.p2,    
-                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),    
-                  (unsigned)vsel_to_mv(vsel),    
-                  (double)current_clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
-                  (unsigned)ssi_hw->baudr,    
-                  (double)vfo_read_core_temp_c());    
+  
+ 
 }
 
 
@@ -1114,6 +1105,26 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // Физически прошиваем выбранные делители в регистры PLL чипа RP2040
     // (Этот вызов обновит и физическую частоту, и current_clk_sys_hz!)
     vfo_set_clk_sys(target_pll, selected_vsel);
+    // ========================================================================
+
+    // ========================================================================
+    // ИСПРАВЛЕНО: Честный вывод BOOST строго в момент его физического захвата!
+    // Теперь данные fbdiv, p1, p2 берутся из РЕАЛЬНО примененной target_pll.
+    // ========================================================================
+    if (clk_boosted) {
+        pll_overclock = target_pll; // Обновляем рабочий профиль для термогуарда
+        
+        Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
+                      (double)current_clk_sys_hz / 1000000.0,  // Выведет честные 254.007 MHz!
+                      (unsigned long)target_pll.fbdiv,    
+                      (unsigned long)target_pll.p1,    
+                      (unsigned long)target_pll.p2,    
+                      (unsigned long)(target_pll.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),    
+                      (unsigned)vsel_to_mv(selected_vsel),    
+                      (double)current_clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
+                      (unsigned)ssi_hw->baudr,    
+                      (double)vfo_read_core_temp_c());
+    }
     // ========================================================================
 
 

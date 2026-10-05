@@ -74,6 +74,7 @@
 #include <Adafruit_TinyUSB.h>
 #include <hardware/flash.h>
 #include <hardware/sync.h>
+#include "vfo_hardware.h"
 
 // ФИЗИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ОБЪЕКТОВ ДЛЯ ЛИНКОВЩИКА
 Adafruit_USBD_MSC usb_msc;
@@ -221,12 +222,19 @@ static void save_ram_to_flash() {
   meta->magic = SLOT_MAGIC;
   meta->seq = next_seq;
 
+  // Флэш нельзя программировать на разогнанной clk_sys — откатываем частоту на номинал  
+  bool was_boosted = clk_boosted;  
+  if (was_boosted) vfo_clk_boost_exit(); 
+
   // Выполняем физическую безопасную запись с отключением прерываний на Core 0
   uint32_t ints = save_and_disable_interrupts();
   flash_range_erase(target_flash_addr, SLOT_SIZE);
   flash_range_program(target_flash_addr, ram_disk_buffer, DISK_SIZE_BYTES);
   restore_interrupts(ints);
   flash_flush_cache();
+
+  // Возвращаем разгон, если он был активен (сеанс ещё идёт)  
+  if (was_boosted) vfo_clk_boost_enter(); 
 
   // Обновляем глобальное состояние менеджера только ПОСЛЕ успешного программирования
   current_active_slot = next_slot;

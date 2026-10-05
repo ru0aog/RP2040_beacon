@@ -1072,8 +1072,17 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         selected_vsel = VREG_VOLTAGE_1_15;        // Легкий вольтмод для промежуточных частот
     }
 
+    // Запуск безопасной двухранговой смены частоты шины  
+    if (clk_boosted) {  
+        // Boost уже включен до init — не сбрасываем разгон,  
+        // применяем OC-профиль и его напряжение  
+        vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);  
+    } else {  
+        vfo_set_clk_sys(pll_nominal, selected_vsel);  
+    }
+
     // Запуск безопасной двухранговой смены частоты шины
-    vfo_set_clk_sys(pll_nominal, selected_vsel);
+    // vfo_set_clk_sys(pll_nominal, selected_vsel);
 
     if (!pio_program_loaded) {
         lo_offset = pio_add_program(lo_pio, &pio_square_program);

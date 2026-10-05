@@ -9,7 +9,6 @@
  * и работает без обращения к ОЗУ. Благодаря этому частота расчета дизеринга 
  * достигает своего физического потолка — нескольких мегагерц.
 
-/*
 Архитектурная схема (MASH 1-1)
 В коде параллельно работают два 32-битных регистра-аккумулятора: loc_acc1 (первая ступень) и loc_acc2 (вторая ступень).
 - Первая ступень интегрирует (накапливает) входное дробное приращение частоты step (оно же dds_step). 
@@ -114,7 +113,6 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); /
 static vreg_voltage vsel_for(uint64_t clk_hz);
 static uint64_t vfo_base_mhz = 0;   // базовый тон сетки, мГц  
 static uint64_t vfo_step_mhz = 0;   // шаг сетки, мГц
-
 
 // Глобальные профили тактирования (static полностью удалены для extern-связывания)
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
@@ -266,7 +264,8 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
     // === ПЕРЕСЧЁТ ДЕЛИТЕЛЯ XIP/SSI: флэш не должен разгоняться вместе с ядром ===  
     // SCK флэша = clk_sys / BAUDR. Держим SCK <= ~100 МГц — иначе XIP-выборки  
     // (включая хвост самой этой функции после возврата на PLL) идут за спеком.  
-        uint32_t ssi_baud = (uint32_t)((target_clk_hz + 99999999ULL) / 100000000ULL) * 2u;  
+        uint32_t ssi_baud = (uint32_t)((target_clk_hz + 99999999ULL) / 100000000ULL);  
+        ssi_baud = (ssi_baud + 1u) & ~1u;   // вверх до чётного  
         if (ssi_baud < 2u)    ssi_baud = 2u;      // аппаратный минимум, только чётные  
         if (ssi_baud > 34u)   ssi_baud = 34u;     // потолок 340 МГц -> 100 МГц SCK  
         ssi_hw->baudr = ssi_baud;                 // ssi_hw из hardware/structs/ssi.h  
@@ -1093,7 +1092,25 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
 
     // Переводим найденную идеальную опорную частоту обратно в миллигерцы  
     vfo_base_mhz = snapped_base_chz * 10ULL;  
-    vfo_step_mhz = (uint64_t)(step_hz * 1000.0);
+    vfo_step_mhz = (uint64_t)(step_hz * 1000.0);  
+  
+    // Заполняем таблицу тонов через общий хелпер — он же будет  
+    // вызван из vfo_clk_boost_enter/exit при смене clk_sys  
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
+    vfo_set_tone_instant(0);
+
+    // Переводим герцы в мегагерцы для 64-битной точности DDS  
+    uint64_t base_freq_mhz = (uint64_t)base_freq_hz * 1000000ULL;  
+    uint64_t step_mhz      = (uint64_t)step_hz * 1000000ULL;  
+  
+    // Запоминаем в глобалах для vfo_rebuild_tone_table при boost  
+    vfo_base_mhz = base_freq_mhz;  
+    vfo_step_mhz = step_mhz;  
+  
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
+        uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);  
+        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
+    }
 
     // 2. Заполняем таблицу тонов: каждый следующий тон строго равен base + i * step
     // Это гарантирует математически ровную сетку IFKP без рассинхронизации фазы

@@ -86,7 +86,6 @@
  * ============================================================================  
  */
 
-#include "vfo_hardware.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "hardware/pll.h"
@@ -95,7 +94,8 @@
 #include "hardware/timer.h"
 #include "hardware/structs/sio.h"
 #include "pico/multicore.h"
-
+#include "vfo_hardware.h"
+#include "file_manager.h"
 
 
 // Структура для возврата найденных физических коэффициентов PLL

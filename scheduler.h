@@ -54,7 +54,7 @@ extern uint8_t  rtc_day;
 extern uint8_t  rtc_dotw; // Изолированная переменная дня недели (1=Пн ... 7=Вс)
 
 extern uint8_t device_DS[5];
-// Тип активного источника времени (реализация в scheduler.cpp)  
+// Тип активного источника времени
 enum RtcType {  
     RTC_NONE, 
     RTC_INTERNAL, 
@@ -64,19 +64,27 @@ enum RtcType {
   
 extern RtcType activeRtc;
 
-extern String rtc_chip_name; // будем пользоваться переменной из основного INO-файла
-extern uint32_t scheduled_freq_hz;  // частота из расписания
+extern String rtc_chip_name;          // будем пользоваться переменной из основного INO-файла
+extern uint32_t scheduled_freq_hz;    // частота из расписания
 
-void I2C_DS_restart(); // переключить шину Wire1 на устройство DS3231
+void I2C_DS_restart();                // переключить шину Wire на устройство DS3231
 void handle_time_command(String cmd);
 void handle_date_command(String cmd);
 bool is_time_to_transmit(uint8_t mode);
 
 
-// scheduler.h — добавить  
 #define MAX_SCHEDULE_TASKS 32  
-enum BeaconMode : uint8_t { MODE_IFKP=0, MODE_RTTY=1, MODE_CW=2, MODE_SEQ=3, MODE_NONE=255 };  
-  
+// ============================================================================
+// Структура планировщика задач нового поколения в ОЗУ
+// ============================================================================
+enum BeaconMode : uint8_t {
+  MODE_IFKP=0, 
+  MODE_RTTY=1, 
+  MODE_CW  =2, 
+  MODE_SEQ =3,            // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
+  MODE_NONE=255 };  
+
+// Структура задачи с использованием битовой маски под дни недели (1 байт)
 struct TaskItem {  
   bool     active;  
   uint8_t  mode;          // BeaconMode  
@@ -92,31 +100,5 @@ void print_schedule();
 String fmt_next_start(int32_t abs_min);
 int32_t get_next_start_minute(uint8_t mode);
 
-/*
-// ============================================================================
-// Структура планировщика задач нового поколения в ОЗУ
-// ============================================================================
-#define MODE_CW    0
-#define MODE_RTTY  1
-#define MODE_IFKP  2
-#define MODE_SEQ   3 // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
-
-// Структура задачи с использованием битовой маски под дни недели (1 байт)
-struct TaskItem {
-    uint8_t  days;         // Битовая маска дней: 0=Каждый день, бит 1=Пн, бит 2=Вт ... бит 7=Вс
-    uint8_t  start_hour;   
-    uint8_t  start_min;    
-    uint8_t  end_hour;     
-    uint8_t  end_min;      
-    uint8_t  interval_min; 
-    uint32_t freq_hz;      
-    uint8_t  mode;         
-    bool     active;       
-};
-
-
-#define MAX_SCHEDULE_TASKS 32
-extern TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
-*/
 
 #endif

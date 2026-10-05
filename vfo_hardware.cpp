@@ -96,6 +96,7 @@
 #include "hardware/vreg.h"
 #include <hardware/watchdog.h>
 #include <hardware/adc.h>
+#include "hardware/divider.h"
 #include "pico/multicore.h"
 #include "vfo_hardware.h"
 #include "file_manager.h"
@@ -1307,6 +1308,55 @@ void vfo_find_max_stable_clock(void) {
                 else                   crc ^= rnd & 0xFFFF;  
             }  
         }  
+        
+        // === ПРОВЕРКА ЦЕЛОСТНОСТИ SRAM ===  
+        if (crc == 0xFFFFFFFFu) {  
+            Serial.printf("[OCTEST] FAIL: повреждение данных SRAM на clk_sys=%lu MHz (fbdiv=%lu p1=%lu p2=%lu)\n",  
+                          (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL),  
+                          (unsigned long)step_cfg.fbdiv,  
+                          (unsigned long)step_cfg.p1,  
+                          (unsigned long)step_cfg.p2);  
+            *scratch = 0xFFFFFFFFu;  
+            vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
+            Serial.println("[OCTEST] Тест прерван. pll_overclock содержит последнюю стабильную ступень.");  
+            return;  
+        }  
+  
+        // === ФАЗА 5: аппаратный делитель SIO (divmod) ===  
+        // SIO DIVIDER — отдельный блок кристалла, ошибки в нём проявляются  
+        // как неверные частные при заниженном VCORE  
+        t0 = millis();  
+        while (millis() - t0 < 100) {  
+            for (int n = 0; n < 5000; n++) {  
+                uint32_t num = 0x89ABCDEFu + (uint32_t)n * 7919u;  
+                uint32_t den = 13u + (uint32_t)(n % 101);  
+                hw_divider_divmod_u32_start(num, den);  
+                hw_divider_wait_ready();  
+                // Блокирующее деление через SIO-делитель:  
+                uint32_t q = hw_divider_u32_quotient(65535u, 37u);   // 65535 / 37  
+                // Остаток лежит в mod_reg:  
+                uint32_t r = hw_divider_u32_remainder(65535u, 37u);  // 65535 % 37
+                // Проверка инварианта деления: num == q*den + r  
+                if (q * den + r != num) { crc = 0xFFFFFFFEu; }  
+                crc ^= q ^ r;  
+            }  
+        }  
+        if (crc == 0xFFFFFFFEu) { /* та же FAIL-ветка, что выше */ }  
+  
+        // === ФАЗА 6: чтение Flash через XIP + косвенные прыжки ===  
+        // Гоняет QMI/XIP-кэш и arbitрацию AHB — классический слабый узел при разгоне  
+        t0 = millis();  
+        const volatile uint32_t *flash_ptr = (const volatile uint32_t *)(0x10000000u + FLASH_TARGET_OFFSET);  
+        while (millis() - t0 < 100) {  
+            uint32_t acc = 0;  
+            // Псевдослучайный порядок чтения — бьём по cache miss  
+            for (int n = 0; n < 4096; n++) {  
+                uint32_t idx = (n * 61u) % 1024u;  
+                acc ^= flash_ptr[idx];  
+            }  
+            crc ^= acc;  
+        }  
+        (void)crc;
 
         watchdog_update();
   

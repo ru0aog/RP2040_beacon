@@ -56,6 +56,7 @@
 #include "file_manager.h" // Доступ к константам и структуре TaskItem
 #include "si5351_driver.h"
 #include "climate_log.h"
+#include "vfo_hardware.h"
 
 extern int pin_amp_act;          // Динамический пин активации УМ из file_manager.cpp
 extern bool dev_TX_state;        // Состояние усилителя (true = передача, false = прием)
@@ -351,6 +352,8 @@ void update_scheduler() {
   if (pin_amp_act != -1) {
     gpio_put(pin_amp_act, dev_TX_state);
   }
+
+  vfo_clk_thermal_guard();
 
   if (device_DS[0] == 1 && (activeRtc == RTC_DS3231 || activeRtc == RTC_DS1307)) {
     // если часы подключены

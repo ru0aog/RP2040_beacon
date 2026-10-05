@@ -57,6 +57,13 @@
 #define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // 133 МГц - Номинальный предел без вольтмода
 #define VFO_CLK_SYS_MAX_HZ      500000000ULL  // 500 МГц - Физический потолок стабильности ядер
 
+// === ТЕРМОГУАРД ДЛЯ РЕЖИМА РАЗГОНА (встроенный DDS) ===  
+// Вызывается периодически из loop() пока clk_boosted == true.  
+// T_HI — порог троттлинга, T_LO — возврат в разгон (гистерезис ~10-15°C).  
+  
+#define VFO_THROTTLE_HI_C   80.0f   // выше — немедленный откат на номинал  
+#define VFO_THROTTLE_LO_C   60.0f   // возврат в буст только после остывания ниже этого  
+
 // Потолок SPI-частоты QSPI-флэша. 50 МГц — консервативно и перекрывает  
 // любые флэши; если ваша флэш специфицирована на 104/133 МГц — можно  
 // поднять, но для стресс-теста кристалла достаточно и 50.  
@@ -132,6 +139,8 @@ void vfo_operation_set(bool key_down);          // функция активац
 void vfo_clk_boost_enter(void);
 void vfo_clk_boost_exit(void);
 
-void vfo_find_max_stable_clock(void); // Добавлен прототип стресс-теста
+void vfo_clk_thermal_guard(void);     // проверка температуры и троттлинг
+
+void vfo_find_max_stable_clock(void); // стресс-тест и поиск предела разгона процессора
 
 #endif // VFO_HARDWARE_H

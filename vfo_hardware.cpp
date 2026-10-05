@@ -119,6 +119,11 @@ PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFA
 PllConfig pll_overclock = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false }; 
 volatile bool clk_boosted = false;
 
+static bool thermal_throttled = false; // защёлка состояния троттлинга  
+static uint16_t vsel_to_mv(uint32_t vsel);  
+static float    vfo_read_core_temp_c(void);
+
+
 // Помощник автоматического определения напряжения ядра под частоту шины
 static vreg_voltage vsel_for(uint64_t clk_hz) {
     if (clk_hz >= 280000000ULL)      return VREG_VOLTAGE_1_30; // Легальный максимум SDK
@@ -126,8 +131,6 @@ static vreg_voltage vsel_for(uint64_t clk_hz) {
     else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;
     return VREG_VOLTAGE_DEFAULT;
 }
-
-
 
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
@@ -1197,6 +1200,39 @@ static float vfo_read_core_temp_c(void) {
 }
 
 
+ 
+void vfo_clk_thermal_guard(void) {  
+    if (!clk_boosted && !thermal_throttled) return;   // нечего проверять  
+    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return; // буст не настроен  
+  
+    float temp = vfo_read_core_temp_c();  
+  
+    if (!thermal_throttled && temp >= VFO_THROTTLE_HI_C) {  
+        // Перегрев: снимаем разгон — те же шаги, что vfo_clk_boost_exit()  
+        vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
+        vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
+        vfo_set_tone_instant(0);  
+        clk_boosted = false;  
+        thermal_throttled = true;  
+        Serial.printf("[BOOST] THROTTLE: T_CPU=%.1f C >= %.0f C — откат на %lu MHz до остывания < %.0f C\n",  
+                      (double)temp, (double)VFO_THROTTLE_HI_C,  
+                      (unsigned long)(pll_nominal.clk_sys_hz / 1000000ULL),  
+                      (double)VFO_THROTTLE_LO_C);  
+    }  
+    else if (thermal_throttled && temp <= VFO_THROTTLE_LO_C) {  
+        // Кристалл остыл — возвращаем разгон (напряжение из сохранённого профиля)  
+        vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);  
+        vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
+        vfo_set_tone_instant(0);  
+        clk_boosted = true;  
+        thermal_throttled = false;  
+        Serial.printf("[BOOST] RESUME: T_CPU=%.1f C — возврат на %lu MHz\n",  
+                      (double)temp,  
+                      (unsigned long)(pll_overclock.clk_sys_hz / 1000000ULL));  
+    }  
+}
+
+
 /**  
  * @brief Стресс-тест: поиск индивидуального потолка clk_sys кристалла.  
  *  
@@ -1249,7 +1285,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
             for (uint32_t p2 = 1; p2 <= 2; p2++) {  
                 uint64_t cs = vco_hz / ((uint64_t)p1 * p2);  
                 if (cs <= CLK_START_HZ || cs > CLK_CEIL_HZ) continue;  
-                if (cand_count >= (sizeof(cand)/sizeof(cand[0]))) break;  // массив полон — дальше не пишем
+                if (cand_count >= (int)(sizeof(cand) / sizeof(cand[0]))) break;  // массив полон — дальше не пишем
                 cand[cand_count++] = { fbdiv, p1, p2, cs };  
             }  
         }  

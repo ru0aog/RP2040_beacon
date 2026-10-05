@@ -108,16 +108,22 @@
 static void detach_peripheral_clock();
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel);
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
-PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = VFO_CLK_SYS_MAX_HZ);
 
-static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); // Синхронизировано имя
+// ИСПРАВЛЕНО: Убран "= VFO_CLK_SYS_MAX_HZ" из .cpp, чтобы не злить GCC
+PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit);
+
+// ИСПРАВЛЕНО: Добавлен упреждающий прототип Core 1, теперь vfo_clk_boost_enter сможет его вызвать!
+static void __not_in_flash_func(vfo_core1_entry)();
+
+static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); 
 static vreg_voltage vsel_for(uint64_t clk_hz);
 static uint64_t vfo_base_mhz = 0;   // базовый тон сетки, мГц  
 static uint64_t vfo_step_mhz = 0;   // шаг сетки, мГц
 
 // Глобальные профили тактирования (static полностью удалены для extern-связывания)
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
-PllConfig pll_overclock = { 100, 3, 1, 400000000ULL, (uint32_t)VREG_VOLTAGE_1_30, true };
+PllConfig pll_overclock = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false }; // Буфер текущего сеанса
+PllConfig pll_ceiling   = { 100, 3, 1, 400000000ULL, (uint32_t)VREG_VOLTAGE_1_30,    true };  // Абсолютный потолок OCTEST
 volatile bool clk_boosted = false;
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
@@ -132,6 +138,11 @@ static vreg_voltage vsel_for(uint64_t clk_hz) {
     else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;
     return VREG_VOLTAGE_DEFAULT;
 }
+
+
+
+
+
 
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
@@ -289,50 +300,45 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
 
 
 
-
-void vfo_clk_boost_enter(void) {    
+void vfo_clk_boost_enter(unsigned int target_freq_hz) {    
     if (clk_boosted) return;    
     
-    // 1. Полноразмерный поиск глобального оптимума PLL (по умолчанию до 380 МГц)
-    PllConfig opt = vfo_find_optimal_pll(cached_base_freq_hz);    
+    multicore_reset_core1();
+    busy_wait_us(100);
     
-    // 2. ИСПРАВЛЕННЫЙ БЕЗОПАСНЫЙ КЛЭМП: Защита от улета за рантайм-предел OCTEST
-    if (opt.clk_sys_hz > pll_overclock.clk_sys_hz) {    
-        // УДАЛЕНО: Больше никаких VFO_CLK_SYS_MAX_HZ = ...
-        // Мы просто передаем предел стабильности кристалла прямо в аргумент автотюна.
-        // Матричный поиск найдет лучшие физические делители строго внутри этого окна!
-        opt = vfo_find_optimal_pll(cached_base_freq_hz, pll_overclock.clk_sys_hz);
+    cached_base_freq_hz = target_freq_hz;
+
+    // 1. Поиск глобального оптимума PLL
+    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, VFO_CLK_SYS_MAX_HZ);    
+    
+    // 2. Клэмпинг по НЕИЗМЕНЯЕМОМУ потолку pll_ceiling [Исправлено]
+    if (opt.clk_sys_hz > pll_ceiling.clk_sys_hz) {    
+        opt = vfo_find_optimal_pll(target_freq_hz, pll_ceiling.clk_sys_hz);
     }    
     
-    // 3. Ранний возврат: если стабильный разгон под эту частоту невозможен
     if (opt.clk_sys_hz <= pll_nominal.clk_sys_hz) {  
-        Serial.printf("[BOOST] SKIP (Для несущей %u Гц разгон не даст спектрального выигрыша)\n", cached_base_freq_hz);  
+        multicore_launch_core1(vfo_core1_entry);
         return;  
     }  
     
-    // 4. Подбор напряжения VSEL
     uint32_t vsel = opt.vsel;    
-    if (vsel == 0 || vsel < (uint32_t)VREG_VOLTAGE_1_10) {    
-        vsel = (uint32_t)vsel_for(opt.clk_sys_hz);
-    }    
+    if (vsel == 0) vsel = (uint32_t)vsel_for(opt.clk_sys_hz);
     
-    // 5. Переключение физической частоты чипа (обновит current_clk_sys_hz)
+    // 3. Сдвиг частоты и питания
     vfo_set_clk_sys(opt, vsel);    
     
-    // 6. Потокобезопасный пересчет таблицы тонов по ИСТИННОЙ current_clk_sys_hz
+    // 4. Пересчет таблиц и фиксация состояния сессии
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);    
-    
-    // 7. Применение параметров тона на Core 1
     vfo_set_tone_instant(0);    
     
     clk_boosted = true;    
+    pll_overclock = opt; // Запоминаем текущий рабочий профиль разгона для Термогуарда
+
+    tone_changed = true;
+    multicore_launch_core1(vfo_core1_entry);
     
-    // ========================================================================
-    // ИСПРАВЛЕНО: Вывод параметров тактирования строго по ИСТИННЫМ примененным значениям.
-    // Коэффициенты fbdiv, p1, p2 извлекаются напрямую из финальной конфигурационной структуры.
-    // ========================================================================
     Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
-                  (double)current_clk_sys_hz / 1000000.0,  // Отобразит честные 199.505 МГц
+                  (double)current_clk_sys_hz / 1000000.0,
                   (unsigned long)opt.fbdiv,    
                   (unsigned long)opt.p1,    
                   (unsigned long)opt.p2,    
@@ -340,8 +346,9 @@ void vfo_clk_boost_enter(void) {
                   (unsigned)vsel_to_mv(vsel),    
                   (double)current_clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
                   (unsigned)ssi_hw->baudr,    
-                  (double)vfo_read_core_temp_c());  
+                  (double)vfo_read_core_temp_c());    
 }
+
 
 
 
@@ -1044,7 +1051,6 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
  */
 // === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
-
 #ifdef VFO_DITHER_ON_CORE1
     multicore_reset_core1(); 
 #else
@@ -1062,45 +1068,22 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         vfo_spin_lock = spin_lock_init(lock_id);
     }
 
-    // ========================================================================
-    // ИСПРАВЛЕНО: Полная синхронизация частоты инициализации с режимом BOOST
-    // ========================================================================
     PllConfig target_pll;
 
-    // Если мы в бусте ИЛИ если в системе глобально включен автотюн PLL
-    #if defined(VFO_PLL_AUTOTUNE)
-        // Ищем глобальный спектральный оптимум во всем доступном диапазоне чипа
-        target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_MAX_HZ);
+    if (clk_boosted) {
+        // Уважаем буст, настроенный vfo_clk_boost_enter(), работаем на его частоте
+        target_pll = pll_overclock;
+    } else {
+        #if defined(VFO_PLL_AUTOTUNE)
+            target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_NOMINAL_HZ);
+        #else
+            target_pll = pll_nominal;
+        #endif
         
-        // Если частота ушла выше стабильного потолка OCTEST — принудительно клэмпим её
-        if (target_pll.clk_sys_hz > pll_overclock.clk_sys_hz) {
-            target_pll = vfo_find_optimal_pll(base_freq_hz, pll_overclock.clk_sys_hz);
-        }
-        
-        // Раз мы нашли и применяем оверклок-частоту, взводим флаг буста для термогуарда
-        if (target_pll.clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ) {
-            clk_boosted = true;
-            pll_overclock = target_pll;
-        }
-    #else
-        // Если автотюн выключен — работаем на константном номинале
-        target_pll = pll_nominal;
-        clk_boosted = false;
-    #endif
-
-    // Подбираем безопасное вольтажное смещение (VREG) под рантайм-частоту
-    uint32_t selected_vsel = target_pll.vsel;
-    if (selected_vsel == 0 || selected_vsel < (uint32_t)VREG_VOLTAGE_1_10) {
-        selected_vsel = (target_pll.clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ) 
-                        ? (uint32_t)vsel_for(target_pll.clk_sys_hz) 
-                        : (uint32_t)VREG_VOLTAGE_DEFAULT;
+        uint32_t selected_vsel = target_pll.vsel;
+        if (selected_vsel == 0) selected_vsel = VREG_VOLTAGE_DEFAULT;
+        vfo_set_clk_sys(target_pll, selected_vsel);
     }
-
-    // Физически прошиваем PLL чипа RP2040 и обновляем переменную current_clk_sys_hz
-    vfo_set_clk_sys(target_pll, selected_vsel);
-    // ========================================================================
-
-
 
     if (!pio_program_loaded) {
         lo_offset = pio_add_program(lo_pio, &pio_square_program);
@@ -1145,17 +1128,16 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     vfo_set_tone_instant(0);
 
     if (debug_flag) {
-        VfoParameters real_base_params = ifkp_tones[0]; //
+        VfoParameters real_base_params = ifkp_tones[0];
         Serial.printf("\n--- VFO Runtime Diagnostics (True Target) ---\n");
-        Serial.printf("Target Freq: %u Hz (Grid Freq: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0); //
-        Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz); //
+        Serial.printf("Target Freq: %u Hz (Grid Freq: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);
+        Serial.printf("clk_sys    : %u Hz\n", current_clk_sys_hz); 
         Serial.printf("PIO Regs   : INT=%u, FRAC=%u (Примененные PLL: fbdiv=%lu, p1=%lu, p2=%lu)\n", 
-                      real_base_params.pio_int, real_base_params.pio_frac, //
+                      real_base_params.pio_int, real_base_params.pio_frac,
                       (unsigned long)target_pll.fbdiv, (unsigned long)target_pll.p1, (unsigned long)target_pll.p2);
-        Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step); //
+        Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);
         Serial.printf("---------------------------------------------\n");
     }
-
 
 #ifdef VFO_DITHER_ON_CORE1
     tone_changed = true;
@@ -1165,6 +1147,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     timer_already_running = true;
 #endif
 }
+
 
 
 
@@ -1189,35 +1172,34 @@ static float vfo_read_core_temp_c(void) {
 
  
 void vfo_clk_thermal_guard(void) {  
-    if (!clk_boosted && !thermal_throttled) return;   // нечего проверять  
-    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return; // буст не настроен  
+    if (!clk_boosted && !thermal_throttled) return;   
+    if (pll_ceiling.clk_sys_hz <= pll_nominal.clk_sys_hz) return; 
   
     float temp = vfo_read_core_temp_c();  
   
     if (!thermal_throttled && temp >= VFO_THROTTLE_HI_C) {  
-        // Перегрев: снимаем разгон — те же шаги, что vfo_clk_boost_exit()  
+        // Аварийный откат на номинал
         vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
         vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
         vfo_set_tone_instant(0);  
         clk_boosted = false;  
         thermal_throttled = true;  
-        Serial.printf("[BOOST] THROTTLE: T_CPU=%.1f C >= %.0f C — откат на %lu MHz до остывания < %.0f C\n",  
+        Serial.printf("[BOOST] THROTTLE: T_CPU=%.1f C >= %.0f C — откат на %lu MHz\n",  
                       (double)temp, (double)VFO_THROTTLE_HI_C,  
-                      (unsigned long)(pll_nominal.clk_sys_hz / 1000000ULL),  
-                      (double)VFO_THROTTLE_LO_C);  
+                      (unsigned long)(pll_nominal.clk_sys_hz / 1000000ULL));  
     }  
     else if (thermal_throttled && temp <= VFO_THROTTLE_LO_C) {  
-        // Кристалл остыл — возвращаем разгон (напряжение из сохранённого профиля)  
+        // Кристалл остыл — ВОЗВРАЩАЕМ АКТИВНЫЙ ПРОФИЛЬ ТЕКУЩЕЙ СЕССИИ (pll_overclock) [Исправлено]
         vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);  
         vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
         vfo_set_tone_instant(0);  
         clk_boosted = true;  
         thermal_throttled = false;  
-        Serial.printf("[BOOST] RESUME: T_CPU=%.1f C — возврат на %lu MHz\n",  
-                      (double)temp,  
-                      (unsigned long)(pll_overclock.clk_sys_hz / 1000000ULL));  
+        Serial.printf("[BOOST] RESUME: T_CPU=%.1f C — возврат на %7.3f MHz\n",  
+                      (double)temp, (double)pll_overclock.clk_sys_hz / 1000000.0);  
     }  
 }
+
 
 
 /**  
@@ -1436,22 +1418,17 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
                       step_cfg.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
                       (unsigned)ssi_hw->baudr,  
                       (double)vfo_read_core_temp_c());
-        pll_overclock = step_cfg;  
+        // Фиксируем предел стабильности чипа в долговечную pll_ceiling [Исправлено]
+        pll_ceiling = step_cfg;  
         max_ok = true;  
-    }  
+    } // Конец цикла перебора cand_count
   
-    // Все ступени пройдены или цикл завершился — scratch больше не нужен  
     *scratch = 0xFFFFFFFFu;  
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
   
     if (max_ok) {  
-        Serial.printf("[OCTEST] Потолок: %6.1f МГц (fbdiv=%lu, p1=%lu, p2=%lu, VSEL=%u mV, T_CPU=%.1f C)\n",  
-                            (double)(pll_overclock.clk_sys_hz / 1000000.0),  
-                            (unsigned long)pll_overclock.fbdiv,  
-                            (unsigned long)pll_overclock.p1,  
-                            (unsigned long)pll_overclock.p2,  
-                            (unsigned)vsel_to_mv(pll_overclock.vsel),  
-                            (double)vfo_read_core_temp_c());
+        Serial.printf("[OCTEST] Потолок стабильности ядра зафиксирован: %6.1f МГц\n",  
+                      (double)(pll_ceiling.clk_sys_hz / 1000000.0));
         Serial.println("[OCTEST] Для рабочего разгона рекомендуется запас 10-15% по частоте.");  
     } else {  
         Serial.println("[OCTEST] Ни одна ступень выше номинала не прошла. pll_overclock не изменён.");  

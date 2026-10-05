@@ -1,147 +1,63 @@
-﻿/**  
- * ============================================================================  
- *  vfo_hardware.h — Публичный интерфейс и конфигурация программного VFO  
- *  Версия 2.10 (Профилирование и ASM-оптимизация Core 1), 2026-09-26  
- *  Проект: RP2040_beacon  
- * ----------------------------------------------------------------------------  
- *  НАЗНАЧЕНИЕ  
- *  Заголовок описывает low-level API управления ВЧ-генератором и все  
- *  компиляционные переключатели (#define), задающие режим работы движка.  
- *  
- *  ПРИНЦИП ГЕНЕРАЦИИ  
- *  Меандр формируется PIO-программой из 2 тактов, поэтому выходная частота  
- *  f_out = clk_sys / (2 * D), где D — дробный делитель PIO (16.8: pio_int.pio_frac).  
- *  Дробный остаток делителя доводится программным DDS/MASH-дизерингом,  
- *  подстраивающим clkdiv «на лету» на втором ядре (Core 1).  
- *  
- *  КЛЮЧЕВЫЕ ПЕРЕКЛЮЧАТЕЛИ  
- *   VFO_PLL_AUTOTUNE   — адаптивный подбор clk_sys под целевую частоту:  
- *                        минимизируется остаток dds_step (первично), затем  
- *                        pio_frac, затем выбирается максимальная clk_sys.  
- *   VFO_DITHER_ON_CORE1— вынос плотного цикла дизеринга на Core 1.  
- *   VFO_DITHER_FAST    — регистро-резидентный Си-конвейер горячего цикла  
- *                        (без ОЗУ-структур, без NOP) для максимальной F_s_dither.  
- *   VFO_USE_MASH2      — Delta-Sigma 2-го порядка (MASH-1-1); иначе 1-й порядок.  
- *   VFO_DITHER_RANDOMIZE / VFO_DITHER_RAND_BITS — инъекция псевдослучайного  
- *                        дизера в аккумулятор (декорреляция остаточной гребёнки).  
- *                        Практический диапазон RAND_BITS: 2..8. При корректно  
- *                        отработавшем автотюне (dds_step у границы 0/2^32)  
- *                        влияние рандомизации на спектр минимально.  
- *   VFO_SNAP_TO_GRID   — привязка частоты в окне ~+-0.1 Гц для уменьшения дроби.  
- *   VFO_DITHER_PROFILE / VFO_PROFILE_PIN — вывод меандра частоты цикла на  
- *                        отладочный GPIO (на осциллографе видна половина F_s_dither).  
- *                        В продакшене отключать: лишний доступ к SIO/итерацию.  
- *   VFO_CLOCK_133_MHZ  — фиксированная clk_sys (только при выключенном автотюне).  
- *  
- *  АППАРАТНЫЕ ГРАНИЦЫ (важно)  
- *   clk_sys ограничена 100..133 МГц, VCO — 750..1600 МГц. Так как D растёт  
- *   с ростом clk_sys, тонкая частотная сетка достижима только у верхней  
- *   границы clk_sys. На ВЧ до ~14-15 МГц (D >= 4-5) сетка чистая; на 10 м  
- *   (28 МГц, D ~= 2) шаг сетки ~= десятки кГц — это фундаментальный предел  
- *   схемы «PIO как прямой делитель clk_sys», а не дефект дизеринга. Дальние  
- *   горбы MASH и гармоники меандра окончательно давит только аналоговый  
- *   выходной ФНЧ/полосовой фильтр на выходном пине.  
- *  
- *  КАЛИБРОВКА  
- *   VFO_CALIBRATED_XOSC_HZ — истинная физическая частота кварца ЭТОГО  
- *   экземпляра платы; от неё зависят все узлы сетки автотюна.  
- * ============================================================================  
- */
-
-#ifndef VFO_HARDWARE_H
+﻿#ifndef VFO_HARDWARE_H
 #define VFO_HARDWARE_H
 
 #include <Arduino.h>
 
 // Лимиты частотного плана
-#define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // 133 МГц - Номинальный предел без вольтмода
-#define VFO_CLK_SYS_MAX_HZ      380000000ULL  // 380 МГц - Разумный потолок стабильности ядер
-
-// Потолок SPI-частоты QSPI-флэша. 50 МГц — консервативно и перекрывает  
-// любые флэши; если ваша флэш специфицирована на 104/133 МГц — можно  
-// поднять, но для стресс-теста кристалла достаточно и 50.  
+#define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  
+#define VFO_CLK_SYS_MAX_HZ      380000000ULL  
 #define VFO_FLASH_SCK_MAX_HZ    50000000ULL
+#define VFO_THROTTLE_HI_C   80.0f   
+#define VFO_THROTTLE_LO_C   60.0f   
 
-// === ТЕРМОГУАРД ДЛЯ РЕЖИМА РАЗГОНА (встроенный DDS) ===  
-// Вызывается периодически из loop() пока clk_boosted == true.  
-// T_HI — порог троттлинга, T_LO — возврат в разгон (гистерезис ~10-15°C).  
-  
-#define VFO_THROTTLE_HI_C   80.0f   // выше — немедленный откат на номинал  
-#define VFO_THROTTLE_LO_C   60.0f   // возврат в буст только после остывания ниже этого  
-
-
-// Структура для возврата найденных физических коэффициентов PLL
 struct PllConfig {
     uint32_t fbdiv;
     uint32_t p1;
     uint32_t p2;
     uint64_t clk_sys_hz;
-    uint32_t vsel;         // выбранный VREG_VOLTAGE_* для этой частоты
-    bool is_oc;            // Флаг разгона: true, если частота требует поднятия VREG
+    uint32_t vsel;         
+    bool is_oc;            
 };
 
-// Глобальные конфигурации PLL, найденные автотюном
-extern PllConfig pll_nominal;
-extern PllConfig pll_overclock;
-extern volatile bool clk_boosted; // Сигнальный флаг для диспетчера защиты loop()
+// --- Архитектурное разделение профилей тактирования ---
+extern PllConfig pll_nominal;     
+extern PllConfig pll_overclock;   
+extern PllConfig pll_ceiling;     
+extern volatile bool clk_boosted; 
 
-// Прототипы функций предпускового оверклокингом радиомаяка на границах сессий
-void vfo_clk_boost_enter(void);
-void vfo_clk_boost_exit(void);
-
-// === Конфигурация механизмов снижения спуров ===
-#define VFO_USE_MASH2            // Включить Delta-Sigma 2-го порядка (MASH-1-1). Если выключено — 1-й порядок.
-#define VFO_DITHER_RANDOMIZE     // Включить рандомизацию входа аккумулятора (Dither Injection)
-#define VFO_SNAP_TO_GRID         // Включить привязку частоты в окне +-0.1 Гц для минимизации полной дроби
-
-// === Оптимизация и профилирование цикла дизеринга ===
-#define VFO_DITHER_FAST          // Включить локализацию переменных, __builtin_add_overflow и Inline ASM
-
-extern int pin_amp_act;
-
-// === Динамический автотюнинг PLL ===
-#define VFO_PLL_AUTOTUNE         // Адаптивный подбор clk_sys под целевую частоту для CW/IFKP/RTTY
-
-// === ЧАСТЬ A: Двухъядерный режим ===
-#define VFO_DITHER_ON_CORE1      // Вынос дизеринга в плотный цикл на Core 1.
-
-// === ЧАСТЬ B: Фиксированная тактовая частота (Используется, ТОЛЬКО если выключен VFO_PLL_AUTOTUNE) ===
-#define VFO_CLOCK_133_MHZ        // Разгон clk_sys до 133 МГц; иначе 120 МГц.
-
-// === Настройка интервала таймера (используется только если VFO_DITHER_ON_CORE1 выключен) ===
-#define VFO_DITHER_INTERVAL_US 10 
-
-// === Аппаратная конфигурация физического уровня ===
-extern int pin_freq_out; 
-#define VFO_OUTPUT_PIN       (pin_freq_out)// Пин для выхода сигнала радиочастоты 
-#define VFO_IFKP_TONES_COUNT 33            // Количество фиксированных тонов в сетке
-#define VFO_TONE_NONE        255           // Флаг неопределенного тона
-
-// Истинная физическая частота опорного кварца вашего экземпляра платы (калибровка)
-#define VFO_CALIBRATED_XOSC_HZ 12000350ULL
-
-// Структура параметров частоты для низкоуровневых регистров PIO и таймера фазы
 struct VfoParameters {
     uint32_t pio_int;
     uint32_t pio_frac;
     uint32_t dds_step;
-    uint32_t target_freq_chz; // Частота в сантигерцах (0.01 Гц)
+    uint32_t target_freq_chz; 
 };
 
-// Вынужденное размещение таблицы частот в ОЗУ для исключения XIP-обращений с Core 1
-extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
+#define VFO_USE_MASH2            
+#define VFO_DITHER_RANDOMIZE     
+#define VFO_SNAP_TO_GRID         
+#define VFO_DITHER_FAST          
+#define VFO_PLL_AUTOTUNE         
+#define VFO_DITHER_ON_CORE1      
+#define VFO_IFKP_TONES_COUNT 33            
+#define VFO_TONE_NONE        255           
+#define VFO_CALIBRATED_XOSC_HZ 12000350ULL
 
-// === НАБОР ФУНКЦИЙ УПРАВЛЕНИЯ ВЧ-ЭФИРОМ (Low-Level API) ===
+extern VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
+extern int pin_freq_out; 
+
+// ИСПРАВЛЕНО: Восстановлен жесткий макрос пина для совместимости с si5351_driver.cpp
+#define VFO_OUTPUT_PIN       (pin_freq_out)
+
+// ИСПРАВЛЕНО: Заданы аргументы по умолчанию в прототипах (только здесь!)
+PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = VFO_CLK_SYS_MAX_HZ);
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
-void vfo_operation_set(bool key_down);          // функция активации программного VFO
+void vfo_operation_set(bool key_down);
 
-// Прототипы глобальных функций предпускового разгона и стресс-теста
-void vfo_clk_boost_enter(void);
+// ИСПРАВЛЕНО: Сделан безопасный аргумент по умолчанию (3.5 МГц), если si5351 вызывает функцию без параметров
+void vfo_clk_boost_enter(unsigned int target_freq_hz = 3500000);
 void vfo_clk_boost_exit(void);
-
-void vfo_clk_thermal_guard(void);     // проверка температуры и троттлинг
-
-void vfo_find_max_stable_clock(void); // стресс-тест и поиск предела разгона процессора
+void vfo_clk_thermal_guard(void);     
+void vfo_find_max_stable_clock(void); 
 
 #endif // VFO_HARDWARE_H

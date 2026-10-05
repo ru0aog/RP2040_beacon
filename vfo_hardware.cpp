@@ -1382,13 +1382,18 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
         watchdog_update();  
   
         // Ступень пройдена — печатаем её параметры и запоминаем как потолок  
-        Serial.printf("[OCTEST] OK  clk_sys=%6.1f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VSEL=%4u mV  T_CPU=%5.1f C\n",  
-                            (double)(step_cfg.clk_sys_hz / 1000000.0),  
-                            (unsigned long)step_cfg.fbdiv,  
-                            (unsigned long)step_cfg.p1,  
-                            (unsigned long)step_cfg.p2,  
-                            (unsigned)vsel_to_mv((uint32_t)vsel),  
-                            (double)vfo_read_core_temp_c());
+        uint32_t vco_mhz = step_cfg.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL); // VCO = fbdiv × 12 МГц  
+  
+        Serial.printf("[OCTEST] OK  clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
+                      step_cfg.clk_sys_hz / 1000000.0,  
+                      (unsigned long)step_cfg.fbdiv,  
+                      (unsigned long)step_cfg.p1,  
+                      (unsigned long)step_cfg.p2,  
+                      (unsigned long)vco_mhz,  
+                      (unsigned)vsel_to_mv((uint32_t)vsel),  
+                      step_cfg.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
+                      (unsigned)ssi_hw->baudr,  
+                      (double)vfo_read_core_temp_c());
         pll_overclock = step_cfg;  
         max_ok = true;  
     }  

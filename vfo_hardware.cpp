@@ -1244,7 +1244,7 @@ void vfo_find_max_stable_clock(void) {
         }  
   
         // Помечаем ступень ДО перехода — если зависнем, scratch покажет виновника  
-        *scratch = (uint32_t)i;  
+        *scratch = (uint32_t)(cand[i].clk_sys_hz / 1000000ULL);  // вместо (uint32_t)i 
         watchdog_update();  
   
         // Позиционная инициализация: порядок полей = объявление PllConfig в .h  
@@ -1281,10 +1281,10 @@ void vfo_find_max_stable_clock(void) {
         }  
   
         // Фаза 2: SRAM запись по всему буферу  
-        for (int i = 0; i < 1024; i++) {  
-            stress_buf[i] = 0xA5A5A5A5u ^ (uint32_t)i;  
-            crc ^= stress_buf[i];  
-        }  
+        for (int w = 0; w < 1024; w++) {  
+            stress_buf[w] = 0xA5A5A5A5u ^ (uint32_t)w;  
+            crc ^= stress_buf[w];  
+        }
   
         // Фаза 3: SRAM чтение + верификация (ловит ошибки шины данных)  
         t0 = millis();  
@@ -1309,52 +1309,64 @@ void vfo_find_max_stable_clock(void) {
             }  
         }  
         
-        // === ПРОВЕРКА ЦЕЛОСТНОСТИ SRAM ===  
-        if (crc == 0xFFFFFFFFu) {  
-            Serial.printf("[OCTEST] FAIL: повреждение данных SRAM на clk_sys=%lu MHz (fbdiv=%lu p1=%lu p2=%lu)\n",  
+        // === ФАЗА 5: АППАРАТНЫЙ ДЕЛИТЕЛЬ SIO (hardware/divider.h) ===  
+        // Гоняет общий на оба ядра SIO-делитель варьируемыми операндами и  
+        // проверяет тождество  num == q*den + r  на КАЖДОЙ итерации.  
+        // При разгоне SIO — один из первых узлов, дающих тихие ошибки.  
+        bool div_ok = true;  
+        {  
+            uint32_t seed = crc | 1u;              // ненулевой стартовый поток  
+            t0 = millis();  
+            while (millis() - t0 < 150 && div_ok) {  
+                for (int n = 0; n < 4000; n++) {  
+                    seed = seed * 1664525u + 1013904223u;          // LCG — поток num  
+                    uint32_t num = seed;  
+                    uint32_t den = (seed >> 11) | 1u;              // делитель != 0  
+  
+                    uint32_t q = hw_divider_u32_quotient(num, den);  // блокирующий API  
+                    uint32_t r = hw_divider_u32_remainder(num, den);  
+  
+                    // Железное тождество деления с остатком  
+                    if ((uint64_t)q * den + r != num || r >= den) {  
+                        div_ok = false;  
+                        break;  
+                    }  
+                    crc ^= q ^ (r << 16);          // подмешиваем результат в CRC  
+                }  
+            }  
+        }  
+  
+        watchdog_update();  
+  
+        // Единая проверка целостности ступени: SRAM (Фаза 3) + делитель (Фаза 5)  
+        if (crc == 0xFFFFFFFFu || !div_ok) {  
+            Serial.printf("[OCTEST] FAIL (тихое искажение данных) на clk_sys=%lu MHz  "  
+                          "fbdiv=%lu p1=%lu p2=%lu  VSEL=%u mV  T_CPU=%.1f C\n",  
                           (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL),  
                           (unsigned long)step_cfg.fbdiv,  
                           (unsigned long)step_cfg.p1,  
-                          (unsigned long)step_cfg.p2);  
-            *scratch = 0xFFFFFFFFu;  
-            vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-            Serial.println("[OCTEST] Тест прерван. pll_overclock содержит последнюю стабильную ступень.");  
+                          (unsigned long)step_cfg.p2,  
+                          (unsigned)vsel_to_mv((uint32_t)vsel),  
+                          (double)vfo_read_core_temp_c());  
+            *scratch = (uint32_t)(cand[i].clk_sys_hz / 1000000ULL);       // виновная ступень — для разбора после ребута  
+            vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT); // откат на безопасный номинал  
+            Serial.printf("[OCTEST] Тест прерван: потолок ниже ступени %d.\n", i);  
             return;  
-        }  
+        }
   
-        // === ФАЗА 5: аппаратный делитель SIO (divmod) ===  
-        // SIO DIVIDER — отдельный блок кристалла, ошибки в нём проявляются  
-        // как неверные частные при заниженном VCORE  
+        // Фаза 6: случайное чтение из Flash через XIP — нагрузка на кэш и QSPI  
+        const volatile uint32_t *flash_ptr = (const volatile uint32_t *)0x10000000;  
         t0 = millis();  
+        uint32_t idx = 0;  
         while (millis() - t0 < 100) {  
-            for (int n = 0; n < 5000; n++) {  
-                uint32_t num = 0x89ABCDEFu + (uint32_t)n * 7919u;  
-                uint32_t den = 13u + (uint32_t)(n % 101);  
-                hw_divider_divmod_u32_start(num, den);  
-                hw_divider_wait_ready();  
-                // Блокирующее деление через SIO-делитель:  
-                uint32_t q = hw_divider_u32_quotient(65535u, 37u);   // 65535 / 37  
-                // Остаток лежит в mod_reg:  
-                uint32_t r = hw_divider_u32_remainder(65535u, 37u);  // 65535 % 37
-                // Проверка инварианта деления: num == q*den + r  
-                if (q * den + r != num) { crc = 0xFFFFFFFEu; }  
-                crc ^= q ^ r;  
-            }  
-        }  
-        if (crc == 0xFFFFFFFEu) { /* та же FAIL-ветка, что выше */ }  
-  
-        // === ФАЗА 6: чтение Flash через XIP + косвенные прыжки ===  
-        // Гоняет QMI/XIP-кэш и arbitрацию AHB — классический слабый узел при разгоне  
-        t0 = millis();  
-        const volatile uint32_t *flash_ptr = (const volatile uint32_t *)(0x10000000u + FLASH_TARGET_OFFSET);  
-        while (millis() - t0 < 100) {  
-            uint32_t acc = 0;  
-            // Псевдослучайный порядок чтения — бьём по cache miss  
-            for (int n = 0; n < 4096; n++) {  
-                uint32_t idx = (n * 61u) % 1024u;  
-                acc ^= flash_ptr[idx];  
-            }  
-            crc ^= acc;  
+            uint32_t v1 = flash_ptr[idx];  
+            idx = (idx * 1103515245u + 12345u) & 0x1FFF;  // 8 К слов = 32 КБ, за пределы кэша  
+            uint32_t v2 = flash_ptr[idx];  
+            crc ^= v1 + v2;  
+            
+            if (v1 != v2) {
+                crc = 0xFFFFFFFEu; // маркер искажения Flash-данных
+            }
         }  
         (void)crc;
 

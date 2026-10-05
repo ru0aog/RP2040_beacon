@@ -295,49 +295,72 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
  * затем пересчитывает ifkp_tones под новую clk_sys под спинлоком  
  * и сигнализирует Core 1 через tone_changed.  
  */  
-void vfo_clk_boost_enter(void) {
-    // Нет проверенной OC-конфигурации или boost уже активен — выходим
-    if (clk_boosted) return;
+void vfo_clk_boost_enter(void) {    
+    if (clk_boosted) return;    
     
-    // Подбираем оптимальную clk_sys под реальную частоту сеанса  
-    PllConfig opt = vfo_find_optimal_pll(cached_base_freq_hz);  
-  
-    // Безопасность: оптимум не должен превышать измеренный потолок OCTEST  
-    if (opt.clk_sys_hz > pll_overclock.clk_sys_hz)  
-        opt = pll_overclock;   // упёрлись в кремний — едем на потолке  
-  
-    if (opt.clk_sys_hz <= pll_nominal.clk_sys_hz || !opt.is_oc) return;  
-  
-    vfo_set_clk_sys(opt, opt.vsel);  
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
-    vfo_set_tone_instant(0);  
-    clk_boosted = true;
-
-    // 2. Обязательный пересчёт PIO-делителей под новую clk_sys (иначе частота уедет)  
-    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
+    // Верхняя граница поиска оптимума — потолок, доказанный OCTEST (или дефолт)    
+    PllConfig opt = vfo_find_optimal_pll(cached_base_freq_hz);    
+    
+    // Клэмп к потолку OCTEST    
+    if (opt.clk_sys_hz > pll_overclock.clk_sys_hz && pll_overclock.is_oc) {    
+        opt = pll_overclock;    
+    }    
+    
+    // Вычисляем DDS-метрики для сравнения: оптимум vs номинал    
     uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;  
-    uint64_t step_mhz = (uint64_t)(cached_step_hz * 1000.0);  
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
-        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,  
-                                                 base_mhz + (uint64_t)i * step_mhz);  
-    }  
-    current_active_tone = VFO_TONE_NONE;   // принудительная перезагрузка тона  
-    tone_changed = true;                   // Core 1 сбросит аккумуляторы  
-    spin_unlock(vfo_spin_lock, save);  
   
-    clk_boosted = true;                    // флаг для диспетчера защиты loop()  
+    VfoParameters opt_params = calculate_raw_params_mhz(opt.clk_sys_hz, base_mhz);  
+    VfoParameters nom_params = calculate_raw_params_mhz(pll_nominal.clk_sys_hz, base_mhz);  
   
-    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
-                  pll_overclock.clk_sys_hz / 1000000.0,  
-                  (unsigned long)pll_overclock.fbdiv,  
-                  (unsigned long)pll_overclock.p1,  
-                  (unsigned long)pll_overclock.p2,  
-                  (unsigned long)(pll_overclock.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
-                  (unsigned)vsel_to_mv(pll_overclock.vsel),  
-                  pll_overclock.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
-                  (unsigned)ssi_hw->baudr,  
-                  (double)vfo_read_core_temp_c());
-}  
+    uint32_t step_at_opt     = opt_params.dds_step;  
+    uint32_t step_at_nominal = nom_params.dds_step;  
+    
+    // Оптимум выгоднее, если его шаг заметно чище (меньше) —    
+    // точное деление (step=0) всегда побеждает неточное    
+    bool better = (step_at_opt != 0) && (step_at_opt < step_at_nominal);    
+    bool exact  = (step_at_opt == 0) && (step_at_nominal != 0);    
+    
+    if (!better && !exact) {    
+        Serial.printf("[BOOST] SKIP (nominal не хуже: step=0x%08lX vs opt=0x%08lX)\n",    
+                      (unsigned long)step_at_nominal, (unsigned long)step_at_opt);    
+        return;    
+    }    
+    
+    // Напряжение берём из профиля найденного оптимума    
+    // (vfo_find_optimal_pll должен заполнять opt.vsel; если там 0 —     
+    //  страхуемся выбором по таблице частотных ступеней)    
+    uint32_t vsel = opt.vsel;    
+    if (vsel == 0 || vsel < (uint32_t)VREG_VOLTAGE_1_10) {    
+        if      (opt.clk_sys_hz <= 200000000ULL) vsel = VREG_VOLTAGE_1_20;    
+        else if (opt.clk_sys_hz <= 266000000ULL) vsel = VREG_VOLTAGE_1_25;    
+        else                                     vsel = VREG_VOLTAGE_1_30;    
+    }    
+    
+    // Частота и питание (внутри vfo_set_clk_sys — детач clk_peri, XOSC,    
+    // сброс PLL, пересчёт ssi_hw->baudr)    
+    vfo_set_clk_sys(opt, vsel);    
+    
+    // Пересчёт таблицы тонов под новую clk_sys (берёт спинлок сама,    
+    // ставит current_active_tone/tone_changed)    
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);    
+    
+    // Принудительная перезагрузка текущего тона на Core 1    
+    vfo_set_tone_instant(0);    
+    
+    clk_boosted = true;    
+    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
+                  opt.clk_sys_hz / 1000000.0,    
+                  (unsigned long)opt.fbdiv,    
+                  (unsigned long)opt.p1,    
+                  (unsigned long)opt.p2,    
+                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),    
+                  (unsigned)vsel_to_mv(vsel),    
+                  opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
+                  (unsigned)ssi_hw->baudr,    
+                  (double)vfo_read_core_temp_c());    
+}
+
+
   
 /**  
  * @brief Выход из boost: возврат на pll_nominal и штатное напряжение.  

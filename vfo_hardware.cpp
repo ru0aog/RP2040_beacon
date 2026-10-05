@@ -110,7 +110,8 @@ static void vfo_fill_tones_table();
 
 // Реализация глобальных профилей тактирования в ОЗУ
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, false };
-PllConfig pll_overclock = {133, 6, 2, 133000000ULL, false}; // до OCTEST разгон неактивен 
+static PllConfig pll_overclock = { 133, 6, 2, 133000000ULL,  
+                                   (uint32_t)VREG_VOLTAGE_DEFAULT, false }; // до OCTEST разгон неактивен 
 volatile bool clk_boosted = false;
 
 
@@ -211,9 +212,9 @@ static void detach_peripheral_clock() {
  * @param p2     Второй постделитель VCO (1..2)
  * @param vsel   Целевое напряжение ядра (например, VREG_VOLTAGE_1_20 или VREG_VOLTAGE_DEFAULT)
  */
-static void vfo_set_clk_sys(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t vsel) {
+static void vfo_set_clk_sys(const PllConfig& cfg, uint32_t vsel) {
     // Вычисляем будущую целевую частоту процессора
-    uint32_t target_clk_hz = (uint32_t)(((uint64_t)fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(p1 * p2));
+    uint32_t target_clk_hz = (uint32_t)cfg.clk_sys_hz;
     
     // Определяем направление изменения частоты шины
     bool is_overclocking = (target_clk_hz > current_clk_sys_hz);
@@ -242,10 +243,10 @@ static void vfo_set_clk_sys(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t v
     unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
 
     // Рассчитываем номинал частоты VCO под выбранный fbdiv
-    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)fbdiv);
+    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv);
 
     // Переинициализируем аппаратные квадранты PLL с новыми делителями
-    pll_init(pll_sys, 1, vco_nominal_hz, p1, p2); 
+    pll_init(pll_sys, 1, vco_nominal_hz, cfg.p1, cfg.p2); 
 
     // Возвращаем тактирование clk_sys на разогнанный PLL_SYS
     clock_configure(clk_sys, 
@@ -280,15 +281,14 @@ static void vfo_set_clk_sys(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t v
 void vfo_clk_boost_enter(void) {
     // Нет проверенной OC-конфигурации или boost уже активен — выходим
     if (clk_boosted) return;  
-    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return; // OC-профиля нет
-    if (!pll_overclock.is_oc || pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz) return;
+    if (pll_overclock.clk_sys_hz <= pll_nominal.clk_sys_hz || !pll_overclock.is_oc) return;
     
     uint32_t vsel = VREG_VOLTAGE_1_30;  
     if (pll_overclock.clk_sys_hz <= 200000000ULL)      vsel = VREG_VOLTAGE_1_20;  
     else if (pll_overclock.clk_sys_hz <= 266000000ULL) vsel = VREG_VOLTAGE_1_25;  
   
     // 1. Частота и питание (внутри vfo_set_clk_sys — детач clk_peri, XOSC, сброс PLL)  
-    vfo_set_clk_sys(pll_overclock.fbdiv, pll_overclock.p1, pll_overclock.p2, vsel);  
+    vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);
   
     // 2. Обязательный пересчёт PIO-делителей под новую clk_sys (иначе частота уедет)  
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
@@ -313,8 +313,7 @@ void vfo_clk_boost_exit(void) {
     if (!clk_boosted) return;  
     clk_boosted = false;  
   
-    vfo_set_clk_sys(pll_nominal.fbdiv, pll_nominal.p1, pll_nominal.p2,  
-                    VREG_VOLTAGE_DEFAULT);  
+    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
   
     // Пересчёт таблицы тонов обратно под номинальную clk_sys  
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
@@ -918,6 +917,9 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
                         best_pll.p1 = p1;
                         best_pll.p2 = p2;
                         best_pll.clk_sys_hz = clk_sys_hz;
+                        best_pll.vsel = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)  
+                                        ? (uint32_t)vsel_for(clk_sys_hz)  
+                                        : (uint32_t)VREG_VOLTAGE_DEFAULT;
                         best_pll.is_oc = (run_stage == 1); // Помечаем, если вышли в OC-зону
                         found_valid = true;
                     }
@@ -1218,7 +1220,9 @@ void vfo_find_max_stable_clock(void) {
   
         PllConfig step_cfg = { cand[i].fbdiv, cand[i].p1, cand[i].p2,  
                                cand[i].clk_sys_hz, true };  
-        vfo_set_clk_sys(step_cfg, (uint32_t)vsel, true);  
+        vfo_set_clk_sys(step_cfg, (uint32_t)step_vsel);
+
+
         // Реальная частота, с которой работает кристалл на этой ступени  
         uint64_t f_act = (uint64_t)cand[i].fbdiv * VFO_CALIBRATED_XOSC_HZ /  
                          ((uint64_t)cand[i].p1 * cand[i].p2);  
@@ -1233,9 +1237,13 @@ void vfo_find_max_stable_clock(void) {
         watchdog_update();  
   
         // === ШАГ ПРОЙДЕН: печать параметров ===  
-        Serial.printf("[OCTEST] OK: clk_sys=%llu МГц (fbdiv=%u p1=%u p2=%u VSEL=0x%02X T_CPU=см.телеметрию) acc_crc=%lu\n",  
-                      f_act / 1000000ULL, cand[i].fbdiv, cand[i].p1, cand[i].p2,  
-                      (unsigned)vsel, (unsigned long)(*(volatile uint32_t*)&acc));  
+        // в печати OK-шага — вольты вместо кода enum:  
+        Serial.printf("[OCTEST] OK  clk_sys=%lu MHz  fbdiv=%lu p1=%lu p2=%lu  VSEL=%u mV\n",  
+                    (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL),  
+                    (unsigned long)step_cfg.fbdiv,  
+                    (unsigned long)step_cfg.p1,  
+                    (unsigned long)step_cfg.p2,  
+                    (unsigned)vsel_to_mv(step_vsel));  
   
         // Последний стабильный результат — в рабочий разгонный слот  
         pll_overclock = step_cfg;  
@@ -1245,7 +1253,8 @@ void vfo_find_max_stable_clock(void) {
     *scratch = 0xFFFFFFFFu; // тест завершён штатно  
   
     // Возврат на номинал вне зависимости от исхода  
-    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT, false);  
+    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
+
     Serial.printf("[OCTEST] %s. Потолок: %llu МГц, возврат на %llu МГц\n",  
                   max_ok ? "Готово" : "Ни одной ступени выше номинала",  
                   pll_overclock.clk_sys_hz / 1000000ULL,  

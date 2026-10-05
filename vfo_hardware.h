@@ -63,7 +63,8 @@ struct PllConfig {
     uint32_t p1;
     uint32_t p2;
     uint64_t clk_sys_hz;
-    bool is_oc;  // Флаг разгона: true, если частота требует поднятия VREG
+    uint32_t vsel;         // выбранный VREG_VOLTAGE_* для этой частоты
+    bool is_oc;            // Флаг разгона: true, если частота требует поднятия VREG
 };
 
 // Глобальные конфигурации PLL, найденные автотюном

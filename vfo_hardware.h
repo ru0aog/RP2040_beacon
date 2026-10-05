@@ -53,6 +53,21 @@
 
 #include <Arduino.h>
 
+// Лимиты частотного плана
+#define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // 133 МГц - Номинальный предел без вольтмода
+#define VFO_CLK_SYS_MAX_HZ      340000000ULL  // 340 МГц - Физический потолок стабильности ядер
+
+// Структура для возврата найденных физических коэффициентов PLL
+struct PllConfig {
+    uint32_t fbdiv;
+    uint32_t p1;
+    uint32_t p2;
+    uint64_t clk_sys_hz;
+    bool is_oc;  // Флаг разгона: true, если частота требует поднятия VREG
+};
+
+
+
 // === Конфигурация механизмов снижения спуров ===
 #define VFO_USE_MASH2            // Включить Delta-Sigma 2-го порядка (MASH-1-1). Если выключено — 1-й порядок.
 #define VFO_DITHER_RANDOMIZE     // Включить рандомизацию входа аккумулятора (Dither Injection)

@@ -93,18 +93,11 @@
 #include "hardware/resets.h"
 #include "hardware/timer.h"
 #include "hardware/structs/sio.h"
+#include "hardware/vreg.h"
 #include "pico/multicore.h"
 #include "vfo_hardware.h"
 #include "file_manager.h"
 
-
-// Структура для возврата найденных физических коэффициентов PLL
-struct PllConfig {
-    uint32_t fbdiv;
-    uint32_t p1;
-    uint32_t p2;
-    uint64_t clk_sys_hz;
-};
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
 static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };
@@ -155,6 +148,119 @@ static volatile uint32_t m2_carry_prev = 0;
 static volatile uint32_t xorshift_state = VFO_RAND_SEED_INIT;
 
 static uint32_t current_clk_sys_hz = 120000000;
+
+
+/**  
+ * @brief Отсоединение периферийного домена clk_peri от системной шины.  
+ *  
+ * Переводит генератор периферийной тактовой частоты `clk_peri` на  
+ * безопасный источник (кварцевый резонатор XOSC 12 МГц) и фактически  
+ * изолирует периферию (UART, SPI, USB и т.д.) от домена `clk_sys`  
+ * на время перепрограммирования `pll_sys`.  
+ *  
+ * Это обязательный шаг при ретюнинге PLL: когда `pll_sys`  
+ * сбрасывается (`reset_block`/`unreset_block_wait`) и меняет частоту  
+ * clk_sys, периферия, жёстко привязанная к системной шине, получила бы  
+ * скачок тактовой частоты и сбой (потеря baud rate UART, срыв USB).  
+ * Детач гарантирует стабильные 12 МГц для clk_peri на всём интервале  
+ * переконфигурации.  
+ *  
+ * @note Вызывается из @ref vfo_hardware_init непосредственно перед  
+ *       `save_and_disable_interrupts()` и каскадом переинициализации  
+ *       `pll_sys`. После возврата clk_sys на PLL периферийный домен  
+ *       остаётся на XOSC — это осознанно: clk_peri не зависит от  
+ *       автотюна системной частоты.  
+ * @note Оперирует регистрами подсистемы CLOCKS/PLL напрямую;  
+ *       не является thread-safe вне критической секции инициализации.  
+ *  
+ * @see vfo_hardware_init(), vfo_find_optimal_pll()  
+ */
+static void detach_peripheral_clock() {
+    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);
+}
+
+
+
+/**
+ * @brief Безопасное динамическое перепрограммирование pll_sys и напряжения ядра vreg.
+ * 
+ * Осуществляет двухранговый сдвиг частоты и питания. Защищено от зависания периферии
+ * доменным детачем clk_peri и критической секцией запрета прерываний.
+ * 
+ * @param fbdiv  Коэффициент обратной связи PLL (30..150)
+ * @param p1     Первый постделитель VCO (2..6)
+ * @param p2     Второй постделитель VCO (1..2)
+ * @param vsel   Целевое напряжение ядра (например, VREG_VOLTAGE_1_20 или VREG_VOLTAGE_DEFAULT)
+ */
+static void vfo_set_clk_sys(uint32_t fbdiv, uint32_t p1, uint32_t p2, uint32_t vsel) {
+    // Вычисляем будущую целевую частоту процессора
+    uint32_t target_clk_hz = (uint32_t)(((uint64_t)fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(p1 * p2));
+    
+    // Определяем направление изменения частоты шины
+    bool is_overclocking = (target_clk_hz > current_clk_sys_hz);
+
+    // [РАНГ 1: ПОВЫШЕНИЕ] Если гоним частоту вверх — СНАЧАЛА поднимаем напряжение питания ядра
+    if (is_overclocking) {
+        vreg_set_voltage((vreg_voltage)vsel);
+        busy_wait_us(500); // Даем время встроенному стабилизатору выйти на полку стабильности
+    }
+
+    // Изолируем домен периферии clk_peri от системного генератора
+    detach_peripheral_clock(); 
+
+    // Входим в критическую секцию ядра: запрет прерываний для защиты конвейера инструкций
+    uint32_t ints_status = save_and_disable_interrupts();
+
+    // Переводим clk_sys на стабильный опорный кварц XOSC (12 МГц)
+    clock_configure(clk_sys, 
+                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, 
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 
+                    12 * 1000000, 
+                    12 * 1000000);
+
+    // Сбрасываем и намертво останавливаем аппаратный блок PLL_SYS
+    reset_block(RESETS_RESET_PLL_SYS_BITS);
+    unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
+
+    // Рассчитываем номинал частоты VCO под выбранный fbdiv
+    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)fbdiv);
+
+    // Переинициализируем аппаратные квадранты PLL с новыми делителями
+    pll_init(pll_sys, 1, vco_nominal_hz, p1, p2); 
+
+    // Возвращаем тактирование clk_sys на разогнанный PLL_SYS
+    clock_configure(clk_sys, 
+                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, 
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, 
+                    target_clk_hz, 
+                    target_clk_hz);
+
+    // Выходим из критической секции ядра, возвращая маску прерываний
+    restore_interrupts(ints_status);
+
+    // Фиксируем фактическую системную частоту в глобальной рантайм-переменной
+    current_clk_sys_hz = target_clk_hz;
+
+    // [РАНГ 2: ПОНИЖЕНИЕ] Если частоту сбросили вниз — ТОЛЬКО ТЕПЕРЬ безопасно понижаем вольтаж ядра
+    if (!is_overclocking) {
+        busy_wait_us(100); // Небольшая пауза для релаксации емкостей шины питания
+        vreg_set_voltage((vreg_voltage)vsel);
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -517,34 +623,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
 
 
-/**  
- * @brief Отсоединение периферийного домена clk_peri от системной шины.  
- *  
- * Переводит генератор периферийной тактовой частоты `clk_peri` на  
- * безопасный источник (кварцевый резонатор XOSC 12 МГц) и фактически  
- * изолирует периферию (UART, SPI, USB и т.д.) от домена `clk_sys`  
- * на время перепрограммирования `pll_sys`.  
- *  
- * Это обязательный шаг при ретюнинге PLL: когда `pll_sys`  
- * сбрасывается (`reset_block`/`unreset_block_wait`) и меняет частоту  
- * clk_sys, периферия, жёстко привязанная к системной шине, получила бы  
- * скачок тактовой частоты и сбой (потеря baud rate UART, срыв USB).  
- * Детач гарантирует стабильные 12 МГц для clk_peri на всём интервале  
- * переконфигурации.  
- *  
- * @note Вызывается из @ref vfo_hardware_init непосредственно перед  
- *       `save_and_disable_interrupts()` и каскадом переинициализации  
- *       `pll_sys`. После возврата clk_sys на PLL периферийный домен  
- *       остаётся на XOSC — это осознанно: clk_peri не зависит от  
- *       автотюна системной частоты.  
- * @note Оперирует регистрами подсистемы CLOCKS/PLL напрямую;  
- *       не является thread-safe вне критической секции инициализации.  
- *  
- * @see vfo_hardware_init(), vfo_find_optimal_pll()  
- */
-static void detach_peripheral_clock() {
-    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);
-}
+
 
 
 
@@ -661,78 +740,97 @@ static PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz) {
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
     uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
     
-    PllConfig best_pll = { 100, 5, 2, 120000000ULL }; 
-#ifdef VFO_CLOCK_133_MHZ
-    best_pll = { 133, 6, 2, 133003879ULL };
-#endif
+    // Дефолтная безопасная конфигурация на случай сбоя сканирования
+    PllConfig best_pll = { 133, 6, 2, 133000000ULL, false }; 
 
-    uint32_t min_dds_metric = 0xFFFFFFFFu;       // Предел для 32-битной ошибки DDS
-    uint32_t min_frac_metric = 255;              // Предел для ошибки аппаратного делителя PIO
+    uint32_t min_dds_metric = 0xFFFFFFFFu;       
+    uint32_t min_frac_metric = 255;              
+    bool found_valid = false;
 
-    for (uint32_t p1 = 2; p1 <= 6; p1++) {
-        for (uint32_t p2 = 1; p2 <= 2; p2++) {
-            uint32_t pdiv_total = p1 * p2;
-            
-            for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
-                uint64_t vco_hz = fbdiv * crystal_hz;
-                
-                if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;
-                
-                uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
-                
-                if (clk_sys_hz < 100000000ULL || clk_sys_hz > 133000000ULL) continue;
-                
-                uint64_t clocks_per_period = 2ULL;
-                uint64_t pio_denom = base_target_chz * clocks_per_period;
-                uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 100ULL) / pio_denom;
-                
-                uint32_t test_pio_int = pio_div_fixed8 >> 8;
-                if (test_pio_int < 2) continue; 
-                
-                uint32_t test_pio_frac = pio_div_fixed8 & 0xFFu;
+    // Скан-сессия разделена на 2 этапа: 0 - номинальный режим, 1 - экстремальный оверклокинг
+    for (int run_stage = 0; run_stage < 2; run_stage++) {
+        
+        // Если на первом проходе (Stage 0) уже нашли идеальное целое деление - OC-проход игнорируем
+        if (run_stage == 1 && found_valid && min_dds_metric == 0) {
+            break;
+        }
 
-                uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
-                uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
-                uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
-                uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
+        uint64_t max_allowed_clk = (run_stage == 0) ? VFO_CLK_SYS_NOMINAL_HZ : VFO_CLK_SYS_MAX_HZ;
+
+        for (uint32_t p1 = 2; p1 <= 6; p1++) {
+            for (uint32_t p2 = 1; p2 <= 2; p2++) {
+                uint32_t pdiv_total = p1 * p2;
                 
-                // 1. Вычисляем физическое расстояние dds_step до ближайшего края (0 или 2^32)
-                uint32_t dist_dds_0 = test_dds_step;
-                uint32_t dist_dds_max = 0xFFFFFFFFu - test_dds_step;
-                uint32_t current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;
-
-                // ПРЕЦИЗИОННАЯ ЗАЩИТА ДЕКОДЕРА ЦИФРОВЫХ МОД (IFKP / RTTY)
-                // Расчет границы полосы пропускания приемника: 2000 Гц * 2^32 / 5300000 Гц ≈ 1620000.
-                // Если частота переполнения (спур) падает ближе 2 кГц к несущей, накладываем штраф.
-                if (current_dds_metric > 0 && current_dds_metric < 1620000u) {
-                    // Штраф +50 000 000 жестко деприоритизирует вариант со звуковым спуром,
-                    // заставляя автотюн выбирать чистые КВ-конфигурации.
-                    current_dds_metric += 50000000u; 
-                }
-
-                
-                // 2. Вторичная метрика: Близость pio_frac к целому числу (0 или 256)
-                uint32_t dist_frac_0 = test_pio_frac;
-                uint32_t dist_frac_max = 256 - test_pio_frac;
-                uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
-
-                // Многокритериальный выбор оптимального режима тактирования
-                bool is_better_dds  = (current_dds_metric < min_dds_metric);
-                bool is_equal_dds   = (current_dds_metric == min_dds_metric);
-                bool is_better_frac = (current_frac_metric < min_frac_metric);
-                bool is_equal_frac  = (current_frac_metric == min_frac_metric);
-
-                if (is_better_dds || 
-                   (is_equal_dds && is_better_frac) ||
-                   (is_equal_dds && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
-
-                    min_dds_metric = current_dds_metric;
-                    min_frac_metric = current_frac_metric;
+                for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
+                    uint64_t vco_hz = fbdiv * crystal_hz;
                     
-                    best_pll.fbdiv = fbdiv;
-                    best_pll.p1 = p1;
-                    best_pll.p2 = p2;
-                    best_pll.clk_sys_hz = clk_sys_hz;
+                    // Жесткий аппаратный фильтр VCO чипа RP2040 (750..1600 МГц)
+                    if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;
+                    
+                    uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
+                    
+                    // Фильтрация лимитов текущей стадии (до 133 МГц либо до 340 МГц)
+                    if (clk_sys_hz < 100000000ULL || clk_sys_hz > max_allowed_clk) continue;
+                    
+                    uint64_t clocks_per_period = 2ULL;
+                    uint64_t pio_denom = base_target_chz * clocks_per_period;
+                    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 100ULL) / pio_denom;
+                    
+                    uint32_t test_pio_int = pio_div_fixed8 >> 8;
+                    if (test_pio_int < 2) continue; 
+                    
+                    uint32_t test_pio_frac = pio_div_fixed8 & 0xFFu;
+
+                    uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
+                    uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
+                    uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
+                    uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
+                    
+                    uint32_t current_dds_metric = 0;
+
+                    // 1. АППАРАТНЫЙ ИДЕАЛ: Проверяем выход на чистое целое деление
+                    if (test_pio_frac == 0 && test_dds_step == 0) {
+                        current_dds_metric = 0; // Нулевой фазовый шум, дизеринг спит
+                    } else {
+                        uint32_t dist_dds_0 = test_dds_step;
+                        uint32_t dist_dds_max = 0xFFFFFFFFu - test_dds_step;
+                        current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;
+
+                        // 2. ДИНАМИЧЕСКИЙ ПЕРЕРАСЧЁТ СПУР-ФИЛЬТРА ПОД ЭФФЕКТИВНУЮ F_s_dither
+                        // Защитное окно в 2000 Гц масштабируется на лету от текущей clk_sys_hz
+                        uint32_t dynamic_spur_threshold = (uint32_t)(214748364800000ULL / clk_sys_hz);
+
+                        if (current_dds_metric > 0 && current_dds_metric < dynamic_spur_threshold) {
+                            // Штраф +80 млн гарантированно выкидывает кандидата со слышимым свистом в эфире
+                            current_dds_metric += 80000000u; 
+                        }
+                    }
+
+                    // Вторичная метрика: Близость pio_frac к краям сетки Брезенхема (0 или 256)
+                    uint32_t dist_frac_0 = test_pio_frac;
+                    uint32_t dist_frac_max = 256 - test_pio_frac;
+                    uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
+
+                    // Многокритериальный арбитраж
+                    bool is_better_dds  = (current_dds_metric < min_dds_metric);
+                    bool is_equal_dds   = (current_dds_metric == min_dds_metric);
+                    bool is_better_frac = (current_frac_metric < min_frac_metric);
+                    bool is_equal_frac  = (current_frac_metric == min_frac_metric);
+
+                    if (is_better_dds || 
+                       (is_equal_dds && is_better_frac) ||
+                       (is_equal_dds && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
+
+                        min_dds_metric = current_dds_metric;
+                        min_frac_metric = current_frac_metric;
+                        
+                        best_pll.fbdiv = fbdiv;
+                        best_pll.p1 = p1;
+                        best_pll.p2 = p2;
+                        best_pll.clk_sys_hz = clk_sys_hz;
+                        best_pll.is_oc = (run_stage == 1); // Помечаем, если вышли в OC-зону
+                        found_valid = true;
+                    }
                 }
             }
         }
@@ -804,6 +902,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
 
     uint32_t best_fbdiv = 100, best_p1 = 5, best_p2 = 2;
     uint64_t clk_sys_target_hz = 120000000ULL;
+    bool requires_overclocking = false;
 
 #ifdef VFO_PLL_AUTOTUNE
     PllConfig optimal_pll = vfo_find_optimal_pll(base_freq_hz);
@@ -811,24 +910,25 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     best_p1 = optimal_pll.p1;
     best_p2 = optimal_pll.p2;
     clk_sys_target_hz = optimal_pll.clk_sys_hz;
+    requires_overclocking = optimal_pll.is_oc;
 #else
 #ifdef VFO_CLOCK_133_MHZ
     best_fbdiv = 133; best_p1 = 6; best_p2 = 2; clk_sys_target_hz = 133000000ULL;
 #endif
 #endif
 
-    detach_peripheral_clock(); 
-    uint32_t ints_status = save_and_disable_interrupts();
-    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, 12 * 1000000, 12 * 1000000);
-    reset_block(RESETS_RESET_PLL_SYS_BITS);
-    unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
+    // === АВТОМАТИЧЕСКИЙ ВЫБОР БЕЗОПАСНОГО НАПРЯЖЕНИЯ ЯДРА (VREG) ===
+    uint32_t selected_vsel = VREG_VOLTAGE_DEFAULT; // По умолчанию 1.1 В
+    
+    // Если автотюн увёл частоту выше номинальных 133 МГц — задействуем ступени вольтмода
+    if (clk_sys_target_hz > 260000000ULL) {
+        selected_vsel = VREG_VOLTAGE_1_25;        // Для экстремального разгона до 266 МГц+
+    } else if (clk_sys_target_hz > 133000000ULL) {
+        selected_vsel = VREG_VOLTAGE_1_15;        // Легкий вольтмод для промежуточных частот
+    }
 
-    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)best_fbdiv);
-    pll_init(pll_sys, 1, vco_nominal_hz, best_p1, best_p2); 
-    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX, CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, (uint32_t)clk_sys_target_hz, (uint32_t)clk_sys_target_hz);
-    restore_interrupts(ints_status);
-
-    current_clk_sys_hz = (uint32_t)(((uint64_t)best_fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(best_p1 * best_p2));
+    // Запуск безопасной двухранговой смены частоты шины
+    vfo_set_clk_sys(best_fbdiv, best_p1, best_p2, selected_vsel);
 
     if (!pio_program_loaded) {
         lo_offset = pio_add_program(lo_pio, &pio_square_program);

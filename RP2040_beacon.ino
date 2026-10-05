@@ -106,6 +106,8 @@ bool force_rtty_transmission = false; // Флаг ручного запуска 
 bool force_ifkp_transmission = false; // Флаг ручного запуска IFKP
 volatile bool system_ready = false;   // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
+extern volatile bool tx_launching; 
+
 // --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
 const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
 
@@ -482,6 +484,9 @@ void loop() {
   
   watchdog_update();  // сброс сторожевого таймера
   
+  // Сброс предпускового флага в начале цикла
+  tx_launching = false;
+
   extern uint8_t rtc_sec; 
   // =========================================================================
   // 1. ОБРАБОТКА МЯГКОГО РЕСТАРТА
@@ -630,7 +635,7 @@ void loop() {
         String climate_str = get_climate_telemetry(); // Например: "T_CL=27.5C P_CL=749.4mm H_CL=45.2%"
         
         int p_idx = climate_str.indexOf("P_CL=");
-        int h_idx = climate_str.indexOf("H_CL=");
+        // int h_idx = climate_str.indexOf("H_CL=");
         
         String P_value = "000.0"; // Дефолт, если барометр отключен
         if (p_idx != -1) {
@@ -679,6 +684,7 @@ void loop() {
   if (( (is_time_to_transmit(0) && !is_transmitting) || force_ifkp_transmission) && !pc_file_written && !soft_restart_flag) {
     force_ifkp_transmission = false;
     is_transmitting = true;
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
     
     if (debug_flag) {
       char time_buf[128];
@@ -785,7 +791,8 @@ void loop() {
   // =========================================================================
   if (( (is_time_to_transmit(1) && !is_transmitting) || force_rtty_transmission) && !pc_file_written && !soft_restart_flag) {
     force_rtty_transmission = false;
-    is_transmitting = true; 
+    is_transmitting = true;
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
     
     if (debug_flag) {
       char time_buf[128];
@@ -888,7 +895,8 @@ void loop() {
   // =========================================================================
   if (( (is_time_to_transmit(2) && !is_transmitting) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
     force_cw_transmission = false;
-    is_transmitting = true; 
+    is_transmitting = true;
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
     
     if (debug_flag) {  
       char time_buf[128];
@@ -980,6 +988,7 @@ void loop() {
   if (is_time_to_transmit(3) && !is_transmitting) {
        Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
        is_transmitting = true;
+       tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
        usr_chain_state = USR_START_CW; // Толкаем ваш штатный автомат, он всё сделает сам!
   }
 
@@ -1337,7 +1346,7 @@ void I2C_Scan_module(int WIRE_NO, int PIN_SDA, int PIN_SCL, bool LOGGING) {
         pWire->write(0x71); // Запрос регистра статуса AHT20
         if (pWire->endTransmission() == 0) {
           if (pWire->requestFrom(address, (uint8_t)1) == 1 && pWire->available()) {
-            uint8_t status = pWire->read();
+            pWire->read();
             hardware_verified = true; // Датчик подтвердил свое присутствие
             
             if (LOGGING) { Serial.println(F("[Система] - найден прибор 0x38: Датчик AHT20")); }

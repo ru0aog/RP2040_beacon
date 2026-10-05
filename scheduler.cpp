@@ -665,7 +665,7 @@ void handle_time_command(String cmd) {
 // scheduler.cpp — чистый парсер одной строки  
 // Формат: "МОДА | ДНИ | ВРЕМЯ"  или совместимый "ДНИ,ВРЕМЯ,ЧАСТОТА,МОДА"  
 // Возвращает true, если строка корректна  
-static bool parse_days(const String& s, uint8_t& mask) {  
+[[maybe_unused]] static bool parse_days(const String& s, uint8_t& mask) {  
   mask = 0;  
   if (s == "0" || s.length() == 0) return true;          // каждый день  
   for (size_t i = 0; i < s.length(); i++) {  
@@ -693,7 +693,7 @@ static bool parse_hhmm(const String& s, uint8_t& h, uint8_t& m) {
 }  
   
 // ВРЕМЯ: "HH:MM" | "HH:MM-HH:MM/N" | "HH:MM/HH:MM/N"  
-static bool parse_time_expr(const String& s, TaskItem& t) {  
+[[maybe_unused]] static bool parse_time_expr(const String& s, TaskItem& t) {  
   int sep  = s.indexOf('-');  if (sep == -1) sep = s.indexOf('/');  
   int sep2 = s.indexOf('/', sep + 1);  
   if (sep == -1) {            // разовая  
@@ -742,7 +742,7 @@ void print_schedule() {
     }  
   
     // --- Время: одиночная "15:15" или период "17:00-22:00/5мин" ---  
-    char timebuf[24];  
+    char timebuf[36];  
     if (t.interval_min == 0) {  
       snprintf(timebuf, sizeof(timebuf), "%02d:%02d", t.start_hour, t.start_min);  
     } else {  
@@ -854,10 +854,10 @@ String fmt_next_start(int32_t abs_min) {
   if (abs_min < 0) return String("Не задан");  
   uint32_t day_off = abs_min / 1440;  
   uint32_t m = abs_min % 1440;  
-  char buf[24];  
+  char buf[48];
   const char* suffix = (day_off == 0) ? "" : (day_off == 1 ? " (завтра)" : " (через дни)");  
-  snprintf(buf, sizeof(buf), "%02d:%02d%s", m / 60, m % 60, suffix);  
-  return String(buf);  
+  snprintf(buf, sizeof(buf), "%02d:%02d%s", (int)(m / 60), (int)(m % 60), suffix);  
+  return String(buf);   
 }  
   
 
@@ -904,7 +904,8 @@ String fmt_next_start(int32_t abs_min) {
  */
 bool is_time_to_transmit(uint8_t mode) {  
   extern bool is_transmitting;  
-  extern volatile bool tx_launching;   // флаг "передача запускается" — выставляется  
+  extern volatile bool tx_launching;   // Объявлено как extern для явного связывания
+                                       // флаг "передача запускается" — выставляется  
                                        // вызывающим кодом СРАЗУ при получении true  
   uint32_t cur = rtc_hour * 60UL + rtc_min;  
   static uint32_t last_min[4] = {9999, 9999, 9999, 9999};  
@@ -934,7 +935,8 @@ bool is_time_to_transmit(uint8_t mode) {
                          ((cur >= st ? cur - st : cur + 1440 - st) % t.interval_min == 0);  
     }  
     if (!hit) continue;  
-  
+
+    // Ветка пропуска при занятости устройства или предпусковом состоянии
     if (is_transmitting || tx_launching) {  
       Serial.printf("[Планировщик] Задача %02d: устройство занято, сеанс пропущен\n", i + 1);  
       last_min[mode] = cur;   // фиксируем пропуск: без спама и без запоздалого  
@@ -945,6 +947,7 @@ bool is_time_to_transmit(uint8_t mode) {
                   i + 1, mode_name(mode), rtc_hour, rtc_min);  
     last_min[mode] = cur;  
     scheduled_freq_hz = beacon_schedule[i].freq_hz;   // частота из задачи  
+    tx_launching = true;  // Атомарно занимаем шину перед выходом из планировщика
     return true;  
   }  
   return false;  

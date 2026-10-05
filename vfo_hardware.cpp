@@ -297,7 +297,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
  */  
 void vfo_clk_boost_enter(void) {    
     if (clk_boosted) return;    
-    
+
     // Верхняя граница поиска оптимума — потолок, доказанный OCTEST (или дефолт)    
     PllConfig opt = vfo_find_optimal_pll(cached_base_freq_hz);    
     
@@ -305,9 +305,11 @@ void vfo_clk_boost_enter(void) {
     if (opt.clk_sys_hz > pll_overclock.clk_sys_hz && pll_overclock.is_oc) {    
         opt = pll_overclock;    
     }    
-    
+
+    if (opt.clk_sys_hz <= pll_nominal.clk_sys_hz || !opt.is_oc) return;
+
     // Вычисляем DDS-метрики для сравнения: оптимум vs номинал    
-    uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;  
+    uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000000ULL;
   
     VfoParameters opt_params = calculate_raw_params_mhz(opt.clk_sys_hz, base_mhz);  
     VfoParameters nom_params = calculate_raw_params_mhz(pll_nominal.clk_sys_hz, base_mhz);  
@@ -317,9 +319,11 @@ void vfo_clk_boost_enter(void) {
     
     // Оптимум выгоднее, если его шаг заметно чище (меньше) —    
     // точное деление (step=0) всегда побеждает неточное    
-    bool better = (step_at_opt != 0) && (step_at_opt < step_at_nominal);    
+    uint32_t ctz_opt = (step_at_opt == 0)     ? 32u : (uint32_t)__builtin_ctz(step_at_opt);  
+    uint32_t ctz_nom = (step_at_nominal == 0) ? 32u : (uint32_t)__builtin_ctz(step_at_nominal);  
+    bool better = (ctz_opt > ctz_nom);
     bool exact  = (step_at_opt == 0) && (step_at_nominal != 0);    
-    
+
     if (!better && !exact) {    
         Serial.printf("[BOOST] SKIP (nominal не хуже: step=0x%08lX vs opt=0x%08lX)\n",    
                       (unsigned long)step_at_nominal, (unsigned long)step_at_opt);    

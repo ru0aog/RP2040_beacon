@@ -948,6 +948,11 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
             metric += VFO_SPUR_PENALTY + prox * VFO_SPUR_PENALTY / thr;  
         }
     }  
+
+    // Малый pio_int: DDS-остаток модулирует слишком большую долю периода.  
+    // INT=2 с дизером — глубокая модуляция, метрика её недооценивает.  
+    if (test.pio_int < 4) metric += 50000000ULL;   // или return UINT64_MAX — отсечь совсем
+
     // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
                      ? test.pio_frac : 256u - test.pio_frac;  

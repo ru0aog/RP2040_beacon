@@ -797,64 +797,38 @@ static void __not_in_flash_func(vfo_core1_entry)() {
  * (pio_int + pio_frac/256) для выходного меандра `f_out = clk_sys / (2 * D)`,  
  * а также 32-битный остаток ошибки `dds_step` — приращение для DDS/MASH-2  
  * дизеринга, компенсирующее остаточную дробную часть делителя.  
- *  
- * Вся арифметика 64-битная целочисленная; расчёт в миллигерцах с  
- * масштабирующим коэффициентом 1000 исключает накопление ошибки округления  
- * для шага сетки тонов (RTTY mark/space, IFKP).  
- *  
- * @param[in] clk_sys_hz   Текущая системная частота в герцах (результат  
- *                           
- * @param[in] mhz_target   Целевая выходная частота в миллигерцах;  
- *                         автоматически ограничивается диапазоном  
- *                         КВ-диапазона 1.0..40.0 МГц.  
- *  
- * @return Структура @ref VfoParameters:  
- *         - @c pio_int — целая часть делителя (>= 2; при < 2 принудительно  
- *           зажимается в 2, @c pio_frac = 0);  
- *         - @c pio_frac — дробная часть делителя FRAC8 (0..255);  
- *         - @c dds_step — 32-битный шаг DDS-остатка для  
- *           @ref vfo_dither_step / регистрового конвейера Core 1;  
- *         - @c target_freq_chz — целевая частота, приведённая обратно в  
- *           сантигерцы для совместимости со структурой.  
- *  
- * @note Функция чистая: не обращается к периферии и не изменяет глобальное  
- *       состояние. Остаток `dds_step` вычисляется двухступенчатым делением  
- *       сдвинутого остатка (`clk_sys_rem << 16`) для сохранения полных  
- *       32 бит точности без потерь при делении.  
- *  
  */
-static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {
-    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)
-    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;
-    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;
-
-    uint64_t clocks_per_period = 2ULL; 
-    uint64_t vfo_denom = mhz_target * clocks_per_period; 
-    
-    // Масштабирующий коэффициент 1000ULL переводит миллигерцы в базовые Герцы
-    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;
-    
-    VfoParameters params;
-    params.pio_int  = pio_div_fixed8 >> 8;
-    params.pio_frac = pio_div_fixed8 & 0xFFu;
-    
-    // Для совместимости со структурой сохраняем в chz (сантигерцах)
-    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL); 
-
-    if (params.pio_int < 2) { params.pio_int = 2; params.pio_frac = 0; }
-
-    // Расчет 32-битного остатка ошибки DDS
-    uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;
-    uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
-    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
-    
-    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));  
-    // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1, период паттерна  
-    // переносов = 2^32 отсчётов -> дискретная гребёнка превращается в шумовую полку.  
-    // Ошибка 1 LSB остатка (~F_s/2^32 Гц) пренебрежима.  
-    if (params.dds_step != 0) params.dds_step |= 1u;
-
-    return params;
+static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {  
+    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)  
+    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;  
+    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;  
+  
+    uint64_t vfo_denom = mhz_target * 2ULL;          // 2·f_target в мГц  
+  
+    // --- ЦЕЛОЧИСЛЕННЫЙ делитель PIO: аппаратный frac НЕ используем ---  
+    // floor(clk_sys / (2·f)): остаток полностью уходит в DDS-дизеринг.  
+    uint64_t pio_div_int = (clk_sys_hz * 1000ULL) / vfo_denom;  
+  
+    VfoParameters params;  
+    params.pio_int  = (uint32_t)pio_div_int;  
+    params.pio_frac = 0;                             // FRAC аппаратно отключён  
+  
+    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL);  
+  
+    if (params.pio_int < 2) { params.pio_int = 2; }  // pio_frac уже 0  
+  
+    // --- ПОЛНЫЙ дробный остаток делителя → 32-битный DDS-шаг ---  
+    // rem = clk_sys*1000 mod (2·f_target) — остаток в единицах denom.  
+    // step = rem · 2^32 / denom: при step=0 делитель идеально целый.  
+    uint64_t clk_sys_rem = (clk_sys_hz * 1000ULL) % vfo_denom;  
+    uint64_t hi = (clk_sys_rem << 16) / vfo_denom;  
+    uint64_t lo = (clk_sys_rem << 16) % vfo_denom;  
+    params.dds_step = (uint32_t)((hi << 16) + ((lo << 16) / vfo_denom));  
+  
+    // Принудительная нечётность: период паттерна = 2^32 → шумовая полка  
+    if (params.dds_step != 0) params.dds_step |= 1u;  
+  
+    return params;  
 }
 
 
@@ -917,11 +891,10 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
   
     uint64_t metric;  
   
-    if (test.pio_frac == 0 && test.dds_step == 0) {  
-        metric = 0;                                // аппаратный идеал  
+    if (test.dds_step == 0) {                      // pio_frac всегда 0  
+        metric = 0;                                // идеальный целый делитель  
         if (dbg) *dbg = (VfoMetricDbg){0,0,0,0,0,0,3};  
     } else {  
-        // ---- 1. Три гармоники спура: расстояние шага до 0/2^32 ----  
         uint32_t e1 = test.dds_step;  
         uint32_t e2 = test.dds_step << 1;  
         uint32_t e3 = test.dds_step + (test.dds_step << 1);  
@@ -933,50 +906,34 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
         if (d2 < dmin) dmin = d2;  
         if (d3 < dmin) dmin = d3;  
   
-        // ---- 2. Отстройка в Гц и уровень каждой гармоники ----  
-        uint64_t off1 = spur_offset_hz(d1, clk_sys_hz);          // реальная отстройка  
+        uint64_t off1 = spur_offset_hz(d1, clk_sys_hz);  
         uint64_t off2 = spur_offset_hz(d2, clk_sys_hz);  
         uint64_t off3 = spur_offset_hz(d3, clk_sys_hz);  
   
-        int32_t lvl1 = spur_level_db100(d1, 1);    // полный уровень 1-й гармоники  
-        int32_t lvl2 = spur_level_db100(d2, 2);    // 2-я на ~6 дБ слабее  
-        int32_t lvl3 = spur_level_db100(d3, 3);    // 3-я на ~9.5 дБ слабее  
+        int32_t lvl1 = spur_level_db100(d1, 1);  
+        int32_t lvl2 = spur_level_db100(d2, 2);  
+        int32_t lvl3 = spur_level_db100(d3, 3);  
   
-        // ---- 3. Зонная оценка каждой гармоники ----  
-        // Опасность гармоники = f(отстройка, уровень):  
-        //  • уровень ≤ −60 dBc           → 0 (незаметна, игнорируем)  
-        //  • уровень ≥ −40 dBc           → штраф растёт с близостью к несущей:  
-        //      strong = PEN_STRONG / (off_hz + 1)  — чем ближе, тем хуже;  
-        //      внутри окна GUARD — доминирующий штраф ~10^10  
-        //  • −60..−40 dBc                → половинный вес (мягкий):  
-        //      mid = PEN_MID / (off_hz + 1)  
-        // Итог — max() по гармоникам: худшая определяет метрику.  
-        uint64_t danger = 0;  
-        const int32_t lvls[3] = {lvl1, lvl2, lvl3};  
+        uint64_t danger = 0, worst_off = 0;  
+        int zone = 2;                              // F  
+        const int32_t  lvls[3] = {lvl1, lvl2, lvl3};  
         const uint64_t offs[3] = {off1, off2, off3};  
   
-        uint64_t worst_off = 0;  
-        int zone = 2;                              // F  
-  
         for (int i = 0; i < 3; i++) {  
-            uint64_t hz = offs[i];  
-            if (hz == 0) hz = 1;  
-  
+            uint64_t hz = offs[i]; if (hz == 0) hz = 1;  
             uint64_t d_i;  
             if (lvls[i] <= VFO_SPUR_LVL_WEAK_DB) {  
-                d_i = 0;                           // ≤ −60 dBc: не учитываем  
+                d_i = 0;                           // ≤ −60 dBc: игнорируем  
             } else if (lvls[i] >= VFO_SPUR_LVL_FULL_DB) {  
-                // ≥ −40 dBc: уносить как можно дальше  
                 if (hz <= VFO_SPUR_DEAD_HZ)  
-                    d_i = 1000;                    // слита с тоном — приемлемо  
+                    d_i = 1000;  
                 else if (hz < VFO_DITHER_SPUR_GUARD_HZ)  
-                    d_i = VFO_SPUR_PENALTY         // в окне — провал  
+                    d_i = VFO_SPUR_PENALTY  
                         + VFO_SPUR_PENALTY * (VFO_DITHER_SPUR_GUARD_HZ - hz)  
                           / VFO_DITHER_SPUR_GUARD_HZ;  
                 else  
                     d_i = 2000000000ULL * VFO_DITHER_SPUR_GUARD_HZ / hz;  
-            } else {  
-                // −60..−40 dBc: средний — мягкий штраф (вес 1/4 сильного)  
+            } else {                               // −60..−40 dBc: мягко  
                 if (hz <= VFO_SPUR_DEAD_HZ)  
                     d_i = 100;  
                 else if (hz < VFO_DITHER_SPUR_GUARD_HZ)  
@@ -984,32 +941,21 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
                 else  
                     d_i = 500000000ULL * VFO_DITHER_SPUR_GUARD_HZ / hz;  
             }  
-  
-            if (d_i > danger) {  
-                danger = d_i;  
-                worst_off = hz;  
-            }  
+            if (d_i > danger) { danger = d_i; worst_off = hz; }  
         }  
   
         metric = danger;  
   
-        // Зона для отладки — по худшей гармонике  
         if (worst_off <= VFO_SPUR_DEAD_HZ) zone = 0;  
         else if (worst_off < VFO_DITHER_SPUR_GUARD_HZ) zone = 1;  
   
         if (dbg) *dbg = (VfoMetricDbg){off1, off2, off3,  
-                                       (uint64_t)worst_off, zone, 0, 0};  
+                                       worst_off, 0, (uint8_t)zone, 0};  
     }  
   
-    // ---- 4. Малый pio_int: глубокая модуляция периода ----  
     if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
   
-    // ---- 5. PIO-джиттер: fdist → штраф, нормированный к clk ----  
-    uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
-                     ? test.pio_frac : 256u - test.pio_frac;  
-    metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;  
-  
-    return metric;  
+    return metric;                                 // frac-штраф удалён  
 }
   
 

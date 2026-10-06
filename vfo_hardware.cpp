@@ -881,8 +881,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // Вычисляем константу числителя ОДИН раз перед циклами
     // thr = GUARD_HZ × 2^32 / F_s_dither = GUARD_HZ × 2^32 × N / clk_sys 
     // Выносим расчет базового множителя наверх (до циклов)
-    // Вместо умножения на 2^32, умножим на 2^28, чтобы результат гарантированно влез в uint32_t
-    uint32_t spur_base_factor = (uint32_t)(VFO_DITHER_SPUR_GUARD_HZ * VFO_DITHER_LOOP_CYCLES * 268435456ULL);
+    const uint64_t spur_num = VFO_DITHER_SPUR_GUARD_HZ * VFO_DITHER_LOOP_CYCLES * 4294967296ULL;
 
     // Дефолтная безопасная конфигурация на случай сбоя сканирования
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
@@ -944,8 +943,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
   
                         // 2. ДИНАМИЧЕСКИЙ ПЕРЕРАСЧЁТ СПУР-ФИЛЬТРА ПОД ЭФФЕКТИВНУЮ F_s_dither  
                         // Защитное окно в 2000 Гц масштабируется на лету от текущей clk_sys_hz  
-                        // Внутри цикла используем быстрое аппаратное 32-битное деление и восстанавливаем масштаб сдвигом
-                        uint32_t dynamic_spur_threshold = (spur_base_factor / (uint32_t)(clk_sys_hz >> 4));
+                        uint32_t dynamic_spur_threshold = (uint32_t)(spur_num / clk_sys_hz);
   
                         if (current_dds_metric > 0 && current_dds_metric < dynamic_spur_threshold) {  
                             // Штраф +80 млн гарантированно выкидывает кандидата со слышимым свистом в эфире  

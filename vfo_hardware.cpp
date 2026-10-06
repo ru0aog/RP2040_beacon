@@ -907,9 +907,6 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
         }  
     }  
   
-    // Малый pio_int: дизер модулирует слишком большую долю периода  
-    if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
-  
     // Малый pio_int: дизер модулирует слишком большую долю периода — жёсткий порог  
     if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
   
@@ -936,11 +933,10 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // Дефолтная безопасная конфигурация на случай сбоя  
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };  
   
-    // Защитный клэмпинг диапазона (1.0 .. 40.0 МГц)  
-    if (target_mhz < 100000000ULL || target_mhz > 40000000000ULL) {  
-        return best_pll;  
-    }  
-  
+    // Границы КВ-диапазона (1.0 .. 30.0 МГц) в миллигерцах
+    if (mhz_target < 1000000000ULL)   mhz_target = 1000000000ULL; // 1.0 МГц
+    if (mhz_target > 30000000000ULL) mhz_target = 30000000000ULL; // 30 МГц
+
     // Эталон — фактический pll_nominal через ту же метрику  
     VfoParameters nom_params;  
     uint64_t nom_dds_metric = vfo_pll_metric(pll_nominal.clk_sys_hz, target_mhz, &nom_params);  
@@ -952,8 +948,9 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // Стартовые ориентиры от номинала  
     uint64_t min_dds_metric  = nom_dds_metric;  
     uint32_t min_ctz_metric  = (nom_raw_step == 0) ? 0u : (uint32_t)__builtin_ctz(nom_raw_step);  
-    uint32_t min_frac_metric = nom_dist_frac;  
-  
+    uint32_t min_frac_metric = nom_dist_frac;
+    bool best_forbidden = true;   // лучший на данный момент — из запретного пояса?
+
 #if VFO_PLL_DEBUG
     struct PllCand { uint64_t clk; uint32_t step; uint64_t metric;  
                     uint32_t frac; uint64_t eff; uint8_t zone; };  
@@ -1011,7 +1008,16 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                                               : (uint32_t)__builtin_ctz(cand_raw_step);  
   
                 uint32_t current_frac_metric = (test.pio_frac < 256u - test.pio_frac)  
-                                               ? test.pio_frac : 256u - test.pio_frac;  
+                                               ? test.pio_frac : 256u - test.pio_frac;
+                
+                // Запретный пояс FRAC8: спур садится на ~f_sm*fdist/256 от несущей.  
+                // Требуем >=1 МГц отстройки (с запасом x2 в формуле).  
+                // frac==0 — идеал, пояса нет.  
+                uint32_t fdist_min = (uint32_t)(256ULL * 1000000ULL /  
+                                                (2ULL * (uint64_t)target_frequency_hz));  
+                if (fdist_min > 128) fdist_min = 128;  
+                bool frac_forbidden = (test.pio_frac != 0 &&  
+                                       current_frac_metric < fdist_min);
   
 #if VFO_PLL_DEBUG  
                 // топ-3 без дублей по clk_sys (одна частота находится через разные p1/p2)  
@@ -1037,11 +1043,23 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);  
                 bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);  
   
-                if (is_better_dds ||  
-                   (is_equal_dds && is_better_frac) ||  
-                   (is_equal_dds && is_equal_frac && is_better_ctz) ||  
-                   (is_equal_dds && is_equal_frac && is_equal_ctz && clk_sys_hz > best_pll.clk_sys_hz)) {
+                // Иерархия: разрешённый frac всегда бьёт запретный.  
+                // Внутри одного класса — dds(dmin) -> frac -> ctz -> выше clk_sys.  
+                bool prefer;  
+                if (frac_forbidden != best_forbidden) {  
+                    // Классы разные: берём разрешённого (frac_forbidden==false)  
+                    prefer = !frac_forbidden;  
+                } else {  
+                    // Одинаковый класс — обычная лесенка критериев  
+                    prefer = is_better_dds ||  
+                             (is_equal_dds && is_better_frac) ||  
+                             (is_equal_dds && is_equal_frac && is_better_ctz) ||  
+                             (is_equal_dds && is_equal_frac && is_equal_ctz &&  
+                              clk_sys_hz > best_pll.clk_sys_hz);  
+                }  
   
+                if (prefer) {  
+                    best_forbidden  = frac_forbidden;   // ВАЖНО: запоминаем класс победителя  
                     min_dds_metric  = current_dds_metric;  
                     min_ctz_metric  = current_ctz_metric;  
                     min_frac_metric = current_frac_metric;  
@@ -1050,9 +1068,9 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     best_pll.p1 = p1;  
                     best_pll.p2 = p2;  
                     best_pll.clk_sys_hz = clk_sys_hz;  
-                    best_pll.vsel = (uint32_t)vsel_for(clk_sys_hz); 
+                    best_pll.vsel = (uint32_t)vsel_for(clk_sys_hz);  
                     best_pll.is_oc = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
-                }  
+                }
             }  
         }  
     }  

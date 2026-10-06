@@ -131,7 +131,8 @@ volatile bool clk_boosted = false;
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
 static float    vfo_read_core_temp_c(void);
-static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz);
+static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
+                               VfoParameters* out = nullptr);
 
 
 
@@ -314,8 +315,11 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
     //    Разрешены оба направления: opt > nominal (разгон) и opt < nominal  
     //    (чистая шина ниже 133 МГц).  
     uint64_t target_mhz = (uint64_t)target_freq_hz * 1000ULL;  
-    uint64_t metric_opt = vfo_pll_metric(opt.clk_sys_hz,     target_mhz);  
-    uint64_t metric_cur = vfo_pll_metric(current_clk_sys_hz, target_mhz);  
+
+    VfoParameters dummy;  
+    uint64_t metric_opt = vfo_pll_metric(opt.clk_sys_hz,     target_mhz, &dummy);  
+    uint64_t metric_cur = vfo_pll_metric(current_clk_sys_hz, target_mhz, &dummy);
+
   
     if (metric_opt >= metric_cur || opt.clk_sys_hz == current_clk_sys_hz) {  
         Serial.printf("[BOOST] SKIP (opt %llu.%03llu MHz не лучше: metric=%llu vs active=%llu)\n",  
@@ -861,41 +865,6 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 // Единая метрика качества кандидата clk_sys для заданной частоты (мГц).  
 // Чем меньше — тем чище спектр. Используется и в поиске, и в boost_enter.  
 // Один источник истины для метрики. Возвращает uint64_t (штрафы > 2^32).  
-static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz) {  
-    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);  
-  
-    // dds-метрика: расстояние шага до 0 или до 2^32 (период паттерна)  
-    uint32_t eff = test.dds_step;            // хелпер уже применил |1u  
-    uint32_t dist0 = eff;  
-    uint32_t distM = 0xFFFFFFFFu - eff;  
-    uint64_t metric = (dist0 < distM) ? dist0 : distM;  
-  
-    // 2-я и 3-я гармоники периода шага (mod 2^32 перенос — корректно)  
-    uint32_t e2 = eff << 1;  
-    uint32_t d20 = e2, d2M = 0xFFFFFFFFu - e2;  
-    uint64_t m2 = (d20 < d2M) ? d20 : d2M;  
-    uint32_t e3 = eff + (eff << 1);  
-    uint32_t d30 = e3, d3M = 0xFFFFFFFFu - e3;  
-    uint64_t m3 = (d30 < d3M) ? d30 : d3M;  
-    if (m2 < metric) metric = m2;  
-    if (m3 < metric) metric = m3;  
-  
-    // спур-штраф: спур ближе GUARD_HZ к несущей — нежелателен  
-    uint64_t thr = VFO_SPUR_NUMERATOR / clk_sys_hz;  
-    if (metric > 0 && metric < thr)  
-        metric += (uint64_t)((thr - metric) * 80000000ULL / thr);
-  
-    // frac-штраф: PIO-джиттер пропорционален близости frac к 128  
-    uint32_t prox = (test.pio_frac <= 128) ? test.pio_frac  
-                                           : (256u - test.pio_frac);  
-    metric += (uint64_t)prox * 200000ULL;  
-  
-    // идеальное деление  
-    if (test.pio_frac == 0 && test.dds_step == 0) metric = 0;  
-    return metric;  
-}
-
-
 
 /**  
  * @brief Сканирующий матричный поиск оптимальной конфигурации PLL (clk_sys).  
@@ -985,6 +954,8 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
     return metric;  
 }  
   
+
+
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
     uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы  

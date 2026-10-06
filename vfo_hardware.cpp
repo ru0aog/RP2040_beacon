@@ -857,7 +857,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 #define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
 #define VFO_DITHER_SPUR_GUARD_HZ 2000ULL   // защитное окно в Гц  
 #define VFO_SPUR_NUMERATOR (VFO_DITHER_SPUR_GUARD_HZ * VFO_DITHER_LOOP_CYCLES * 4294967296ULL)  
-#define VFO_FRAC_PENALTY         200000ULL // вес штрафа за единицу frac-отклонения  
+#define VFO_FRAC_PENALTY         200000ULL // вес штрафа за единицу frac-отклонения (PIO-джиттера)
 #define VFO_SPUR_PENALTY         80000000ULL  
 
 // Общая метрика кандидата — единый источник правды для find и boost  
@@ -938,14 +938,13 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
         if (d3 < dmin) dmin = d3;  
         metric = dmin;  
   
-        // Прогрессивный штраф за спур в защитном окне у несущей  
-        uint64_t thr = VFO_SPUR_NUMERATOR / clk_sys_hz;  
-        if (dmin > 0 && (uint64_t)dmin < thr) {  
-            uint64_t prox = thr - dmin;  
-            metric += VFO_SPUR_PENALTY + prox * VFO_SPUR_PENALTY / thr;  
-        }  
+        // спур-штраф: спур в полосе ~GUARD_HZ, НО не сливающийся с несущей.  
+        // Спур ближе ~100 Гц к тону неотличим от него — штрафовать не нужно.  
+        uint64_t thr  = VFO_SPUR_NUMERATOR / clk_sys_hz;  
+        uint64_t dead = thr / 20;                 // нижняя граница ~100 Гц  
+        if (metric > dead && metric < thr)  
+            metric += (uint64_t)((thr - metric) * 80000000ULL / thr);
     }  
-  
     // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
                      ? test.pio_frac : 256u - test.pio_frac;  

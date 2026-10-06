@@ -133,15 +133,15 @@ static uint16_t vsel_to_mv(uint32_t vsel);
 static float    vfo_read_core_temp_c(void);
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz);
 
-// Помощник автоматического определения напряжения ядра под частоту шины
-static vreg_voltage vsel_for(uint64_t clk_hz) {
-    if (clk_hz >= 280000000ULL)      return VREG_VOLTAGE_1_30; // Легальный максимум SDK
-    else if (clk_hz >= 200000000ULL) return VREG_VOLTAGE_1_25;
-    else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;
-    return VREG_VOLTAGE_DEFAULT;
+
+
+// Помощник автоматического определения напряжения ядра под частоту шины  
+static vreg_voltage vsel_for(uint64_t clk_hz) {  
+    if (clk_hz >= 250000000ULL)      return VREG_VOLTAGE_1_30; // >=250 МГц — только легальный максимум  
+    else if (clk_hz >= 200000000ULL) return VREG_VOLTAGE_1_25;  
+    else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;  
+    return VREG_VOLTAGE_DEFAULT;  
 }
-
-
 
 
 
@@ -302,51 +302,63 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
 
 
 
-void vfo_clk_boost_enter(unsigned int target_freq_hz) {    
-    if (clk_boosted) return;    
-    
-    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, pll_ceiling.clk_sys_hz);    
-    
-    // Сравнение метрик — строго по той же формуле, что оптимизировал поиск  
-    uint64_t target_mhz  = (uint64_t)target_freq_hz * 1000ULL;    
-    uint64_t metric_opt  = vfo_pll_metric(opt.clk_sys_hz,          target_mhz);    
-    uint64_t metric_cur  = vfo_pll_metric(current_clk_sys_hz,      target_mhz);    
-    
-    // SKIP только если оптимум не лучше ТЕКУЩЕЙ шины (а не «номинала» —  
-    // init мог уже увести нас на нестандартную частоту вроде 124 МГц)  
-    if (metric_opt >= metric_cur) {    
-        Serial.printf("[BOOST] SKIP (opt %llu.%03llu MHz не лучше: metric=%llu vs active=%llu)\n",    
-                      (unsigned long long)(opt.clk_sys_hz / 1000000ULL),    
-                      (unsigned long long)(opt.clk_sys_hz % 1000000ULL / 1000ULL),    
-                      (unsigned long long)metric_opt,    
-                      (unsigned long long)metric_cur);    
-        multicore_reset_core1();    
-        multicore_launch_core1(vfo_core1_entry);    
-        return;    
-    }    
-    
-    // Едем на opt — вверх или вниз, для vfo_set_clk_sys без разницы  
-    pll_overclock = opt;   // активный профиль для thermal guard RESUME    
-    
-    uint32_t vsel = (opt.clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)    
-                    ? vsel_for(opt.clk_sys_hz) : VREG_VOLTAGE_DEFAULT;    
-    if (opt.vsel >= VREG_VOLTAGE_1_10) vsel = opt.vsel;   // приоритет профиля    
-    
-    vfo_set_clk_sys(opt, vsel);    
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);    
+void vfo_clk_boost_enter(unsigned int target_freq_hz) {  
+    if (clk_boosted) return;  
+  
+    // 1. Поиск оптимума сразу в пределах доказанного потолка (один проход,  
+    //    двойное сканирование с клэмпом больше не нужно)  
+    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, pll_ceiling.clk_sys_hz);  
+  
+    // 2. Сравнение метрик по ЕДИНОЙ формуле поиска:  
+    //    едем на opt только если он реально лучше текущей шины.  
+    //    Разрешены оба направления: opt > nominal (разгон) и opt < nominal  
+    //    (чистая шина ниже 133 МГц).  
+    uint64_t target_mhz = (uint64_t)target_freq_hz * 1000ULL;  
+    uint64_t metric_opt = vfo_pll_metric(opt.clk_sys_hz,     target_mhz);  
+    uint64_t metric_cur = vfo_pll_metric(current_clk_sys_hz, target_mhz);  
+  
+    if (metric_opt >= metric_cur || opt.clk_sys_hz == current_clk_sys_hz) {  
+        Serial.printf("[BOOST] SKIP (opt %llu.%03llu MHz не лучше: metric=%llu vs active=%llu)\n",  
+                      (unsigned long long)(opt.clk_sys_hz / 1000000ULL),  
+                      (unsigned long long)(opt.clk_sys_hz % 1000000ULL / 1000ULL),  
+                      (unsigned long long)metric_opt,  
+                      (unsigned long long)metric_cur);  
+        return;  
+    }  
+  
+    // 3. Теперь, когда решение принято — останавливаем Core 1  
+    multicore_reset_core1();  
+    busy_wait_us(100);  
+    cached_base_freq_hz = target_freq_hz;  
+  
+    // 4. Напряжение: профиль поиска с подстраховкой таблицей  
+    uint32_t vsel = opt.vsel;  
+    if (vsel == 0 || vsel < (uint32_t)VREG_VOLTAGE_1_10) {  
+        vsel = (uint32_t)vsel_for(opt.clk_sys_hz);  
+    }  
+  
+    // 5. Сдвиг частоты и питания (внутри: детач clk_peri, сброс PLL)  
+    vfo_set_clk_sys(opt, vsel);  
+  
+    // 6. Пересчёт таблиц под новую clk_sys  
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
     vfo_set_tone_instant(0);  
-    tone_changed = true;          // Core 1 перезагрузит l_int/l_frac/l_step  
-    
-    clk_boosted = true;    
-    
-    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
-                  opt.clk_sys_hz / 1000000.0,    
-                  (unsigned long)opt.fbdiv, (unsigned long)opt.p1, (unsigned long)opt.p2,    
-                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),    
-                  (unsigned)vsel_to_mv(vsel),    
-                  opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
-                  (unsigned)ssi_hw->baudr,    
-                  (double)vfo_read_core_temp_c());    
+    tone_changed = true;          // страховка для Core 1  
+  
+    clk_boosted = true;  
+    pll_overclock = opt;          // активный профиль для термогуарда  
+  
+    multicore_launch_core1(vfo_core1_entry);  
+  
+    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
+                  opt.clk_sys_hz / 1000000.0,  
+                  (unsigned long)opt.fbdiv,  
+                  (unsigned long)opt.p1,  
+                  (unsigned long)opt.p2,  
+                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
+                  (unsigned)vsel_to_mv(vsel),  
+                  opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
+                  (unsigned)ssi_hw->baudr);  
 }
 
 
@@ -1068,9 +1080,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     best_pll.p1 = p1;  
                     best_pll.p2 = p2;  
                     best_pll.clk_sys_hz = clk_sys_hz;  
-                    best_pll.vsel = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)  
-                                    ? (uint32_t)vsel_for(clk_sys_hz)  
-                                    : (uint32_t)VREG_VOLTAGE_DEFAULT;  
+                    best_pll.vsel = (uint32_t)vsel_for(clk_sys_hz); 
                     best_pll.is_oc = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
                 }  
             }  

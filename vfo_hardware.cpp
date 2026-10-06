@@ -847,6 +847,8 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
  * -# вторичная — минимум расстояния `pio_frac` до 0 или 256  
  *    (делитель ближе к целому);  
  * -# третичная — при равенстве метрик выбирается максимальная clk_sys.  
+ *       Четвёртый критерий — минимум хвостовых нулевых бит dds_step: 
+ *       предпочтение кандидата с длиннейшим периодом паттерна переносов.
  *  
  * Защита декодера цифровых мод: если спур переполнения DDS попадает  
  * ближе ~2 кГц к несущей (метрика в диапазоне 0 < d < 1620000),  
@@ -865,8 +867,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
  *       выполняет вызывающий код через `set_sys_clock_pll()`.  
  *       Опорная частота берётся из @c VFO_CALIBRATED_XOSC_HZ.  
  *       Перебор ~700 комбинаций выполняется один раз на смену диапазона.
- *       Четвёртый критерий — минимум хвостовых нулевых бит dds_step: 
- *       предпочтение кандидата с длиннейшим периодом паттерна переносов.
+
  *  
  * @see calculate_raw_params_mhz(), vfo_hardware_init(), PllConfig  
  */
@@ -877,23 +878,17 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // Дефолтная безопасная конфигурация на случай сбоя сканирования
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
 
-    uint32_t min_dds_metric = 0xFFFFFFFFu;
-    uint32_t min_frac_metric = 255;
-    uint32_t min_ctz_metric  = 32;               // Мин. число нулевых хвостовых бит шага
+    // метрики
+    uint32_t min_dds_metric  = 0xFFFFFFFFu;
+    uint32_t min_ctz_metric  = 32;               // ТЕПЕРЬ ВТОРИЧНАЯ: Мин. число нулевых хвостовых бит шага
+    uint32_t min_frac_metric = 255;              // ТЕПЕРЬ ТРЕТИЧНАЯ: Близость pio_frac к краям
     bool found_valid = false;
 
     // Скан-сессия разделена на 2 этапа: 0 - номинальный режим, 1 - экстремальный оверклокинг
     for (int run_stage = 0; run_stage < 2; run_stage++) {
         
-        // Если на первом проходе (Stage 0) уже нашли идеальное целое деление - OC-проход игнорируем
-        //if (run_stage == 1 && found_valid && min_dds_metric == 0) {
-        //    break;
-        //}
-
-        //uint64_t max_allowed_clk = (run_stage == 0) ? VFO_CLK_SYS_NOMINAL_HZ : VFO_CLK_SYS_MAX_HZ;
         uint64_t min_allowed_clk = (run_stage == 0) ? VFO_CLK_SYS_NOMINAL_HZ : (VFO_CLK_SYS_NOMINAL_HZ + 1000000ULL);
         uint64_t max_allowed_clk = (run_stage == 0) ? VFO_CLK_SYS_NOMINAL_HZ : max_clk_limit;
-
 
         for (uint32_t p1 = 2; p1 <= 6; p1++) {
             for (uint32_t p2 = 1; p2 <= 2; p2++) {
@@ -907,7 +902,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
                     
-                    // Жесткий фильтр не пускает автотюн ниже номинала 133 МГц
+                    // Жесткий фильтр не пускает частоту шину ниже/выше установленных границ
                     if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;
 
                     uint64_t clocks_per_period = 2ULL;
@@ -948,35 +943,34 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                         }  
                     }
 
-                    // Вторичная метрика: Близость pio_frac к краям сетки Брезенхема (0 или 256)  
+                    // Третичная метрика: Близость pio_frac к краям сетки Брезенхема (0 или 256)
                     uint32_t dist_frac_0 = test_pio_frac;
                     uint32_t dist_frac_max = 256 - test_pio_frac;
                     uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
   
-                    // Третичная метрика: число хвостовых нулевых бит dds_step.
-                    // Период паттерна переносов N = 2^32/gcd(step, 2^32): каждый
-                    // нулевой бит вдвое сокращает период и вдвое разносит
-                    // fractional-N гребёнку. 0 — у нулевого шага (идеал) и у
-                    // нечётных шагов (gcd=1 -> гребёнка в шумовую полку).
+                    // Вторичная метрика: число хвостовых нулевых бит dds_step.
+                    // Меньше нулей — выше частота fractional-N гребенки, чище эфир.
                     uint32_t current_ctz_metric = (test_dds_step == 0) ? 0u  
                                                   : (uint32_t)__builtin_ctz(test_dds_step);  
 
                     // Многокритериальный арбитраж
                     bool is_better_dds  = (current_dds_metric < min_dds_metric);
                     bool is_equal_dds   = (current_dds_metric == min_dds_metric);
-                    bool is_better_frac = (current_frac_metric < min_frac_metric);
-                    bool is_equal_frac  = (current_frac_metric == min_frac_metric);
+                    
                     bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);
                     bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);
+                    
+                    bool is_better_frac = (current_frac_metric < min_frac_metric);
+                    bool is_equal_frac  = (current_frac_metric == min_frac_metric);
 
                     if (is_better_dds ||
-                       (is_equal_dds && is_better_frac) ||
-                       (is_equal_dds && is_equal_frac && is_better_ctz) ||
-                       (is_equal_dds && is_equal_frac && is_equal_ctz && clk_sys_hz > best_pll.clk_sys_hz)) {
+                       (is_equal_dds && is_better_ctz) ||
+                       (is_equal_dds && is_equal_ctz && is_better_frac) ||
+                       (is_equal_dds && is_equal_ctz && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
 
                         min_dds_metric = current_dds_metric;
-                        min_frac_metric = current_frac_metric;
-                        min_ctz_metric  = current_ctz_metric;
+                        min_ctz_metric  = current_ctz_metric;   // Сохраняем лучшую CTZ-метрику
+                        min_frac_metric = current_frac_metric; // Сохраняем лучшую FRAC-метрику
                         
                         best_pll.fbdiv = fbdiv;
                         best_pll.p1 = p1;

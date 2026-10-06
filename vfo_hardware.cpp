@@ -634,23 +634,31 @@ static void __not_in_flash_func(vfo_core1_entry)() {
     // Прямой кэшированный указатель на регистр SM PIO
     volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
 
+    // Счётчик опроса флага смены тона: читаем ОЗУ-флаг раз в VFO_TONE_POLL_N итераций  
+    // (проигрыш задержки применения тона: < 64 итераций × ~20 тактов ≈ 4 мкс на 321 МГц)  
+    const uint32_t poll_mask = (1u << 6) - 1u;   // N = 64; степень двойки!  
+    uint32_t poll_cnt = 0; 
+
     while (true) {
-        // Опрос флага смены тона (в ОЗУ смотрим только раз за сессию передачи)
-        if (__builtin_expect(tone_changed, 0)) {
-            uint32_t save = spin_lock_blocking(vfo_spin_lock);
-            l_step = (int32_t)dds_step;
-            l_int  = (int32_t)target_pio_int;
-            l_frac = (int32_t)target_pio_frac8;
-            
-            loc_acc1 = 0;
-            loc_rand_state = xorshift_state;
+        // Разряженный опрос флага: проверка (poll_cnt & mask) — регистр + битовый AND  
+        if ((poll_cnt & poll_mask) == 0u) {  
+            if (__builtin_expect(tone_changed, 0)) {  
+                uint32_t save = spin_lock_blocking(vfo_spin_lock);
+                l_step = (int32_t)dds_step;
+                l_int  = (int32_t)target_pio_int;
+                l_frac = (int32_t)target_pio_frac8;
+                
+                loc_acc1 = 0;
+                loc_rand_state = xorshift_state;
 #ifdef VFO_USE_MASH2
             loc_acc2 = 0;
             loc_m2_carry_prev = 0;
 #endif
             tone_changed = false; 
             spin_unlock(vfo_spin_lock, save);
-        }
+            }  
+        }  
+        poll_cnt++;
 
 #ifdef VFO_DITHER_PROFILE
         // Мгновенный аппаратный тоггл отладочного пина 13 через шину SIO (1 такт)
@@ -709,7 +717,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         }
 #endif
 
-        // НАДЕЖНАЯ ЗНАКОВАЯ НОРМАЛИЗАЦИЯ: переменные принудительно приведены к int32_t
+        // ЗНАКОВАЯ НОРМАЛИЗАЦИЯ: переменные принудительно приведены к int32_t
         int32_t current_frac = l_frac + total_correction;
         int32_t current_int  = l_int;
 
@@ -717,7 +725,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         current_int += (current_frac >> 8); 
         current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка
 
-        // Единственная за всю итерацию STR-инструкция записи в шину периферии PIO
+        // Единственная STR-запись в шину периферии PIO за итерацию
         *clkdiv_reg = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
 
 #else

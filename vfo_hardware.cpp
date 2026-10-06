@@ -131,8 +131,12 @@ volatile bool clk_boosted = false;       // активация разгона
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
 static float    vfo_read_core_temp_c(void);
+
+struct VfoMetricDbg;   // forward — структура полностью объявлена ниже в файле  
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
-                               VfoParameters* out = nullptr);
+                               VfoParameters* out = nullptr,  
+                               VfoMetricDbg* dbg = nullptr);
+
 
 
 
@@ -855,73 +859,152 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 
 
-
 #define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов  
 #define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
-#define VFO_SPUR_GUARD_HZ        2000ULL   // защитное окно CW  
-#define VFO_FRAC_PENALTY         200000ULL // вес штрафа за единицу frac-отклонения  
-  
-// Зоны спура, Гц (эффективные — после взвешивания по номеру гармоники)  
-#define VFO_SPUR_DEAD_HZ   150ULL          // ближе ~150 Гц — сливается с несущей  
-#define VFO_SPUR_PENALTY   4000000000000ULL // базовый штраф за спур в окне  
-#define VFO_INT_PENALTY    500000000000ULL  // штраф за pio_int < 4  
-  
-// Отстройка спура k-й гармоники в Гц  
+
+#define VFO_DITHER_SPUR_GUARD_HZ  2000ULL    // защитное окно вокруг несущей, Гц  
+#define VFO_SPUR_DEAD_HZ          150ULL     // спур сливается с тоном — считаем идеалом  
+#define VFO_SPUR_PENALTY          8000000000ULL  // штраф за спур в окне (выше почти всех метрик)  
+#define VFO_INT_PENALTY           500000000ULL   // мягкий запрет pio_int < 4  
+#define VFO_FRAC_PENALTY          200000ULL      // вес PIO-джиттера (тай-брейк)  
+
+// Разбор метрики для отладки (заполняется только при VFO_PLL_DEBUG)  
+struct VfoMetricDbg {  
+    uint64_t off1, off2, off3;   // отстройки гармоник, Гц  
+    uint64_t eff;                // худшая эффективная отстройка, Гц  
+    uint64_t frac_pen;           // frac-штраф в метрике  
+    uint8_t  zone;               // 0=dead, 1=window, 2=far  
+    uint8_t  pio_int;  
+};
+
+// Перевод расстояния шага (0..2^31) в реальную отстройку спура в Гц  
 static inline uint64_t spur_offset_hz(uint32_t d, uint64_t clk_sys_hz) {  
     return ((uint64_t)d * clk_sys_hz) / (VFO_DITHER_LOOP_CYCLES * 4294967296ULL);  
 }  
 
-// взвешивание не только расстояния до основного тона, но и амплитуды спуров
+
+
+// =====================================================================  
+// ПОРОГИ УРОВНЯ СПУРОВ (дБц × 100, целые)  
+// =====================================================================  
+#define VFO_SPUR_LVL_FULL_DB   (-4000)   // ≥ −40 dBc: сильный спур — уносить далеко  
+#define VFO_SPUR_LVL_WEAK_DB   (-6000)   // ≤ −60 dBc: слабый — игнорируем  
+// Между ними: средний спур — мягкий штраф за близость  
+  
+// Целочисленный 20·log10(x), x в [0..1] как Q32 (num/2^32), результат в дБ×100.  
+// 20·log10(x) = 20·log10(2)·log2(x) = 6.0206·log2(x); log2(x) = ctz-разложение.  
+// Точность ~±0.3 дБ — для классификации достаточно.  
+static inline int32_t spur_level_db100(uint64_t num, uint8_t k) {  
+    // num — расстояние dmin гармоники (0..2^31); уровень ∝ dmin/(k·2^32)  
+    // Используем: 20·log10(d/2^32) − 20·log10(k)  
+    if (num == 0) return -9600;                    // −96 dBc: гармоники нет  
+    int lz = __builtin_clzll(num << 33);           // log2(num/2^32) ≈ −(lz+1)+дробь  
+    // Дробная часть: берём 3 старших бита мантиссы, линейная интерполяция log2  
+    uint64_t mant = (num << (lz + 33)) >> 61;      // 0..7  
+    // log2(1+m/8) ≈ m·0.19265 для малых m (грубо)  
+    int32_t log2_x100 = -(int32_t)(lz + 1) * 100 + (int32_t)(mant * 19);  
+    int32_t lvl = log2_x100 * 602 / 100;           // ×6.0206 → дБ×100  
+    // −20·log10(k): k=1→0, k=2→−602, k=3→−954  
+    static const int16_t k_pen[4] = {0, 0, -602, -954};  
+    return lvl + k_pen[k];  
+}  
+  
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
-                               VfoParameters *out /* может быть NULL */) {  
+                               VfoParameters *out,  
+                               VfoMetricDbg *dbg) {  
     VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);  
     if (out) *out = test;  
   
     uint64_t metric;  
   
     if (test.pio_frac == 0 && test.dds_step == 0) {  
-        metric = 0;   // аппаратный идеал: целое деление без дизера  
+        metric = 0;                                // аппаратный идеал  
+        if (dbg) *dbg = (VfoMetricDbg){0,0,0,0,0,0,3};  
     } else {  
-        // 1-я, 2-я и 3-я гармоники спура: расстояние до 0 / 2^32  
+        // ---- 1. Три гармоники спура: расстояние шага до 0/2^32 ----  
         uint32_t e1 = test.dds_step;  
         uint32_t e2 = test.dds_step << 1;  
         uint32_t e3 = test.dds_step + (test.dds_step << 1);  
   
-        uint32_t d1 = (e1 < (uint32_t)(0u - e1)) ? e1 : (uint32_t)(0u - e1);  
-        uint32_t d2 = (e2 < (uint32_t)(0u - e2)) ? e2 : (uint32_t)(0u - e2);  
-        uint32_t d3 = (e3 < (uint32_t)(0u - e3)) ? e3 : (uint32_t)(0u - e3);  
+        uint32_t d1 = (e1 < (0u - e1)) ? e1 : (0u - e1);  
+        uint32_t d2 = (e2 < (0u - e2)) ? e2 : (0u - e2);  
+        uint32_t d3 = (e3 < (0u - e3)) ? e3 : (0u - e3);  
+        uint32_t dmin = d1;  
+        if (d2 < dmin) dmin = d2;  
+        if (d3 < dmin) dmin = d3;  
   
-        // УРОВЕНЬ спура ~ 1/k: амплитуда k-й гармоники падает.  
-        // Эффективная отстройка: реальная_отстройка * k — то есть  
-        // слабая 3-я гармоника «выглядит» как будто она в 3 раза ближе,  
-        // а значит требует большего реального отступа, чтобы быть безопасной.  
-        uint64_t off1 = spur_offset_hz(d1, clk_sys_hz);          // k=1, вес 1  
-        uint64_t off2 = spur_offset_hz(d2, clk_sys_hz) * 2ULL;   // k=2, вес 1/2 → offset*2  
-        uint64_t off3 = spur_offset_hz(d3, clk_sys_hz) * 3ULL;   // k=3, вес 1/3 → offset*3  
+        // ---- 2. Отстройка в Гц и уровень каждой гармоники ----  
+        uint64_t off1 = spur_offset_hz(d1, clk_sys_hz);          // реальная отстройка  
+        uint64_t off2 = spur_offset_hz(d2, clk_sys_hz);  
+        uint64_t off3 = spur_offset_hz(d3, clk_sys_hz);  
   
-        // Худшая гармоника = минимальная эффективная отстройка  
-        uint64_t eff = off1;  
-        if (off2 < eff) eff = off2;  
-        if (off3 < eff) eff = off3;  
+        int32_t lvl1 = spur_level_db100(d1, 1);    // полный уровень 1-й гармоники  
+        int32_t lvl2 = spur_level_db100(d2, 2);    // 2-я на ~6 дБ слабее  
+        int32_t lvl3 = spur_level_db100(d3, 3);    // 3-я на ~9.5 дБ слабее  
   
-        if (eff <= VFO_SPUR_DEAD_HZ) {  
-            // Слился с тоном (или перенормированный слабый спур рядом — безопасно)  
-            metric = eff;                       // почти 0  
-        } else if (eff < VFO_SPUR_GUARD_HZ) {  
-            // В окне: худший случай, прогрессивный штраф к центру  
-            metric = VFO_SPUR_PENALTY  
-                   + VFO_SPUR_PENALTY * (VFO_SPUR_GUARD_HZ - eff)  
-                                     / VFO_SPUR_GUARD_HZ;  
-        } else {  
-            // За окном: убываем с отстройкой — поощряем унос спура подальше  
-            metric = 1000000ULL * VFO_SPUR_GUARD_HZ / eff;  
+        // ---- 3. Зонная оценка каждой гармоники ----  
+        // Опасность гармоники = f(отстройка, уровень):  
+        //  • уровень ≤ −60 dBc           → 0 (незаметна, игнорируем)  
+        //  • уровень ≥ −40 dBc           → штраф растёт с близостью к несущей:  
+        //      strong = PEN_STRONG / (off_hz + 1)  — чем ближе, тем хуже;  
+        //      внутри окна GUARD — доминирующий штраф ~10^10  
+        //  • −60..−40 dBc                → половинный вес (мягкий):  
+        //      mid = PEN_MID / (off_hz + 1)  
+        // Итог — max() по гармоникам: худшая определяет метрику.  
+        uint64_t danger = 0;  
+        const int32_t lvls[3] = {lvl1, lvl2, lvl3};  
+        const uint64_t offs[3] = {off1, off2, off3};  
+  
+        uint64_t worst_off = 0;  
+        int zone = 2;                              // F  
+  
+        for (int i = 0; i < 3; i++) {  
+            uint64_t hz = offs[i];  
+            if (hz == 0) hz = 1;  
+  
+            uint64_t d_i;  
+            if (lvls[i] <= VFO_SPUR_LVL_WEAK_DB) {  
+                d_i = 0;                           // ≤ −60 dBc: не учитываем  
+            } else if (lvls[i] >= VFO_SPUR_LVL_FULL_DB) {  
+                // ≥ −40 dBc: уносить как можно дальше  
+                if (hz <= VFO_SPUR_DEAD_HZ)  
+                    d_i = 1000;                    // слита с тоном — приемлемо  
+                else if (hz < VFO_DITHER_SPUR_GUARD_HZ)  
+                    d_i = VFO_SPUR_PENALTY         // в окне — провал  
+                        + VFO_SPUR_PENALTY * (VFO_DITHER_SPUR_GUARD_HZ - hz)  
+                          / VFO_DITHER_SPUR_GUARD_HZ;  
+                else  
+                    d_i = 2000000000ULL * VFO_DITHER_SPUR_GUARD_HZ / hz;  
+            } else {  
+                // −60..−40 dBc: средний — мягкий штраф (вес 1/4 сильного)  
+                if (hz <= VFO_SPUR_DEAD_HZ)  
+                    d_i = 100;  
+                else if (hz < VFO_DITHER_SPUR_GUARD_HZ)  
+                    d_i = VFO_SPUR_PENALTY / 4;  
+                else  
+                    d_i = 500000000ULL * VFO_DITHER_SPUR_GUARD_HZ / hz;  
+            }  
+  
+            if (d_i > danger) {  
+                danger = d_i;  
+                worst_off = hz;  
+            }  
         }  
+  
+        metric = danger;  
+  
+        // Зона для отладки — по худшей гармонике  
+        if (worst_off <= VFO_SPUR_DEAD_HZ) zone = 0;  
+        else if (worst_off < VFO_DITHER_SPUR_GUARD_HZ) zone = 1;  
+  
+        if (dbg) *dbg = (VfoMetricDbg){off1, off2, off3,  
+                                       (uint64_t)worst_off, zone, 0, 0};  
     }  
   
-    // Малый pio_int: DDS-остаток модулирует слишком большую долю периода  
+    // ---- 4. Малый pio_int: глубокая модуляция периода ----  
     if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
   
-    // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
+    // ---- 5. PIO-джиттер: fdist → штраф, нормированный к clk ----  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
                      ? test.pio_frac : 256u - test.pio_frac;  
     metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;  
@@ -957,17 +1040,29 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     uint32_t min_ctz_metric  = (nom_raw_step == 0) ? 0u : (uint32_t)__builtin_ctz(nom_raw_step);  
     uint32_t min_frac_metric = nom_dist_frac;  
   
-#if VFO_PLL_DEBUG  
-    struct PllCand { uint64_t clk; uint32_t step; uint64_t metric; uint32_t frac; };  
-    PllCand top[3] = { {0,0,UINT64_MAX,0}, {0,0,UINT64_MAX,0}, {0,0,UINT64_MAX,0} };  
-#endif  
-  
+#if VFO_PLL_DEBUG
+    struct PllCand { uint64_t clk; uint32_t step; uint64_t metric;  
+                    uint32_t frac; uint64_t eff; uint8_t zone; };  
+    PllCand top[3] = { {0,0,UINT64_MAX,0,0,0}, {0,0,UINT64_MAX,0,0,0}, {0,0,UINT64_MAX,0,0,0} };  
+#endif
+
     // Сканируем весь диапазон в один проход  
     const uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;  
     const uint64_t max_allowed_clk = max_clk_limit;  
 
+#if VFO_PLL_DEBUG
     Serial.printf("[PLLDBG] scan range: %.3f .. %.3f MHz (target=%u)\n",  
               min_allowed_clk / 1e6, max_allowed_clk / 1e6, target_frequency_hz);
+#endif
+
+#if VFO_PLL_DEBUG  
+    Serial.printf("[PLLDBG] target=%u Hz  nominal: clk=%lu step=0x%08lX metric=%llu frac=%u\n",  
+                  target_frequency_hz,  
+                  (unsigned long)pll_nominal.clk_sys_hz,  
+                  (unsigned long)nom_params.dds_step,  
+                  (unsigned long long)nom_dds_metric,  
+                  (unsigned)nom_params.pio_frac);  
+#endif
 
     for (uint32_t p1 = 2; p1 <= 6; p1++) {  
         for (uint32_t p2 = 1; p2 <= 2; p2++) {  
@@ -983,8 +1078,14 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;  
   
                 // Единая метрика кандидата  
-                VfoParameters test;  
-                uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test);  
+                VfoParameters test;
+                #if VFO_PLL_DEBUG  
+                    VfoMetricDbg dbg;  
+                    uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test, &dbg);  
+                #else  
+                    uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test, nullptr);  
+                #endif
+
                 if (test.pio_int < 2) continue;  
   
                 // CTZ по сырому шагу (сброс принудительной нечётности)  
@@ -1005,10 +1106,12 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     top[pos].clk    = clk_sys_hz;  
                     top[pos].step   = test.dds_step;  
                     top[pos].metric = current_dds_metric;  
-                    top[pos].frac   = test.pio_frac;  
+                    top[pos].frac   = test.pio_frac;
+                    top[pos].eff    = dbg.eff;  
+                    top[pos].zone   = dbg.zone;
                 }  
-#endif  
-  
+#endif
+
                 // Многокритериальный арбитраж: dds -> ctz -> frac -> выше clk_sys  
                 bool is_better_dds  = (current_dds_metric < min_dds_metric);  
                 bool is_equal_dds   = (current_dds_metric == min_dds_metric);  
@@ -1038,23 +1141,33 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     }  
   
 #if VFO_PLL_DEBUG  
-    Serial.printf("[PLLDBG] target=%u Hz  nominal: clk=%lu step=0x%08lX metric=%llu frac=%u\n",  
-                  target_frequency_hz,  
-                  (unsigned long)pll_nominal.clk_sys_hz,  
-                  (unsigned long)nom_params.dds_step,  
-                  (unsigned long long)nom_dds_metric,  
-                  (unsigned)nom_params.pio_frac);  
+
+static const char zone_ch[] = {'D', 'W', 'F'};  // dead / window / far  
     for (int i = 0; i < 3; i++) {  
         if (top[i].clk == 0) break;  
-        Serial.printf("[PLLDBG] top%d: clk=%.3f MHz step=0x%08lX metric=%llu frac=%u\n",  
+        Serial.printf("[PLLDBG] top%d: clk=%.3f MHz step=0x%08lX metric=%llu frac=%u"  
+                      "  eff=%llu Hz [%c]\n",  
                       i, top[i].clk / 1e6, (unsigned long)top[i].step,  
-                      (unsigned long long)top[i].metric, (unsigned)top[i].frac);  
-    }  
-    Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz fbdiv=%lu p1=%lu p2=%lu\n",  
+                      (unsigned long long)top[i].metric, (unsigned)top[i].frac,  
+                      (unsigned long long)top[i].eff, zone_ch[top[i].zone]);  
+    }
+
+VfoMetricDbg wd;  
+    VfoParameters wp;  
+    vfo_pll_metric(best_pll.clk_sys_hz, target_mhz, &wp, &wd);  
+    Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz fbdiv=%lu p1=%lu p2=%lu"  
+                  "  off1=%llu off2=%llu off3=%llu Hz  eff=%llu [%c] fracpen=%llu int=%u\n",  
                   best_pll.clk_sys_hz / 1e6,  
                   (unsigned long)best_pll.fbdiv,  
                   (unsigned long)best_pll.p1,  
-                  (unsigned long)best_pll.p2);  
+                  (unsigned long)best_pll.p2,  
+                  (unsigned long long)wd.off1,  
+                  (unsigned long long)wd.off2,  
+                  (unsigned long long)wd.off3,  
+                  (unsigned long long)wd.eff,  
+                  zone_ch[wd.zone],  
+                  (unsigned long long)wd.frac_pen,  
+                  (unsigned)wd.pio_int);
 #endif  
     return best_pll;  
 }

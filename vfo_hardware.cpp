@@ -870,132 +870,159 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
  * @see calculate_raw_params_mhz(), vfo_hardware_init(), PllConfig  
  */
 
-#define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1 (замерить по пину 13!)  
-#define VFO_DITHER_SPUR_GUARD_HZ 2000ULL   // спуры ближе этого к несущей штрафуются
+#define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1
+#define VFO_DITHER_SPUR_GUARD_HZ 2000ULL   // защитное окно в Гц
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {
-
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;
-    uint64_t base_target_chz = (uint64_t)target_frequency_hz * 100ULL;
+    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // Перевод строго в миллигерцы
 
-    // Вычисляем константу числителя ОДИН раз перед циклами
-    // thr = GUARD_HZ × 2^32 / F_s_dither = GUARD_HZ × 2^32 × N / clk_sys 
-    // Выносим расчет базового множителя наверх (до циклов)
-    const uint64_t spur_num = VFO_DITHER_SPUR_GUARD_HZ * VFO_DITHER_LOOP_CYCLES * 4294967296ULL;
-
-    // Дефолтная безопасная конфигурация на случай сбоя сканирования
+    // Дефолтная безопасная конфигурация на случай сбоя
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
 
-    // метрики
-    uint32_t min_dds_metric  = 0xFFFFFFFFu;
-    uint32_t min_ctz_metric  = 32;               // ТЕПЕРЬ ВТОРИЧНАЯ: Мин. число нулевых хвостовых бит шага
-    uint32_t min_frac_metric = 255;              // ТЕПЕРЬ ТРЕТИЧНАЯ: Близость pio_frac к краям
-    bool found_valid = false;
+    // ПУНКТ 6: Защитный клэмпинг диапазона (1.0 .. 40.0 МГц)
+    if (target_mhz < 100000000ULL || target_mhz > 40000000000ULL) {
+        return best_pll;
+    }
 
-    // Скан-сессия разделена на 2 этапа: 0 - номинальный режим, 1 - экстремальный оверклокинг
-    for (int run_stage = 0; run_stage < 2; run_stage++) {
-        
-        uint64_t min_allowed_clk = (run_stage == 0) ? VFO_CLK_SYS_NOMINAL_HZ : (VFO_CLK_SYS_NOMINAL_HZ + 1000000ULL);
-        uint64_t max_allowed_clk = (run_stage == 0) ? VFO_CLK_SYS_NOMINAL_HZ : max_clk_limit;
+    const uint64_t spur_numerator = VFO_DITHER_SPUR_GUARD_HZ * VFO_DITHER_LOOP_CYCLES * 4294967296ULL;
 
-        for (uint32_t p1 = 2; p1 <= 6; p1++) {
-            for (uint32_t p2 = 1; p2 <= 2; p2++) {
-                uint32_t pdiv_total = p1 * p2;
+    // Инициализация базовых метрик через штатный хелпер для номинала (133 МГц)
+    VfoParameters nom_params = calculate_raw_params_mhz(133000000ULL, target_mhz);
+    
+    uint32_t nom_dist_0 = nom_params.dds_step;
+    uint32_t nom_dist_max = (uint32_t)(4294967296ULL - nom_params.dds_step); // Честный предел 2^32
+    uint32_t nom_dds_metric = (nom_dist_0 < nom_dist_max) ? nom_dist_0 : nom_dist_max;
+
+    uint32_t nom_dist_frac_0 = nom_params.pio_frac;
+    uint32_t nom_dist_frac_max = 256 - nom_params.pio_frac;
+    uint32_t nom_frac_metric = (nom_dist_frac_0 < nom_dist_frac_max) ? nom_dist_frac_0 : nom_dist_frac_max;
+    
+    // ПУНКТ 1: Интегрируем frac-штраф в стартовую метрику номинала
+    nom_dds_metric += nom_frac_metric * 200000u;
+
+    // Запись глобальных стартовых ориентиров
+    uint32_t min_dds_metric  = nom_dds_metric;
+    uint32_t nom_raw_step    = nom_params.dds_step & ~1u; // Восстанавливаем сырую четность для CTZ
+    uint32_t min_ctz_metric  = (nom_raw_step == 0) ? 0u : (uint32_t)__builtin_ctz(nom_raw_step);
+    uint32_t min_frac_metric = nom_frac_metric;
+
+    // Сканируем весь доступный диапазон частот в один проход
+    uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;
+    uint64_t max_allowed_clk = max_clk_limit;
+
+    for (uint32_t p1 = 2; p1 <= 6; p1++) {
+        for (uint32_t p2 = 1; p2 <= 2; p2++) {
+            uint32_t pdiv_total = p1 * p2;
+            
+            for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
+                uint64_t vco_hz = fbdiv * crystal_hz;
                 
-                for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {
-                    uint64_t vco_hz = fbdiv * crystal_hz;
-                    
-                    // Жесткий аппаратный фильтр VCO чипа RP2040 (750..1600 МГц)
-                    if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;
-                    
-                    uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
-                    
-                    // Жесткий фильтр не пускает частоту шину ниже/выше установленных границ
-                    if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;
+                // Жесткий аппаратный фильтр VCO чипа RP2040 (750..1600 МГц)
+                if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;
+                
+                uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
+                
+                // Фильтр рабочих частот шины
+                if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;
 
-                    uint64_t clocks_per_period = 2ULL;
-                    uint64_t pio_denom = base_target_chz * clocks_per_period;
-                    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 100ULL) / pio_denom;
-                    
-                    uint32_t test_pio_int = pio_div_fixed8 >> 8;
-                    if (test_pio_int < 2) continue; 
-                    
-                    uint32_t test_pio_frac = pio_div_fixed8 & 0xFFu;
+                // ========================================================================
+                // ИСПРАВЛЕНО (Пункт 1): Полное замещение дублированного математического блока
+                // ========================================================================
+                VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
+                
+                if (test.pio_int < 2) continue; // Жесткий пропуск некорректных делителей
+                
+                uint32_t current_dds_metric = 0;
+   
+                // 1. АППАРАТНЫЙ ИДЕАЛ (Прямой выход на целое деление)
+                if (test.pio_frac == 0 && test.dds_step == 0) {  
+                    current_dds_metric = 0; 
+                } else {  
+                    // Вычисляем расстояние для 1-й гармоники (test.dds_step уже содержит |= 1u)
+                    uint32_t dist_dds_0 = test.dds_step;  
+                    uint32_t dist_dds_max = (uint32_t)(4294967296ULL - test.dds_step);
+                    current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;  
 
-                    uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 100ULL) % pio_denom;
-                    uint64_t intermediate = (clk_sys_rem << 16) / pio_denom;
-                    uint64_t remainder_low = (clk_sys_rem << 16) % pio_denom;
-                    uint32_t test_dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / pio_denom));
-                    
-                    uint32_t current_dds_metric = 0;
-       
-                    // 1. АППАРАТНЫЙ ИДЕАЛ: Проверяем выход на чистое целое деление  
-                    if (test_pio_frac == 0 && test_dds_step == 0) {  
-                        current_dds_metric = 0; // Нулевой фазовый шум, дизеринг спит  
-                    } else {  
-                        // Метрику считаем от ЭФФЕКТИВНОГО шага: в calculate_raw_params_mhz  
-                        // ненулевой шаг принудительно делается нечётным (|= 1)  
-                        uint32_t eff_dds_step = (test_dds_step == 0) ? 0 : (test_dds_step | 1u);  
-  
-                        uint32_t dist_dds_0 = eff_dds_step;  
-                        uint32_t dist_dds_max = 0xFFFFFFFFu - eff_dds_step;  
-                        current_dds_metric = (dist_dds_0 < dist_dds_max) ? dist_dds_0 : dist_dds_max;  
-  
-                        // 2. ДИНАМИЧЕСКИЙ ПЕРЕРАСЧЁТ СПУР-ФИЛЬТРА ПОД ЭФФЕКТИВНУЮ F_s_dither  
-                        // Защитное окно в 2000 Гц масштабируется на лету от текущей clk_sys_hz  
-                        uint32_t dynamic_spur_threshold = (uint32_t)(spur_num / clk_sys_hz);
-  
-                        if (current_dds_metric > 0 && current_dds_metric < dynamic_spur_threshold) {  
-                            // Штраф +80 млн гарантированно выкидывает кандидата со слышимым свистом в эфире  
-                            current_dds_metric += 80000000u;   
-                        }  
+                    // Анализ 2-й гармоники спура (2 * step mod 2^32)
+                    uint32_t eff_dds_step2 = test.dds_step << 1;
+                    uint32_t dist_dds2_0 = eff_dds_step2;
+                    uint32_t dist_dds2_max = (uint32_t)(4294967296ULL - eff_dds_step2);
+                    uint32_t spur2_metric = (dist_dds2_0 < dist_dds2_max) ? dist_dds2_0 : dist_dds2_max;
+
+                    if (spur2_metric < current_dds_metric) {
+                        current_dds_metric = spur2_metric;
                     }
 
-                    // Третичная метрика: Близость pio_frac к краям сетки Брезенхема (0 или 256)
-                    uint32_t dist_frac_0 = test_pio_frac;
-                    uint32_t dist_frac_max = 256 - test_pio_frac;
-                    uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
-  
-                    // Вторичная метрика: число хвостовых нулевых бит dds_step.
-                    // Меньше нулей — выше частота fractional-N гребенки, чище эфир.
-                    uint32_t current_ctz_metric = (test_dds_step == 0) ? 0u  
-                                                  : (uint32_t)__builtin_ctz(test_dds_step);  
+                    // ========================================================================
+                    // ДОБАВЛЕНО (Пункт 2): Анализ 3-й гармоники спура (3 * step mod 2^32)
+                    // Расчет через быстрое сложение step + (step << 1) без умножения
+                    // ========================================================================
+                    uint32_t eff_dds_step3 = test.dds_step + (test.dds_step << 1);
+                    uint32_t dist_dds3_0 = eff_dds_step3;
+                    uint32_t dist_dds3_max = (uint32_t)(4294967296ULL - eff_dds_step3);
+                    uint32_t spur3_metric = (dist_dds3_0 < dist_dds3_max) ? dist_dds3_0 : dist_dds3_max;
 
-                    // Многокритериальный арбитраж
-                    bool is_better_dds  = (current_dds_metric < min_dds_metric);
-                    bool is_equal_dds   = (current_dds_metric == min_dds_metric);
-                    
-                    bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);
-                    bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);
-                    
-                    bool is_better_frac = (current_frac_metric < min_frac_metric);
-                    bool is_equal_frac  = (current_frac_metric == min_frac_metric);
-
-                    if (is_better_dds ||
-                       (is_equal_dds && is_better_ctz) ||
-                       (is_equal_dds && is_equal_ctz && is_better_frac) ||
-                       (is_equal_dds && is_equal_ctz && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
-
-                        min_dds_metric = current_dds_metric;
-                        min_ctz_metric  = current_ctz_metric;   // Сохраняем лучшую CTZ-метрику
-                        min_frac_metric = current_frac_metric; // Сохраняем лучшую FRAC-метрику
-                        
-                        best_pll.fbdiv = fbdiv;
-                        best_pll.p1 = p1;
-                        best_pll.p2 = p2;
-                        best_pll.clk_sys_hz = clk_sys_hz;
-                        best_pll.vsel = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)  
-                                        ? (uint32_t)vsel_for(clk_sys_hz)  
-                                        : (uint32_t)VREG_VOLTAGE_DEFAULT;
-                        best_pll.is_oc = (run_stage == 1); // Помечаем, если вышли в OC-зону
-                        found_valid = true;
+                    if (spur3_metric < current_dds_metric) {
+                        current_dds_metric = spur3_metric;
                     }
+
+                    // Динамический расчет штрафного окна биений (64-битное деление)
+                    uint32_t dynamic_spur_threshold = (uint32_t)(spur_numerator / clk_sys_hz);
+
+                    if (current_dds_metric > 0 && current_dds_metric < dynamic_spur_threshold) {  
+                        // ПУНКТ 3: Прогрессивный штраф по проксимальности спура к несущей
+                        uint32_t prox = dynamic_spur_threshold - current_dds_metric;   
+                        current_dds_metric += 80000000u + (uint32_t)((uint64_t)prox * 80000000u / dynamic_spur_threshold);  
+                    }  
+                }
+
+                uint32_t dist_frac_0 = test.pio_frac;
+                uint32_t dist_frac_max = 256 - test.pio_frac;
+                uint32_t current_frac_metric = (dist_frac_0 < dist_frac_max) ? dist_frac_0 : dist_frac_max;
+
+                // ПУНКТ 1: Слияние метрик джиттера (аддитивный перенос штрафа)
+                current_dds_metric += current_frac_metric * 200000u; 
+
+                // ПУНКТ 2: Поиск скрытых аномалий по СЫРОМУ шагу (сброс нечетного бита)
+                uint32_t cand_raw_step = test.dds_step & ~1u;
+                uint32_t current_ctz_metric = (cand_raw_step == 0) ? 0u  
+                                              : (uint32_t)__builtin_ctz(cand_raw_step);  
+
+                // Многокритериальный арбитраж
+                bool is_better_dds  = (current_dds_metric < min_dds_metric);
+                bool is_equal_dds   = (current_dds_metric == min_dds_metric);
+                
+                bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);
+                bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);
+                
+                bool is_better_frac = (current_frac_metric < min_frac_metric);
+                bool is_equal_frac  = (current_frac_metric == min_frac_metric);
+
+                if (is_better_dds ||
+                   (is_equal_dds && is_better_ctz) ||
+                   (is_equal_dds && is_equal_ctz && is_better_frac) ||
+                   (is_equal_dds && is_equal_ctz && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {
+
+                    min_dds_metric  = current_dds_metric;
+                    min_ctz_metric  = current_ctz_metric;   
+                    min_frac_metric = current_frac_metric; 
+                    
+                    best_pll.fbdiv = fbdiv;
+                    best_pll.p1 = p1;
+                    best_pll.p2 = p2;
+                    best_pll.clk_sys_hz = clk_sys_hz;
+                    best_pll.vsel = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)  
+                                    ? (uint32_t)vsel_for(clk_sys_hz)  
+                                    : (uint32_t)VREG_VOLTAGE_DEFAULT;
+                    best_pll.is_oc = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ); 
                 }
             }
         }
     }
     return best_pll;
 }
+
 
 
 

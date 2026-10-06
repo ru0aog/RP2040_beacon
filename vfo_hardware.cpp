@@ -938,10 +938,9 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
         if (d3 < dmin) dmin = d3;  
         metric = dmin;  
   
-        // Прогрессивный штраф за спур в защитном окне у несущей.  
-        // Спур ближе ~dead к тону неотличим от несущей — не штрафуем.  
+        // Прогрессивный штраф за спур в защитном окне у несущей  
         uint64_t thr  = VFO_SPUR_NUMERATOR / clk_sys_hz;  
-        uint64_t dead = thr / 20;                    // ~100 Гц при GUARD=2000  
+        uint64_t dead = thr / 20;   // спур ближе ~100 Гц к тону — сливается с несущей  
         if ((uint64_t)dmin > dead && (uint64_t)dmin < thr) {  
             uint64_t prox = thr - dmin;  
             metric += VFO_SPUR_PENALTY + prox * VFO_SPUR_PENALTY / thr;  

@@ -858,59 +858,73 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 #define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов  
 #define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
-#define VFO_DITHER_SPUR_GUARD_HZ 2000ULL   // защитное окно в Гц  
-#define VFO_SPUR_NUMERATOR (VFO_DITHER_SPUR_GUARD_HZ * VFO_DITHER_LOOP_CYCLES * 4294967296ULL)  
-#define VFO_FRAC_PENALTY         200000ULL // вес штрафа за единицу frac-отклонения (PIO-джиттера)
-#define VFO_SPUR_PENALTY         400000000ULL  
+#define VFO_SPUR_GUARD_HZ        2000ULL   // защитное окно CW  
+#define VFO_FRAC_PENALTY         200000ULL // вес штрафа за единицу frac-отклонения  
+  
+// Зоны спура, Гц (эффективные — после взвешивания по номеру гармоники)  
+#define VFO_SPUR_DEAD_HZ   150ULL          // ближе ~150 Гц — сливается с несущей  
+#define VFO_SPUR_PENALTY   4000000000000ULL // базовый штраф за спур в окне  
+#define VFO_INT_PENALTY    500000000000ULL  // штраф за pio_int < 4  
+  
+// Отстройка спура k-й гармоники в Гц  
+static inline uint64_t spur_offset_hz(uint32_t d, uint64_t clk_sys_hz) {  
+    return ((uint64_t)d * clk_sys_hz) / (VFO_DITHER_LOOP_CYCLES * 4294967296ULL);  
+}  
 
-// ========================================================================  
-// ЕДИНАЯ МЕТРИКА КАНДИДАТА — единственный источник истины.  
-// чтобы сравнение "opt vs active" было в той же шкале, что и поиск.  
-// target_mhz — частота в миллигерцах (Hz * 1000).  
-// ========================================================================  
+// взвешивание не только расстояния до основного тона, но и амплитуды спуров
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
                                VfoParameters *out /* может быть NULL */) {  
     VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);  
     if (out) *out = test;  
   
     uint64_t metric;  
-
+  
     if (test.pio_frac == 0 && test.dds_step == 0) {  
         metric = 0;   // аппаратный идеал: целое деление без дизера  
     } else {  
-        // Расстояние шага до 0 или 2^32 для 1-й, 2-й и 3-й гармоник спура  
+        // 1-я, 2-я и 3-я гармоники спура: расстояние до 0 / 2^32  
         uint32_t e1 = test.dds_step;  
         uint32_t e2 = test.dds_step << 1;  
         uint32_t e3 = test.dds_step + (test.dds_step << 1);  
   
-        uint32_t d1 = (e1 < (uint32_t)(4294967296ULL - e1)) ? e1 : (uint32_t)(4294967296ULL - e1);  
-        uint32_t d2 = (e2 < (uint32_t)(4294967296ULL - e2)) ? e2 : (uint32_t)(4294967296ULL - e2);  
-        uint32_t d3 = (e3 < (uint32_t)(4294967296ULL - e3)) ? e3 : (uint32_t)(4294967296ULL - e3);  
+        uint32_t d1 = (e1 < (uint32_t)(0u - e1)) ? e1 : (uint32_t)(0u - e1);  
+        uint32_t d2 = (e2 < (uint32_t)(0u - e2)) ? e2 : (uint32_t)(0u - e2);  
+        uint32_t d3 = (e3 < (uint32_t)(0u - e3)) ? e3 : (uint32_t)(0u - e3);  
   
-        uint32_t dmin = d1;  
-        if (d2 < dmin) dmin = d2;  
-        if (d3 < dmin) dmin = d3;  
-        // метрика ∝ сдвиг спура в Гц (с запасом по разрядности)  
-        metric = ((uint64_t)dmin * clk_sys_hz) >> 18;   // ~ dmin·clk/262144
+        // УРОВЕНЬ спура ~ 1/k: амплитуда k-й гармоники падает.  
+        // Эффективная отстройка: реальная_отстройка * k — то есть  
+        // слабая 3-я гармоника «выглядит» как будто она в 3 раза ближе,  
+        // а значит требует большего реального отступа, чтобы быть безопасной.  
+        uint64_t off1 = spur_offset_hz(d1, clk_sys_hz);          // k=1, вес 1  
+        uint64_t off2 = spur_offset_hz(d2, clk_sys_hz) * 2ULL;   // k=2, вес 1/2 → offset*2  
+        uint64_t off3 = spur_offset_hz(d3, clk_sys_hz) * 3ULL;   // k=3, вес 1/3 → offset*3  
   
-        // Прогрессивный штраф за спур в защитном окне у несущей  
-        uint64_t thr  = VFO_SPUR_NUMERATOR / clk_sys_hz;  
-        uint64_t dead = thr / 20;   // спур ближе ~100 Гц к тону — сливается с несущей
-                                    // thr/8 ~ 250 Гц
-        if ((uint64_t)dmin > dead && (uint64_t)dmin < thr) {  
-            uint64_t prox = thr - dmin;  
-            metric += VFO_SPUR_PENALTY + prox * VFO_SPUR_PENALTY / thr;  
-        }
+        // Худшая гармоника = минимальная эффективная отстройка  
+        uint64_t eff = off1;  
+        if (off2 < eff) eff = off2;  
+        if (off3 < eff) eff = off3;  
+  
+        if (eff <= VFO_SPUR_DEAD_HZ) {  
+            // Слился с тоном (или перенормированный слабый спур рядом — безопасно)  
+            metric = eff;                       // почти 0  
+        } else if (eff < VFO_SPUR_GUARD_HZ) {  
+            // В окне: худший случай, прогрессивный штраф к центру  
+            metric = VFO_SPUR_PENALTY  
+                   + VFO_SPUR_PENALTY * (VFO_SPUR_GUARD_HZ - eff)  
+                                     / VFO_SPUR_GUARD_HZ;  
+        } else {  
+            // За окном: убываем с отстройкой — поощряем унос спура подальше  
+            metric = 1000000ULL * VFO_SPUR_GUARD_HZ / eff;  
+        }  
     }  
-
-    // Малый pio_int: DDS-остаток модулирует слишком большую долю периода.  
-    // INT=2 с дизером — глубокая модуляция, метрика её недооценивает.  
-    if (test.pio_int < 4) metric += 500000000ULL;   // или return UINT64_MAX — отсечь совсем
-
+  
+    // Малый pio_int: DDS-остаток модулирует слишком большую долю периода  
+    if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
+  
     // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
                      ? test.pio_frac : 256u - test.pio_frac;  
-    metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;
+    metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;  
   
     return metric;  
 }

@@ -938,12 +938,14 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
         if (d3 < dmin) dmin = d3;  
         metric = dmin;  
   
-        // спур-штраф: спур в полосе ~GUARD_HZ, НО не сливающийся с несущей.  
-        // Спур ближе ~100 Гц к тону неотличим от него — штрафовать не нужно.  
+        // Прогрессивный штраф за спур в защитном окне у несущей.  
+        // Спур ближе ~dead к тону неотличим от несущей — не штрафуем.  
         uint64_t thr  = VFO_SPUR_NUMERATOR / clk_sys_hz;  
-        uint64_t dead = thr / 20;                 // нижняя граница ~100 Гц  
-        if (metric > dead && metric < thr)  
-            metric += (uint64_t)((thr - metric) * 80000000ULL / thr);
+        uint64_t dead = thr / 20;                    // ~100 Гц при GUARD=2000  
+        if ((uint64_t)dmin > dead && (uint64_t)dmin < thr) {  
+            uint64_t prox = thr - dmin;  
+            metric += VFO_SPUR_PENALTY + prox * VFO_SPUR_PENALTY / thr;  
+        }
     }  
     // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  

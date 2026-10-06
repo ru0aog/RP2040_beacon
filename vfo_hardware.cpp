@@ -934,8 +934,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };  
   
     // Границы КВ-диапазона (1.0 .. 30.0 МГц) в миллигерцах
-    if (mhz_target < 1000000000ULL)   mhz_target = 1000000000ULL; // 1.0 МГц
-    if (mhz_target > 30000000000ULL) mhz_target = 30000000000ULL; // 30 МГц
+    if (target_mhz < 1000000000ULL)   target_mhz = 1000000000ULL; // 1.0 МГц
+    if (target_mhz > 30000000000ULL)  target_mhz = 30000000000ULL; // 30 МГц
 
     // Эталон — фактический pll_nominal через ту же метрику  
     VfoParameters nom_params;  

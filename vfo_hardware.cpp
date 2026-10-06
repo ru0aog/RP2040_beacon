@@ -845,6 +845,8 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // ниже — сильные близкие спуры
 
+#define VFO_CLK_PRIORITY        133000000ULL  // нормализация метрики на clk_sys
+
 // Перевод расстояния шага (0..2^31) в реальную отстройку спура в Гц  
 static inline uint64_t spur_offset_hz(uint32_t d, uint64_t clk_sys_hz) {  
     return ((uint64_t)d * clk_sys_hz) / (VFO_DITHER_LOOP_CYCLES * 4294967296ULL);  
@@ -920,6 +922,11 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
                      ? test.pio_frac : 256u - test.pio_frac;  
     metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;
+
+    // Приоритет высокой частоты шины: джиттер FRAC8 = 1 такт clk_sys,  
+    // уровень спура ~ f_out/clk. Нормируем всю метрику на clk:  
+    // 369 МГц получает множитель ~0.36, 133 МГц — ~1.0  
+    metric = metric * VFO_CLK_PRIORITY / clk_sys_hz;  
   
     return metric;  
 }

@@ -361,6 +361,7 @@ void SI_POWER_ON() {
     if (debug_flag) {
       Serial.println("[Система] ВНИМАНИЕ! Отсутствует модуль Si5351");
       Serial.print("[Питание] Запускаем внутренний DDS-генератор RP2040 на пине "); Serial.println(VFO_OUTPUT_PIN);
+      vfo_clk_boost_enter();   // активация режима разгона
     }
   }
 }

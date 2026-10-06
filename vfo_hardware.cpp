@@ -31,7 +31,7 @@
 
  *  АРХИТЕКТУРА  
  *  1) PIO гоняет 2-тактный меандр -> f_out = clk_sys / (2 * D).  
- *  2) vfo_find_optimal_pll() перебирает p1(2..6), p2(1..2), fbdiv(30..150),  
+ 
  *     отбирает clk_sys (VCO 750..1600 МГц, clk_sys 100..133 МГц) по метрике:  
  *     первично — минимум остатка dds_step (32 бита), вторично — минимум  
  *     pio_frac, третично — максимум clk_sys.  
@@ -40,7 +40,7 @@
  *  
  *  МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL И ДВУХЪЯДЕРНЫЙ ДИЗЕРИНГ  
  *  -----------------------------------------------------  
- *  1. vfo_find_optimal_pll: Сканирует коэффициенты обратной связи (fbdiv 30..150)  
+ 
  *     и делители (p1, p2). Подбирает частоту тактирования clk_sys (100..133 МГц)  
  *     так, чтобы минимизировать остаток 32-битного шага dds_step (первично)  
  *     и остаток pio_frac (вторично).  
@@ -126,7 +126,7 @@ PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFA
 PllConfig pll_overclock = { 69,  3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false }; 
 // Потолок OCTEST клэмпим строго к лимиту препроцессора (380 МГц)
 PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30,    true };  
-volatile bool clk_boosted = false;
+volatile bool clk_boosted = false;       // активация разгона
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -225,7 +225,7 @@ static uint32_t cached_base_freq_hz = 3500000;
  * @note Оперирует регистрами подсистемы CLOCKS/PLL напрямую;  
  *       не является thread-safe вне критической секции инициализации.  
  *  
- * @see vfo_hardware_init(), vfo_find_optimal_pll()  
+
  */
 static void __not_in_flash_func(detach_peripheral_clock)() {  
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);  
@@ -304,11 +304,12 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
 
 
 void vfo_clk_boost_enter(unsigned int target_freq_hz) {  
-    if (clk_boosted) return;  
+    if (clk_boosted) return;
+    if (target_freq_hz != 0) {
   
     // 1. Поиск оптимума сразу в пределах доказанного потолка (один проход,  
     //    двойное сканирование с клэмпом больше не нужно)  
-    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, pll_ceiling.clk_sys_hz);  
+    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, VFO_CLK_SYS_MAX_HZ);  
   
     // 2. Сравнение метрик по ЕДИНОЙ формуле поиска:  
     //    едем на opt только если он реально лучше текущей шины.  
@@ -348,9 +349,8 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
     vfo_set_tone_instant(0);  
     tone_changed = true;          // страховка для Core 1  
-  
-    clk_boosted = true;  
-    pll_overclock = opt;          // активный профиль для термогуарда  
+
+    pll_overclock = opt;          // активный профиль для термогуарда 
   
     multicore_launch_core1(vfo_core1_entry);  
   
@@ -363,6 +363,9 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
                   (unsigned)vsel_to_mv(vsel),  
                   opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
                   (unsigned)ssi_hw->baudr);  
+    }
+
+    clk_boosted = true;
 }
 
 
@@ -381,6 +384,7 @@ void vfo_clk_boost_exit(void) {
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
 
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
+    Serial.println("[BOOST] пересчёт таблицы тонов");
   
     // Пересчёт таблицы тонов обратно под номинальную clk_sys  
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
@@ -795,7 +799,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
  * для шага сетки тонов (RTTY mark/space, IFKP).  
  *  
  * @param[in] clk_sys_hz   Текущая системная частота в герцах (результат  
- *                         @ref vfo_find_optimal_pll, обычно 100..133 МГц).  
+ *                           
  * @param[in] mhz_target   Целевая выходная частота в миллигерцах;  
  *                         автоматически ограничивается диапазоном  
  *                         КВ-диапазона 1.0..40.0 МГц.  
@@ -814,7 +818,6 @@ static void __not_in_flash_func(vfo_core1_entry)() {
  *       сдвинутого остатка (`clk_sys_rem << 16`) для сохранения полных  
  *       32 бит точности без потерь при делении.  
  *  
- * @see vfo_find_optimal_pll(), vfo_set_tone_instant(), VfoParameters  
  */
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {
     // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)
@@ -861,7 +864,6 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 #define VFO_SPUR_PENALTY         80000000ULL  
 
 // Общая метрика кандидата — единый источник правды для find и boost  
-// Перед vfo_find_optimal_pll — общий расчёт метрики кандидата  
 // Единая метрика качества кандидата clk_sys для заданной частоты (мГц).  
 // Чем меньше — тем чище спектр. Используется и в поиске, и в boost_enter.  
 // Один источник истины для метрики. Возвращает uint64_t (штрафы > 2^32).  
@@ -910,7 +912,6 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
   
 // ========================================================================  
 // ЕДИНАЯ МЕТРИКА КАНДИДАТА — единственный источник истины.  
-// Используется и в vfo_find_optimal_pll, и в vfo_clk_boost_enter,  
 // чтобы сравнение "opt vs active" было в той же шкале, что и поиск.  
 // target_mhz — частота в миллигерцах (Hz * 1000).  
 // ========================================================================  
@@ -920,7 +921,7 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
     if (out) *out = test;  
   
     uint64_t metric;  
-  
+
     if (test.pio_frac == 0 && test.dds_step == 0) {  
         metric = 0;   // аппаратный идеал: целое деление без дизера  
     } else {  
@@ -940,7 +941,8 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
   
         // Прогрессивный штраф за спур в защитном окне у несущей  
         uint64_t thr  = VFO_SPUR_NUMERATOR / clk_sys_hz;  
-        uint64_t dead = thr / 20;   // спур ближе ~100 Гц к тону — сливается с несущей  
+        uint64_t dead = thr / 20;   // спур ближе ~100 Гц к тону — сливается с несущей
+                                    // thr/8 ~ 250 Гц
         if ((uint64_t)dmin > dead && (uint64_t)dmin < thr) {  
             uint64_t prox = thr - dmin;  
             metric += VFO_SPUR_PENALTY + prox * VFO_SPUR_PENALTY / thr;  
@@ -952,11 +954,12 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
     metric += (uint64_t)fdist * VFO_FRAC_PENALTY;  
   
     return metric;  
-}  
+}
   
 
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
+
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
     uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы  
   
@@ -989,7 +992,10 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // Сканируем весь диапазон в один проход  
     const uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;  
     const uint64_t max_allowed_clk = max_clk_limit;  
-  
+
+    Serial.printf("[PLLDBG] scan range: %.3f .. %.3f MHz (target=%u)\n",  
+              min_allowed_clk / 1e6, max_allowed_clk / 1e6, target_frequency_hz);
+
     for (uint32_t p1 = 2; p1 <= 6; p1++) {  
         for (uint32_t p2 = 1; p2 <= 2; p2++) {  
             uint32_t pdiv_total = p1 * p2;  
@@ -1096,51 +1102,12 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
 
 
 
-/**  
- * @brief Полная инициализация и запуск аппаратного VFO (PLL + PIO + дизеринг).  
- *  
- * Выполняет сквозную настройку всей цепочки генерации ВЧ-меандра:  
- * -# Останавливает предыдущий экземпляр дизеринга: сбрасывает Core 1  
- *    (`VFO_DITHER_ON_CORE1`) либо отменяет повторяющийся таймер  
- *    @c sdr_dither_timer — поэтому функцию можно вызывать повторно при  
- *    смене диапазона.  
- * -# Сбрасывает @c current_active_tone в @c VFO_TONE_NONE, пересеивает  
- *    ГПСЧ Xorshift32 от @c time_us_32() и при первом вызове выделяет  
- *    аппаратный спинлок @c vfo_spin_lock.  
- * -# Выбирает clk_sys: при `VFO_PLL_AUTOTUNE` — через  
- *    @ref vfo_find_optimal_pll, иначе фиксированные 120/133 МГц.  
- * -# Перепрограммирует `pll_sys` и `clk_sys` с запрещёнными прерываниями  
- *    (`save_and_disable_interrupts`): переход на XOSC → сброс PLL →  
- *    `pll_init` → возврат на PLL. Фактическая clk_sys сохраняется в  
- *    @c current_clk_sys_hz.  
- * -# Загружает PIO-программу меандра `pio_square_program` (однократно),  
- *    конфигурирует SM (wrap на 2 такта, set-пин = @c pin_freq_out) и  
- *    запускает автомат.  
- * -# При `VFO_SNAP_TO_GRID` снаппит базовый тон в окне ±0.1 Гц (±10 chz),  
- *    выбирая частоту с минимальным расстоянием `dds_step` до края сетки.  
- * -# Заполняет рантайм-таблицу @ref ifkp_tones (33 тона, строгая сетка  
- *    `base + i * step` в миллигерцах) через @ref calculate_raw_params_mhz  
- *    и применяет тон 0 вызовом @ref vfo_set_tone_instant.  
- * -# Запускает движок дизеринга: `multicore_launch_core1(vfo_core1_entry)`  
- *    либо таймерный колбэк @ref vfo_dither_callback с интервалом  
- *    `VFO_DITHER_INTERVAL_US`.  
- *  
- * @param[in] base_freq_hz  Базовая частота несущей (тон 0) в герцах.  
- * @param[in] step_hz       Шаг сетки тонов в герцах (для IFKP-сетки).  
- *  
- * @note Функция меняет системную частоту clk_sys — вызывать до/после  
- *       с учётом зависимостей периферии (UART baud, USB). Сама по себе  
- *       передачу не начинает: ключ эфира управляется @ref vfo_operation_set.  
- *  
- * @see vfo_find_optimal_pll(), calculate_raw_params_mhz(),  
- *      vfo_set_tone_instant(), vfo_core1_entry(), vfo_dither_callback()  
- */
 // === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
 /**  
  * @brief Полная инициализация и запуск аппаратного VFO (PLL + PIO + дизеринг).  
  *  
  * Осуществляет сквозную синхронизацию частотного плана. Если предпусковой разгон  
- * vfo_clk_boost_enter() уже был активирован диспетчером сессий (clk_boosted == true),  
+ * vfo_clk_boost_enter() уже был активирован диспетчером сессий
  * функция блокирует откат частоты и настраивает подсистемы fixed-point Q8.8 делителей  
  * PIO и 32-битного DDS-остатка строго на базе высокой стабильной оверклокерской частоты.  
  */
@@ -1167,15 +1134,13 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     
     // ========================================================================
     // АРХИТЕКТУРНЫЙ АРБИТРАЖ ЧАСТОТЫ ШИНЫ
-    // ========================================================================
-    // ========================================================================
-    // ИСПРАВЛЕНО: Честный сквозной автотюн при каждом старте (без эффекта памяти)
+    // Честный сквозной автотюн при каждом старте (без эффекта памяти)
     // ========================================================================
 
     if (clk_boosted) { 
         // Если активирован BOOST — запускаем матричный поиск ЛУЧШЕЙ частоты PLL
         // строго под НОВУЮ целевую частоту в пределах стабильного потолка pll_ceiling
-        target_pll = vfo_find_optimal_pll(base_freq_hz, pll_ceiling.clk_sys_hz); 
+        target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_MAX_HZ); 
         
         // Синхронизируем рабочий профиль оверклока для Термогуарда
         pll_overclock = target_pll;
@@ -1348,7 +1313,7 @@ void vfo_clk_thermal_guard(void) {
  * @brief Стресс-тест: поиск индивидуального потолка clk_sys кристалла.  
  *  
  * Перебирает валидные PLL-комбинации по нарастающей clk_sys  
- * (от VFO_CLK_SYS_NOMINAL_HZ до VFO_CLK_SYS_MAX_HZ). На каждой ступени:  
+
  * поднимает VSEL по таблице, переключает clk_sys через vfo_set_clk_sys,  
  * прогоняет композитную нагрузку (целочисленная арифметика + float,  
  * запись/чтение SRAM с CRC, непредсказуемые ветвления, аппаратный  

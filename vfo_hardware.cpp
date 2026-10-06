@@ -838,8 +838,12 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 #define VFO_DITHER_SPUR_GUARD_HZ  2000ULL    // защитное окно вокруг несущей, Гц  
 #define VFO_SPUR_DEAD_HZ          150ULL     // спур сливается с тоном — считаем идеалом  
 #define VFO_SPUR_PENALTY          8000000000ULL  // штраф за спур в окне (выше почти всех метрик)  
-#define VFO_INT_PENALTY           500000000ULL   // мягкий запрет pio_int < 4  
-#define VFO_FRAC_PENALTY          200000ULL      // вес PIO-джиттера (тай-брейк)  
+
+#define VFO_INT_PENALTY   500000000ULL   // жёсткий запрет pio_int < 4 (оставить)  
+#define VFO_FRAC_PENALTY  200000ULL      // ЛИНЕЙНЫЙ слабый тай-брейк (вернуть)  
+#define VFO_INT_WEIGHT    1500000000ULL  // НОВОЕ: премия за большой делитель
+
+#define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // ниже — сильные близкие спуры
 
 // Перевод расстояния шага (0..2^31) в реальную отстройку спура в Гц  
 static inline uint64_t spur_offset_hz(uint32_t d, uint64_t clk_sys_hz) {  
@@ -860,20 +864,22 @@ static inline uint64_t spur_offset_hz(uint32_t d, uint64_t clk_sys_hz) {
 // Точность ~±0.3 дБ — для классификации достаточно.  
 static inline int32_t spur_level_db100(uint64_t num, uint8_t k) {  
     // num — расстояние dmin гармоники (0..2^31); уровень ∝ dmin/(k·2^32)  
-    // Используем: 20·log10(d/2^32) − 20·log10(k)  
-    if (num == 0) return -9600;                    // −96 dBc: гармоники нет  
-    int lz = __builtin_clzll(num << 33);           // log2(num/2^32) ≈ −(lz+1)+дробь  
-    // Дробная часть: берём 3 старших бита мантиссы, линейная интерполяция log2  
-    uint64_t mant = (num << (lz + 33)) >> 61;      // 0..7  
-    // log2(1+m/8) ≈ m·0.19265 для малых m (грубо)  
-    int32_t log2_x100 = -(int32_t)(lz + 1) * 100 + (int32_t)(mant * 19);  
-    int32_t lvl = log2_x100 * 602 / 100;           // ×6.0206 → дБ×100  
+    // Используем: 20·log10(d/2^32) − 20·log10(k)
+    if (num == 0) return -9600;                    // −96 dBc: гармоники нет
+    int lz = __builtin_clzll(num << 33);           // log2(num/2^32) ≈ −(lz+1)+дробь
+    // Дробная часть: берём 3 старших бита мантиссы, линейная интерполяция log2
+    uint64_t mant = (num << (lz + 33)) >> 61;      // 0..7
+    // log2(1+m/8) ≈ m·0.19265 для малых m (грубо)
+    int32_t log2_x100 = -(int32_t)(lz + 1) * 100 + (int32_t)(mant * 19);
+    int32_t lvl = log2_x100 * 602 / 100;           // ×6.0206 → дБ×100
     // −20·log10(k): k=1→0, k=2→−602, k=3→−954  
     static const int16_t k_pen[4] = {0, 0, -602, -954};  
     return lvl + k_pen[k];  
 }  
   
-// взвешивание не только расстояния до основного тона, но и амплитуды спуров  
+
+// Метрика кандидата: главный критерий — глубина дизер-модуляции (dmin),  
+// затем жёсткий штраф за FRAC8-паттерн в середине диапазона.  
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
                                VfoParameters *out /* может быть NULL */) {  
     VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);  
@@ -882,39 +888,44 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
     uint64_t metric;  
   
     if (test.pio_frac == 0 && test.dds_step == 0) {  
-        metric = 0;   // аппаратный идеал: целое деление без дизера  
+        metric = 0;   // аппаратный идеал: целое деление, дизер спит  
     } else {  
-        // Главный критерий: ГЛУБИНА дизер-модуляции = расстояние эффективного  
-        // шага до 0 / 2^32. Малый dmin -> делитель почти целый -> переброс  
-        // делителя редкий -> чистый спектр, дальний первый спур.  
+        // Глубина дизер-модуляции = расстояние эффективного шага до 0/2^32.  
         // test.dds_step уже принудительно нечётный (|= 1) из  
-        // calculate_raw_params_mhz, поэтому берём его как есть.  
-        uint32_t eff_step = test.dds_step;  
-        uint32_t d0   = eff_step;  
-        uint32_t dmax = 0xFFFFFFFFu - eff_step;  
+        // calculate_raw_params_mhz — берём как есть.  
+        uint32_t d0   = test.dds_step;  
+        uint32_t dmax = 0xFFFFFFFFu - test.dds_step;  
         uint32_t dmin = (d0 < dmax) ? d0 : dmax;  
   
         metric = dmin;  
   
-        // Динамический спур-фильтр: если остаток попадает в слышимое окно  
-        // (~2 кГц в пересчёте на текущий clk_sys), штраф выкидывает кандидата.  
+        // Динамический спур-фильтр: остаток в слышимом окне (~2 кГц в пересчёте  
+        // на текущий clk_sys) — штраф выкидывает кандидата.  
         uint64_t dynamic_spur_threshold = 214748364800000ULL / clk_sys_hz;  
         if (dmin > 0 && dmin < dynamic_spur_threshold) {  
             metric += 80000000u;  
         }  
     }  
   
-    // Малый pio_int: DDS-остаток модулирует слишком большую долю периода  
+    // Малый pio_int: дизер модулирует слишком большую долю периода  
     if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
   
-    // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
+    // Малый pio_int: дизер модулирует слишком большую долю периода — жёсткий порог  
+    if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
+  
+    // ГЛАВНЫЙ рычаг: поощряем большой делитель.  
+    // Размах ЧМ на один ±1-тоггл делителя = f_out/INT; при малом INT (15)  
+    // это ~240 кГц => близкая гребёнка. Чем больше INT, тем мельче скачок.  
+    // Высокий clk заодно укорачивает джиттер-фронт FRAC8 (ниже ±МГц-спуры).  
+    metric += VFO_INT_WEIGHT / (uint64_t)test.pio_int;  
+  
+    // ЛИНЕЙНЫЙ слабый штраф за FRAC8-джиттер (только тай-брейк, НЕ доминанта)  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
                      ? test.pio_frac : 256u - test.pio_frac;  
-    metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;  
+    metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;
   
     return metric;  
 }
-  
 
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
@@ -978,14 +989,18 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;  
   
                 uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
-                if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;  
+                if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;
+
+                // Спур-уровень близкой гребёнки ~ f_out/INT ~ f_out^2/clk_sys:  
+                // низкая шина = сильные спуры. Жёсткий минимум шины.  
+                if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;
   
                 // Единая метрика кандидата  
                 VfoParameters test;
                 #if VFO_PLL_DEBUG  
                     uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test);
                 #else  
-                    uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test, nullptr);  
+                    uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test);  
                 #endif
 
                 if (test.pio_int < 2) continue;  
@@ -1012,18 +1027,20 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 }  
 #endif
 
-                // Многокритериальный арбитраж: dds -> ctz -> frac -> выше clk_sys  
+                // Многокритериальный арбитраж: dds(dmin) -> frac -> ctz -> выше clk_sys  
+                // frac поднят выше ctz: FRAC8-паттерн с низкопорядковой дробью  
+                // даёт сильные спуры ±f_sm/N, важнее периода DDS-переносов.  
                 bool is_better_dds  = (current_dds_metric < min_dds_metric);  
                 bool is_equal_dds   = (current_dds_metric == min_dds_metric);  
-                bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);  
-                bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);  
                 bool is_better_frac = (current_frac_metric < min_frac_metric);  
                 bool is_equal_frac  = (current_frac_metric == min_frac_metric);  
+                bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);  
+                bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);  
   
                 if (is_better_dds ||  
-                   (is_equal_dds && is_better_ctz) ||  
-                   (is_equal_dds && is_equal_ctz && is_better_frac) ||  
-                   (is_equal_dds && is_equal_ctz && is_equal_frac && clk_sys_hz > best_pll.clk_sys_hz)) {  
+                   (is_equal_dds && is_better_frac) ||  
+                   (is_equal_dds && is_equal_frac && is_better_ctz) ||  
+                   (is_equal_dds && is_equal_frac && is_equal_ctz && clk_sys_hz > best_pll.clk_sys_hz)) {
   
                     min_dds_metric  = current_dds_metric;  
                     min_ctz_metric  = current_ctz_metric;  
@@ -1045,21 +1062,22 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
 static const char zone_ch[] = {'D', 'W', 'F'};  // dead / window / far  
     for (int i = 0; i < 3; i++) {  
         if (top[i].clk == 0) break;  
-        Serial.printf("[PLLDBG] top%d: clk=%.3f MHz step=0x%08lX metric=%llu frac=%u"  
-                      "  eff=%llu Hz [%c]\n",  
-                      i, top[i].clk / 1e6, (unsigned long)top[i].step,  
-                      (unsigned long long)top[i].metric, (unsigned)top[i].frac,  
-                      (unsigned long long)top[i].eff, zone_ch[top[i].zone]);  
+            Serial.printf("[PLLDBG] top%d: clk=%.3f MHz step=0x%08lX metric=%llu frac=%u\n",  
+                    i, top[i].clk / 1e6, (unsigned long)top[i].step,  
+                    (unsigned long long)top[i].metric, (unsigned)top[i].frac); 
     }
 
     VfoParameters wp;  
     vfo_pll_metric(best_pll.clk_sys_hz, target_mhz, &wp);
-    Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz fbdiv=%lu p1=%lu p2=%lu metric=%llu\n",  
+    Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz fbdiv=%lu p1=%lu p2=%lu metric=%llu"  
+                "  int=%u frac=%u step=0x%08lX\n",  
                 best_pll.clk_sys_hz / 1e6,  
                 (unsigned long)best_pll.fbdiv,  
                 (unsigned long)best_pll.p1,  
                 (unsigned long)best_pll.p2,  
-                (unsigned long long)min_dds_metric);
+                (unsigned long long)min_dds_metric,  
+                (unsigned)wp.pio_int, (unsigned)wp.pio_frac,  
+                (unsigned long)wp.dds_step);
 #endif  
     return best_pll;  
 }

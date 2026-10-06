@@ -110,6 +110,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit);
 
+
 // Добавлен упреждающий прототип Core 1, теперь vfo_clk_boost_enter сможет его вызвать!
 static void __not_in_flash_func(vfo_core1_entry)();
 
@@ -130,6 +131,7 @@ volatile bool clk_boosted = false;
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
 static float    vfo_read_core_temp_c(void);
+static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz);
 
 // Помощник автоматического определения напряжения ядра под частоту шины
 static vreg_voltage vsel_for(uint64_t clk_hz) {
@@ -300,67 +302,52 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
 
 
 
-void vfo_clk_boost_enter(unsigned int target_freq_hz) {  
-    if (clk_boosted) return;  
-  
-    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, pll_ceiling.clk_sys_hz);  
-  
-    // Метрика кандидата vs метрика номинала — едем на opt только если он лучше  
-    uint64_t target_mhz = (uint64_t)target_freq_hz * 1000ULL;  
-  
-    VfoParameters nom_p = calculate_raw_params_mhz(pll_nominal.clk_sys_hz, target_mhz);  
-    VfoParameters opt_p = calculate_raw_params_mhz(opt.clk_sys_hz,       target_mhz);  
-  
-    uint32_t nom_metric = (nom_p.dds_step == 0) ? 0u :  
-                          (nom_p.dds_step < (uint32_t)(0 - nom_p.dds_step)  
-                              ? nom_p.dds_step : (uint32_t)(0 - nom_p.dds_step));  
-    uint32_t opt_metric = (opt_p.dds_step == 0) ? 0u :  
-                          (opt_p.dds_step < (uint32_t)(0 - opt_p.dds_step)  
-                              ? opt_p.dds_step : (uint32_t)(0 - opt_p.dds_step));  
-  
-    // frac-штраф — тот же, что в поиске (500000 за единицу близости к 128)  
-    uint32_t nom_frac_dist = (nom_p.pio_frac <= 128) ? (128u - nom_p.pio_frac)  
-                                                    : (nom_p.pio_frac - 128u);  
-    uint32_t opt_frac_dist = (opt_p.pio_frac <= 128) ? (128u - opt_p.pio_frac)  
-                                                    : (opt_p.pio_frac - 128u);  
-    nom_metric += (uint32_t)((500000ULL * nom_frac_dist) / 128ULL);  
-    opt_metric += (uint32_t)((500000ULL * opt_frac_dist) / 128ULL);  
-  
-    // SKIP только если оптимум не лучше номинала (или равен ему)  
-    if (opt_metric >= nom_metric) {  
-        Serial.printf("[BOOST] SKIP (opt %u.%03u MHz не лучше: metric=%lu vs nom=%lu)\n",  
-                      (unsigned)(opt.clk_sys_hz / 1000000ULL),  
-                      (unsigned)((opt.clk_sys_hz % 1000000ULL) / 1000ULL),  
-                      (unsigned long)opt_metric, (unsigned long)nom_metric);  
-        multicore_reset_core1();  
-        multicore_launch_core1(vfo_core1_entry);  
-        return;  
-    }  
-  
-    // Едем на opt — вверх или вниз, без разницы для vfo_set_clk_sys  
-    pll_overclock = opt;   // активный профиль для thermal guard RESUME  
-  
-    uint32_t vsel = (opt.clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)  
-                    ? vsel_for(opt.clk_sys_hz) : VREG_VOLTAGE_DEFAULT;  
-    if (opt.vsel >= VREG_VOLTAGE_1_10) vsel = opt.vsel;   // приоритет профиля  
-  
-    vfo_set_clk_sys(opt, vsel);  
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
-    vfo_set_tone_instant(0);
-    tone_changed = true;          // Core 1 перезагрузит l_int/l_frac/l_step
-  
-    clk_boosted = true;  
-  
-    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
-                  opt.clk_sys_hz / 1000000.0,  
-                  (unsigned long)opt.fbdiv, (unsigned long)opt.p1, (unsigned long)opt.p2,  
-                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
-                  (unsigned)vsel_to_mv(vsel),  
-                  opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
-                  (unsigned)ssi_hw->baudr,  
-                  (double)vfo_read_core_temp_c());  
+void vfo_clk_boost_enter(unsigned int target_freq_hz) {    
+    if (clk_boosted) return;    
+    
+    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, pll_ceiling.clk_sys_hz);    
+    
+    // Сравнение метрик — строго по той же формуле, что оптимизировал поиск  
+    uint64_t target_mhz  = (uint64_t)target_freq_hz * 1000ULL;    
+    uint64_t metric_opt  = vfo_pll_metric(opt.clk_sys_hz,          target_mhz);    
+    uint64_t metric_cur  = vfo_pll_metric(current_clk_sys_hz,      target_mhz);    
+    
+    // SKIP только если оптимум не лучше ТЕКУЩЕЙ шины (а не «номинала» —  
+    // init мог уже увести нас на нестандартную частоту вроде 124 МГц)  
+    if (metric_opt >= metric_cur) {    
+        Serial.printf("[BOOST] SKIP (opt %llu.%03llu MHz не лучше: metric=%llu vs active=%llu)\n",    
+                      (unsigned long long)(opt.clk_sys_hz / 1000000ULL),    
+                      (unsigned long long)(opt.clk_sys_hz % 1000000ULL / 1000ULL),    
+                      (unsigned long long)metric_opt,    
+                      (unsigned long long)metric_cur);    
+        multicore_reset_core1();    
+        multicore_launch_core1(vfo_core1_entry);    
+        return;    
+    }    
+    
+    // Едем на opt — вверх или вниз, для vfo_set_clk_sys без разницы  
+    pll_overclock = opt;   // активный профиль для thermal guard RESUME    
+    
+    uint32_t vsel = (opt.clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ)    
+                    ? vsel_for(opt.clk_sys_hz) : VREG_VOLTAGE_DEFAULT;    
+    if (opt.vsel >= VREG_VOLTAGE_1_10) vsel = opt.vsel;   // приоритет профиля    
+    
+    vfo_set_clk_sys(opt, vsel);    
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);    
+    vfo_set_tone_instant(0);  
+    tone_changed = true;          // Core 1 перезагрузит l_int/l_frac/l_step  
+    
+    clk_boosted = true;    
+    
+    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
+                  opt.clk_sys_hz / 1000000.0,    
+                  (unsigned long)opt.fbdiv, (unsigned long)opt.p1, (unsigned long)opt.p2,    
+                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),    
+                  (unsigned)vsel_to_mv(vsel),    
+                  opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
+                  (unsigned)ssi_hw->baudr,    
+                  (double)vfo_read_core_temp_c());    
 }
-
 
 
 

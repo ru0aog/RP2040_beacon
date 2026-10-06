@@ -937,7 +937,8 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
         uint32_t dmin = d1;  
         if (d2 < dmin) dmin = d2;  
         if (d3 < dmin) dmin = d3;  
-        metric = dmin;  
+        // метрика ∝ сдвиг спура в Гц (с запасом по разрядности)  
+        metric = ((uint64_t)dmin * clk_sys_hz) >> 18;   // ~ dmin·clk/262144
   
         // Прогрессивный штраф за спур в защитном окне у несущей  
         uint64_t thr  = VFO_SPUR_NUMERATOR / clk_sys_hz;  
@@ -951,7 +952,7 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,
 
     // Малый pio_int: DDS-остаток модулирует слишком большую долю периода.  
     // INT=2 с дизером — глубокая модуляция, метрика её недооценивает.  
-    if (test.pio_int < 4) metric += 50000000ULL;   // или return UINT64_MAX — отсечь совсем
+    if (test.pio_int < 4) metric += 500000000ULL;   // или return UINT64_MAX — отсечь совсем
 
     // Аддитивный штраф за PIO-джиттер (расстояние frac до 0/256)  
     uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  

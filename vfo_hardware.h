@@ -7,8 +7,8 @@
 // vfo_hardware.h  
 #define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // электрический номинал без вольтмода  
 #define VFO_CLK_SYS_MIN_HZ      100000000ULL  // нижняя граница поиска оптимума  
-#define VFO_CLK_SYS_MAX_HZ      410000000ULL
-#define PLL_MAX_HZ             3900000000ULL
+#define VFO_CLK_SYS_MAX_HZ      410000000ULL  // 410
+#define PLL_MAX_HZ             3900000000ULL  // 3.9
 #define VFO_FLASH_SCK_MAX_HZ     50000000ULL
 #define VFO_THROTTLE_HI_C   80.0f   
 #define VFO_THROTTLE_LO_C   60.0f   

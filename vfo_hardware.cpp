@@ -62,6 +62,23 @@
 #include "si5351_driver.h"
 #include "cw_modem.h"
 
+#define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов
+#define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
+
+#define VFO_INT_PENALTY   500000000ULL     // жёсткий запрет pio_int < 4
+
+#define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
+#define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
+#define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
+
+
+// ============================================================================
+// МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
+// ============================================================================
+#define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Ваш доказанный предел стабильности
+#define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
+
+
 // ============================================================================
 // ПРОТОТИПЫ (ОБЪЯВЛЕНИЯ) ВНУТРЕННИХ ФУНКЦИЙ ФАЙЛА
 // ============================================================================
@@ -239,6 +256,16 @@ static void __not_in_flash_func(detach_peripheral_clock)() {
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32_t vsel) {
     PllConfig cfg = cfg_in;  
     if (cfg.refdiv == 0) cfg.refdiv = 1;   // защита от неинициализированного поля
+
+    // p1=1 недокументированно делит пополам на VCO < ~2.8 ГГц — отклоняем такие конфиги  
+        if (cfg.p1 < 2) {  
+    #if VFO_PLL_DEBUG  
+            Serial.printf("[PLL] REJECT: p1=%lu forbidden — fallback nominal\n",  
+                        (unsigned long)cfg.p1);  
+    #endif  
+            cfg = pll_nominal;  
+        }
+
     uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.refdiv * cfg.p1 * cfg.p2));  
     bool is_overclocking = (target_clk_hz > current_clk_sys_hz);  
   
@@ -267,6 +294,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                   (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC));  
 #endif  
 
+    uint32_t cs_pre  = pll_sys_hw->cs;
 
     pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
 
@@ -299,36 +327,70 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
   
     restore_interrupts(ints_status);
 
+#if VFO_PLL_DEBUG  
+    Serial.printf("[PLL] pre: CS=0x%08lX refdiv_hw=%lu\n",  
+                  (unsigned long)cs_pre,  
+                  (unsigned long)(cs_pre & PLL_CS_REFDIV_BITS));  
+#endif
+
+#if VFO_PLL_DEBUG  
+    // подтверждающий замер через 20 мкс после коммутации мультиплексора  
+    busy_wait_us(20);  
+    uint32_t post_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);  
+    Serial.printf("[PLL] post-switch clk=%u kHz (expect=%u kHz)\n",  
+                  (unsigned)post_khz, (unsigned)(cfg.clk_sys_hz / 1000u));  
+#endif
  
     // --- Самопроверка: при промахе повторяем ВЕСЬ цикл переключения ---  
-    bool locked_ok = false;  
-    for (int attempt = 0; attempt < 3; attempt++) {  
-        busy_wait_us(50);  
-        uint32_t meas_khz   = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);  
-        uint32_t expect_khz = cfg.clk_sys_hz / 1000u;  
-        if (meas_khz > expect_khz * 97u / 100u &&  
-            meas_khz < expect_khz * 103u / 100u) {  
-            locked_ok = true;  
-            break;  
-        }  
+    bool locked_ok = false;
+    uint32_t meas_khz = 0;                                   // <-- сюда  
+    uint32_t expect_khz = cfg.clk_sys_hz / 1000u;  
+
+    for (int attempt = 0; attempt < 3; attempt++) {    
+            busy_wait_us(300);    
+            meas_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);   // без uint32_t!  
+            if (meas_khz > expect_khz * 97u / 100u &&    
+                meas_khz < expect_khz * 103u / 100u) {    
+                locked_ok = true;    
+                break;    
+            }
 #if VFO_PLL_DEBUG  
         Serial.printf("[PLL] MISMATCH: meas=%u kHz expect=%u kHz — retry %d\n",  
                       (unsigned)meas_khz, (unsigned)expect_khz, attempt);  
 #endif  
-        // полный ре-секвенс: назад на XOSC, переинициализация PLL, вперёд на PLL_SYS  
+        // полный ре-секвенс: назад на XOSC, переинициализация PLL, вперёд на PLL_SYS
+
+        uint32_t ints2 = save_and_disable_interrupts();
         clock_configure(clk_sys,  
                         CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                         CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
                         VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
         pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
         timeout = 20000;  
-        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);  
+        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);
+// DIAG: лок есть, но шина не та — либо микс postdiv, либо ложный замер  
+#if VFO_PLL_DEBUG  
+        Serial.printf("[PLL] retry-dbg: LOCK=%d CS=0x%08lX FB=%lu PRIM=0x%08lX meas=%u kHz\n",  
+                      (int)(pll_sys_hw->cs & PLL_CS_LOCK_BITS ? 1 : 0),  
+                      (unsigned long)pll_sys_hw->cs,  
+                      (unsigned long)pll_sys_hw->fbdiv_int,  
+                      (unsigned long)pll_sys_hw->prim,  
+                      (unsigned)meas_khz);  
+#endif
         clock_configure(clk_sys,  
                         CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                         CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                        target_clk_hz, target_clk_hz);  
+                        target_clk_hz, target_clk_hz);
+        restore_interrupts(ints2);
+    }
+uint32_t meas_khz_final = meas_khz; 
+#if VFO_PLL_DEBUG  
+    if (!locked_ok) {  
+        Serial.printf("[PLL] FALLBACK reason: pll_locked=%d last_meas=%u expect=%u kHz\n",  
+                      (int)pll_locked, (unsigned)meas_khz_final, (unsigned)expect_khz);  
     }  
-  
+#endif
+
     if (!locked_ok) {  
         // 3 промаха подряд — безопасный откат на номинал,  
         // чтобы таблица тонов не считалась от несуществующей частоты  
@@ -864,21 +926,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 
 
-#define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов  
-#define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
 
-#define VFO_INT_PENALTY   500000000ULL     // жёсткий запрет pio_int < 4
-
-#define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
-#define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
-#define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
-
-
-// ============================================================================
-// МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
-// ============================================================================
-#define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Ваш доказанный предел стабильности
-#define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
 // Метрика кандидата
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoParameters *out) {
     VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
@@ -1005,7 +1053,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     uint32_t refdiv = 1;
     uint64_t ref_hz = crystal_hz / refdiv;   // REFDIV: 1,2,3 → 12,6,4 МГц  
   
-        for (uint32_t p1 = 1; p1 <= 7; p1++) {  
+        for (uint32_t p1 = 2; p1 <= 7; p1++) {   // p1 >= 2: режим p1=1 даёт ровное деление на 2 при VCO < ~2.8 ГГц  
             for (uint32_t p2 = 1; p2 <= 7; p2++) {  
                 uint32_t pdiv_total = p1 * p2;  
   

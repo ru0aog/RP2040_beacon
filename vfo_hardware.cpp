@@ -101,7 +101,8 @@
 #include "pico/multicore.h"
 #include "vfo_hardware.h"
 #include "file_manager.h"
-
+#include "si5351_driver.h"
+#include "cw_modem.h"
 
 // ============================================================================
 // ПРОТОТИПЫ (ОБЪЯВЛЕНИЯ) ВНУТРЕННИХ ФУНКЦИЙ ФАЙЛА
@@ -256,7 +257,6 @@ static uint32_t cached_base_freq_hz = 3500000;
  * Детач гарантирует стабильные 12 МГц для clk_peri на всём интервале  
  * переконфигурации.  
  *  
- * @note Вызывается из @ref vfo_hardware_init непосредственно перед  
  *       `save_and_disable_interrupts()` и каскадом переинициализации  
  *       `pll_sys`. После возврата clk_sys на PLL периферийный домен  
  *       остаётся на XOSC — это осознанно: clk_peri не зависит от  
@@ -314,14 +314,16 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                     VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
   
     uint32_t vco_nominal_hz = (uint32_t)((VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);  
+    
     pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
 
     // === АППАРАТНЫЙ МОНИТОРИНГ ЗАЩЁЛКИ ФАЗЫ PLL (LOCK BIT) ===
     // Ждем взвода бита LOCK в регистре CS системной PLL
     // Если аналоговая петля не успеет стабилизироваться за 2000 итераций — мы разорвем цикл, 
     // чтобы ядро не зависло намертво в глухом дедлоке.
-    volatile uint32_t timeout = 2000;
-    while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout); // <--- СКОРРЕКТИРОВАНО
+    uint32_t timeout = 20000;  
+    while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);  
+    bool pll_locked = (timeout != 0);
 
     // === BAUDR: ОГРАНИЧЕНИЕ НА ТАКТИРОВАНИЕ ФЛЭША СТРОГО <= 48 МГц ===  
     // Меняем VFO_FLASH_SCK_MAX_HZ на жесткие 48 000 000 Гц
@@ -343,12 +345,29 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                     target_clk_hz, target_clk_hz);  
   
     restore_interrupts(ints_status);  
-    current_clk_sys_hz = target_clk_hz;  
+    current_clk_sys_hz = target_clk_hz;
+
+#if VFO_PLL_DEBUG  
+    if (!pll_locked) {  
+        Serial.printf("[PLL] !!! NO LOCK: fbdiv=%lu target=%lu Hz — выход НЕДОСТОВЕРЕН\n",  
+                    (unsigned long)cfg.fbdiv, (unsigned long)target_clk_hz);
+    }  
+    uint32_t real_clk = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
+    Serial.printf("[PLL] measured clk_sys=%lu Hz (target %lu)\n",  
+                (unsigned long)real_clk, (unsigned long)target_clk_hz);
+#endif
   
     if (!is_overclocking) {  
         busy_wait_us(100);  
         vreg_set_voltage((vreg_voltage)vsel);  
     }  
+#if VFO_PLL_DEBUG
+Serial.printf("[PLL] CS=0x%08lX (refdiv=%lu)  FB=%lu  PRIM=0x%08lX\n",  
+              (unsigned long)pll_sys_hw->cs,  
+              (unsigned long)(pll_sys_hw->cs & PLL_CS_REFDIV_BITS),  
+              (unsigned long)pll_sys_hw->fbdiv_int,  
+              (unsigned long)pll_sys_hw->prim);
+#endif 
 }
 
 
@@ -357,37 +376,48 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
 
 
 void vfo_clk_boost_enter(unsigned int target_freq_hz) {  
-    if (clk_boosted) return;
-    if (target_freq_hz != 0) {
-  
-    // 1. Поиск оптимума сразу в пределах доказанного потолка (один проход,  
-    //    двойное сканирование с клэмпом больше не нужно)  
-    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, VFO_CLK_SYS_MAX_HZ);  
-  
-    // 2. Сравнение метрик по ЕДИНОЙ формуле поиска:  
-    //    едем на opt только если он реально лучше текущей шины.  
-    //    Разрешены оба направления: opt > nominal (разгон) и opt < nominal  
-    //    (чистая шина ниже 133 МГц).  
-    uint64_t target_mhz = (uint64_t)target_freq_hz * 1000ULL;  
-
-    VfoParameters dummy;  
-    uint64_t metric_opt = vfo_pll_metric(opt.clk_sys_hz,     target_mhz, &dummy);  
-    uint64_t metric_cur = vfo_pll_metric(current_clk_sys_hz, target_mhz, &dummy);
-
-  
-    if (metric_opt >= metric_cur || opt.clk_sys_hz == current_clk_sys_hz) {  
-        Serial.printf("[BOOST] SKIP (opt %llu.%03llu MHz не лучше: metric=%llu vs active=%llu)\n",  
-                      (unsigned long long)(opt.clk_sys_hz / 1000000ULL),  
-                      (unsigned long long)(opt.clk_sys_hz % 1000000ULL / 1000ULL),  
-                      (unsigned long long)metric_opt,  
-                      (unsigned long long)metric_cur);  
+    if (target_freq_hz == 0) {  
+        clk_boosted = true;  
         return;  
     }  
   
-    // 3. Теперь, когда решение принято — останавливаем Core 1  
+    // 1. Поиск оптимума (один проход)  
+    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, VFO_CLK_SYS_MAX_HZ);  
+  
+    // 2. Сравнение метрик  
+    uint64_t target_mhz = (uint64_t)target_freq_hz * 1000ULL;  
+    VfoParameters dummy;  
+    uint64_t metric_opt = vfo_pll_metric(opt.clk_sys_hz,     target_mhz, &dummy);  
+    uint64_t metric_cur = vfo_pll_metric(current_clk_sys_hz, target_mhz, &dummy);  
+  
+    if (metric_opt >= metric_cur || opt.clk_sys_hz == current_clk_sys_hz) {    
+        cached_base_freq_hz = target_freq_hz;  
+        vfo_base_mhz = (uint64_t)target_freq_hz * 1000ULL;   // мГц  
+        
+        // 1. Перестраиваем таблицу под новые параметры
+        vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
+        
+        // 2. Записываем новые pio_int/pio_frac/dds_step в защищенные спинлоком переменные.
+        // vfo_set_tone_instant(0) внутри себя взведет флаг tone_changed = true!
+        vfo_set_tone_instant(0);  
+        
+        // 3. Даем микропаузу, чтобы Core 1 в своем горячем цикле гарантированно 
+        // увидел флаг tone_changed, сбросил аккумуляторы и применил новый шаг БЕЗ перезапуска ядра.
+        busy_wait_us(10); 
+
+#if VFO_PLL_DEBUG  
+        Serial.printf("[BOOST] SKIP-RETUNE (SOFT TUNE) clk=%lu kHz  target=%lu Hz\n",  
+                      (unsigned long)(current_clk_sys_hz / 1000ULL),  
+                      (unsigned long)target_freq_hz);  
+#endif
+        return;    
+    }
+
+  
+    // 3. Остановка Core 1 — нужна и при ретюне (PLL-переключение рвёт тактирование)  
     multicore_reset_core1();  
     busy_wait_us(100);  
-    cached_base_freq_hz = target_freq_hz;  
+    cached_base_freq_hz = target_freq_hz; 
   
     // 4. Напряжение: профиль поиска с подстраховкой таблицей  
     uint32_t vsel = opt.vsel;  
@@ -412,7 +442,7 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
 
     Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
                 opt.clk_sys_hz / 1000000.0,  
-                (unsigned long)opt.refdiv, // <-- Выводим новый делитель
+                (unsigned long)opt.refdiv,
                 (unsigned long)opt.fbdiv,  
                 (unsigned long)opt.p1,  
                 (unsigned long)opt.p2,  
@@ -420,8 +450,6 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
                 (unsigned)vsel_to_mv(vsel),  
                 opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
                 (unsigned)ssi_hw->baudr);  
-    }
-
     clk_boosted = true;
 }
 
@@ -435,37 +463,42 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
  * @brief Выход из boost: возврат на pll_nominal и штатное напряжение.  
  * Понижение VREG выполняется ПОСЛЕ снижения частоты (логика в vfo_set_clk_sys).  
  */  
-void vfo_clk_boost_exit(void) {  
-    if (!clk_boosted) return;  
-  
-    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
-    //vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
-    vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,  
-                        (uint64_t)(cached_step_hz * 1000.0));
-    Serial.println("[BOOST] пересчёт таблицы тонов");
-  
-    // Пересчёт таблицы тонов обратно под номинальную clk_sys  
-    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
-    uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;  
-    uint64_t step_mhz = (uint64_t)(cached_step_hz * 1000.0);  
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
-        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,  
-                                                 base_mhz + (uint64_t)i * step_mhz);  
-    }  
-    current_active_tone = VFO_TONE_NONE;  
-    tone_changed = true;  
-    spin_unlock(vfo_spin_lock, save);
+void vfo_clk_boost_exit(void) {    
+    if (!clk_boosted) return;    
+    
+    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
+    vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,    
+                        (uint64_t)(cached_step_hz * 1000.0));  
+    //Serial.println("[BOOST] пересчёт таблицы тонов");  
+    
+    // Пересчёт таблицы тонов обратно под номинальную clk_sys    
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);    
+    uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;    
+    uint64_t step_mhz = (uint64_t)(cached_step_hz * 1000.0);    
+    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {    
+        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,    
+                                                 base_mhz + (uint64_t)i * step_mhz);    
+    }    
+    current_active_tone = VFO_TONE_NONE;    
+    tone_changed = true;    
+    spin_unlock(vfo_spin_lock, save);  
     clk_boosted = false;  
-    Serial.printf("[BOOST] OFF  clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
+  
+    // VCO = XOSC * fbdiv / refdiv (uint64 — fbdiv до 320 * 12 МГц не влезает в uint32 впритык)  
+    uint64_t vco_mhz = (VFO_CALIBRATED_XOSC_HZ * (uint64_t)pll_nominal.fbdiv)  
+                       / ((uint64_t)pll_nominal.refdiv * 1000000ULL);  
+  
+    Serial.printf("[BOOST] OFF  clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4llu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
                   pll_nominal.clk_sys_hz / 1000000.0,  
-                  (unsigned long)pll_nominal.fbdiv,  
-                  (unsigned long)pll_nominal.p1,  
-                  (unsigned long)pll_nominal.p2,  
-                  (unsigned long)(pll_nominal.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
-                  (unsigned)vsel_to_mv((uint32_t)VREG_VOLTAGE_DEFAULT),  
-                  pll_nominal.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
-                  (unsigned)ssi_hw->baudr,  
-                  (double)vfo_read_core_temp_c());
+                  (unsigned long)pll_nominal.refdiv,  
+                  (unsigned long)pll_nominal.fbdiv,    
+                  (unsigned long)pll_nominal.p1,    
+                  (unsigned long)pll_nominal.p2,    
+                  (unsigned long long)vco_mhz,    
+                  (unsigned)vsel_to_mv((uint32_t)VREG_VOLTAGE_DEFAULT),    
+                  pll_nominal.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
+                  (unsigned)ssi_hw->baudr,    
+                  (double)vfo_read_core_temp_c());  
 }
 
 
@@ -493,7 +526,6 @@ void vfo_clk_boost_exit(void) {
  *       в 3 пары LSL/LSR+EOR в месте вызова, исполняется из ОЗУ.  
  *       Полный период генератора 2^32−1 при ненулевом стартовом состоянии  
  *       (@ref VFO_RAND_SEED_INIT, пересеивается от `time_us_32()` в  
- *       @ref vfo_hardware_init).  
  * @note Вариант с глобальным состоянием ОЗУ — @ref vfo_xorshift32(),  
  *       используется в медленной эталонной ветке @ref vfo_dither_step.  
  *  
@@ -529,7 +561,6 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
  *       @c xorshift_state при смене тона.  
  * @note Помечена `always_inline` + `__not_in_flash_func` — исполняется  
  *       из ОЗУ. Стартовое состояние — @ref VFO_RAND_SEED_INIT,  
- *       пересеивается от `time_us_32()` в @ref vfo_hardware_init;  
  *       нулевое состояние вырождает генератор в постоянный 0.  
  *  
  * @see vfo_xorshift32_raw(), vfo_dither_step(), vfo_core1_entry()  
@@ -578,7 +609,6 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
  *       Вызывается из `vfo_dither_callback` (режим Core 0) и из медленной  
  *       ветки `vfo_core1_entry`.  
  *  
- * @see vfo_core1_entry(), vfo_dither_callback(), vfo_set_tone_instant()  
  */
 static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_int, uint32_t local_frac) {
     uint32_t step = local_step;
@@ -634,11 +664,9 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
  *  
  * Вызывается повторяющимся таймером @c sdr_dither_timer с периодом  
  * `VFO_DITHER_INTERVAL_US` (зарегистрирован через `add_repeating_timer_us`  
- * в @ref vfo_hardware_init). Каждый вызов делегирует одну итерацию  
  * Delta-Sigma модуляции функции @ref vfo_dither_step, передавая текущие  
  * параметры тона из глобальных переменных ОЗУ (@c dds_step,  
  * @c target_pio_int, @c target_pio_frac8), которые обновляет  
- * @ref vfo_set_tone_instant под `save_and_disable_interrupts`.  
  *  
  * @param[in] t  Указатель на структуру повторяющегося таймера SDK  
  *               (не используется).  
@@ -652,7 +680,6 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
  *       прерывания таймера; частота дизеринга ограничена периодом таймера  
  *       и существенно ниже, чем у регистрового конвейера Core 1.  
  *  
- * @see vfo_dither_step(), vfo_set_tone_instant(), vfo_hardware_init(),  
  *      vfo_core1_entry()  
  */
 #ifndef VFO_DITHER_ON_CORE1
@@ -701,7 +728,6 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
  *       иначе дизеринг обслуживает таймерный колбэк  
  *       @ref vfo_dither_callback на Core 0.  
  *  
- * @see vfo_dither_step(), vfo_dither_callback(), vfo_set_tone_instant()  
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
     // Регистро-резидентные копии статических параметров тона
@@ -1070,8 +1096,9 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
 #endif  
   
     // ---- Матричный скан: refdiv × fbdiv × (p1,p2) ----  
-    for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
-        uint64_t ref_hz = crystal_hz / refdiv;   // REFDIV: 1,2,3 → 12,6,4 МГц  
+    //for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
+    uint32_t refdiv = 1;
+    uint64_t ref_hz = crystal_hz / refdiv;   // REFDIV: 1,2,3 → 12,6,4 МГц  
   
         for (uint32_t p1 = 1; p1 <= 7; p1++) {  
             for (uint32_t p2 = 1; p2 <= 7; p2++) {  
@@ -1080,10 +1107,10 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 for (uint32_t fbdiv = 16; fbdiv <= 320; fbdiv++) {  
                     uint64_t vco_hz = ref_hz * fbdiv;  
   
-                    // Только нижний предел VCO (даташит 750 МГц).  
+                    // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;
-                    // Верхний предел — проверено до ~3.9 ГГц.
-                    if (vco_hz > 3700000000ULL) continue;  // под зависанием ~3.96 с маржой
+                    // Верхний предел 1.5 ГГц
+                    if (vco_hz > 1500000000ULL) continue;  // под зависанием ~3.96 с маржой
   
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
                     if (clk_sys_hz < min_allowed_clk ||  
@@ -1162,7 +1189,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                         best_pll.fbdiv      = fbdiv;  
                         best_pll.p1         = p1;  
                         best_pll.p2         = p2;  
-                        best_pll.refdiv     = refdiv;   // если поля нет — удалить  
+                        best_pll.refdiv     = refdiv;
                         best_pll.clk_sys_hz = clk_sys_hz;  
                         best_pll.vsel       = (uint32_t)vsel_for(clk_sys_hz);  
                         best_pll.is_oc      = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
@@ -1170,7 +1197,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 }  
             }  
         }  
-    }  
+    //}  
   
     // === ЗАЩИТА ОТ ПУСТОГО СКАНА: дефолт выжил только если кандидатов не было ===  
     if (n_arbit == 0) {  
@@ -1237,7 +1264,6 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
  * @brief Полная инициализация и запуск аппаратного VFO (PLL + PIO + дизеринг).  
  *  
  * Осуществляет сквозную синхронизацию частотного плана. Если предпусковой разгон  
- * vfo_clk_boost_enter() уже был активирован диспетчером сессий
  * функция блокирует откат частоты и настраивает подсистемы fixed-point Q8.8 делителей  
  * PIO и 32-битного DDS-остатка строго на базе высокой стабильной оверклокерской частоты.  
  */
@@ -1303,9 +1329,10 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // ========================================================================
     if (clk_boosted) {
         pll_overclock = target_pll; // Обновляем рабочий профиль для термогуарда
-        
-        Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
+        #if VFO_PLL_DEBUG
+            Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
                       (double)current_clk_sys_hz / 1000000.0,  // Выведет честные 254.007 MHz!
+                      (unsigned long)target_pll.refdiv,
                       (unsigned long)target_pll.fbdiv,    
                       (unsigned long)target_pll.p1,    
                       (unsigned long)target_pll.p2,    
@@ -1314,6 +1341,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
                       (double)current_clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
                       (unsigned)ssi_hw->baudr,    
                       (double)vfo_read_core_temp_c());
+        #endif
     }
     // ========================================================================
 
@@ -1363,7 +1391,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     vfo_set_tone_instant(0);
 
     // Диагностический вывод рантайм-телеметрии в Serial
-    if (debug_flag) {
+    #if VFO_PLL_DEBUG
         VfoParameters real_base_params = ifkp_tones[0];
         Serial.printf("\n--- VFO Runtime Diagnostics ---\n");
         Serial.printf("Target Freq: %u Hz (Grid: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);
@@ -1372,7 +1400,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);
         Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);
         Serial.printf("-------------------------------\n");
-    }
+    #endif
 
 #ifdef VFO_DITHER_ON_CORE1
     // Безопасный атомарный пуск высокоскоростного регистрового dither-конвейера на Core 1
@@ -1499,7 +1527,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
         for (uint32_t fbdiv = 30; fbdiv <= 320; fbdiv++) {  
             uint64_t vco_hz = (uint64_t)fbdiv * f_ref;  
             
-            // Граница аналогового захвата VCO (до 2.4 ГГц)
+            // Граница аналогового захвата VCO
             if (vco_hz < 750000000ULL || vco_hz > 3200000000ULL) continue;  
   
             for (uint32_t p1 = 2; p1 <= 7; p1++) {  
@@ -1812,10 +1840,10 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
 
 // ==== Энкодер: глобальное состояние ====  
 volatile uint32_t vfo_current_freq_hz  = VFO_ENC_TEST_FREQ_HZ; // текущая рабочая частота 
-volatile uint32_t vfo_tune_step_hz     = 100;       // глобальный шаг перестройки, Гц  
+volatile uint32_t vfo_tune_step_hz     = 5000;       // глобальный шаг перестройки, Гц  
 volatile int32_t  enc_pending_steps    = 0;         // накопленные тики энкодера (ISR)  
 static bool       enc_tx_active        = false;
-  
+
 // Таблица квадратурного декодера (Gray-code state machine).  
 // Индекс = (prev_AB << 2) | cur_AB. Значения: +1/-1 — шаг, 0 — дребезг/нет события.  
 static const int8_t enc_lut[16] = {  
@@ -1832,7 +1860,7 @@ static void __not_in_flash_func(enc_isr)(void) {
     uint8_t ab = (uint8_t)((gpio_get(ENC_PIN_A) << 1) | gpio_get(ENC_PIN_B));
     int8_t d = enc_lut[(prev_ab << 2) | ab];  
     prev_ab = ab;  
-    enc_pending_steps += d;   // накапливаем; обработает vfo_encoder_poll()  
+    enc_pending_steps += d;   // накапливаем; обработает vfo_encoder_poll()
 }  
   
 void vfo_encoder_init(void) {  
@@ -1855,24 +1883,25 @@ void vfo_encoder_poll(void) {
         sw_deb_ms = millis();  
         sw_last   = sw_now;  
         if (!sw_now) {                       // фронт нажатия  
-            if (!enc_tx_active) {  
-                // ВКЛ: поднять разгон под тестовую частоту и открыть выход  
-                vfo_clk_boost_enter(VFO_ENC_TEST_FREQ_HZ);  
-                vfo_operation_set(true);  
-                enc_tx_active = true;  
-                Serial.printf("[ENC] TX ON  %lu Hz\n",  
-                              (unsigned long)VFO_ENC_TEST_FREQ_HZ);  
+if (!enc_tx_active) {  
+                vfo_hardware_init(vfo_current_freq_hz, 10.0); // увидит clk_boosted -> найдёт opt сам,  
+                                                              // один set_clk_sys, таблица под бустовый clk  
+                //vfo_set_tone_instant(0);  
+                vfo_operation_set(true);        // включить пин генератора
+                enc_tx_active = true;
+                Serial.printf("[ENC] TX ON  %lu Hz\n",
+                              (unsigned long)vfo_current_freq_hz);
             } else {  
                 // ВЫКЛ: закрыть выход, вернуть номинальную шину  
-                vfo_operation_set(false);  
-                vfo_clk_boost_exit();  
-                enc_tx_active = false;  
-                Serial.printf("[ENC] TX OFF\n");  
+                vfo_operation_set(false);       // выключить пин генератора
+                vfo_clk_boost_exit();
+                enc_tx_active = false;
+                Serial.printf("[ENC] TX OFF\n");
             }  
         }  
     }  
   
-    // ---- 2. Перестройка по тикам энкодера ----  
+    // ---- 2. Перестройка ----  
     int32_t steps;  
     noInterrupts();  
     steps = enc_pending_steps;  
@@ -1880,18 +1909,37 @@ void vfo_encoder_poll(void) {
     interrupts();  
     if (steps == 0) return;  
   
-    vfo_current_freq_hz += (uint32_t)(steps * (int32_t)vfo_tune_step_hz);  
-    if (vfo_current_freq_hz < 1000000UL) vfo_current_freq_hz = 1000000UL;  
-    if (vfo_current_freq_hz > 30000000UL) vfo_current_freq_hz = 30000000UL;
-
-    // если генерация активна — перестраиваем на лету  
-    if (enc_tx_active) {  
-        vfo_clk_boost_exit();                    // номинал + clk_boosted=false  
-        vfo_clk_boost_enter(vfo_current_freq_hz); // новый скан + перезапуск Core 1  
-        vfo_operation_set(true);                  // boost_exit не трогает пин, но подстрахуемся  
+    // Копим тики; ретюн только за полный детент (обычно 4 LUT-перехода)  
+    static int32_t enc_frac = 0;  
+    enc_frac += steps;  
+    const int32_t TICKS_PER_DETENT = 4;   // подстройте под ваш энкодер (2 или 4)  
+    int32_t detents = enc_frac / TICKS_PER_DETENT;  
+    enc_frac -= detents * TICKS_PER_DETENT;  
+    if (detents == 0) return;             // половина щелчка — ждём остаток  
+  
+    int64_t f = (int64_t)vfo_current_freq_hz +  
+                (int64_t)detents * (int64_t)vfo_tune_step_hz;  
+    if (f < 1000000LL)  f = 1000000LL;  
+    if (f > 30000000LL) f = 30000000LL;  
+    vfo_current_freq_hz = (uint32_t)f;  
+  
+    if (enc_tx_active) {
+        // Запускаем умный ретюн. Если частота PLL изменится — ядро Core 1 перезапустится.
+        // Если clk_sys останется прежней — сработает мягкий сброс аккумуляторов дизера через tone_changed.
+        vfo_clk_boost_enter(vfo_current_freq_hz);
+        
+        // На всякий случай дублируем (хотя внутри буста он уже вызвался)
+        vfo_set_tone_instant(0);
+        
+        Serial.printf("[ENC] RETUNE BOOST %lu Hz (clk_sys=%7.3f MHz)\n",    
+                    (unsigned long)vfo_current_freq_hz,    
+                    (double)current_clk_sys_hz / 1000000.0);    
     }
 
+
 }
+
+
 
 
 
@@ -1927,8 +1975,6 @@ void vfo_encoder_poll(void) {
  *       происходит на стороне потребителя — фазовый скачок минимален,  
  *       но не нулевой (частотная, а не фазовая непрерывность).  
  *  
- * @see ifkp_tones, vfo_hardware_init(), vfo_core1_entry(),  
- *      vfo_dither_callback(), vfo_operation_set()  
  */
 void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     if (tone_index >= VFO_IFKP_TONES_COUNT) return; 
@@ -1981,7 +2027,6 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
  *       планировавшаяся синхронная коммутация питания оконечного каскада  
  *       сейчас не выполняется.  
  *  
- * @see vfo_hardware_init(), vfo_set_tone_instant(), pin_freq_out  
  */
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)

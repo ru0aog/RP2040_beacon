@@ -18,7 +18,8 @@ struct PllConfig {
     uint32_t p2;
     uint64_t clk_sys_hz;
     uint32_t vsel;         
-    bool is_oc;            
+    bool is_oc;    
+    uint32_t refdiv;        
 };
 
 // --- Архитектурное разделение профилей тактирования ---
@@ -54,9 +55,10 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
 void vfo_operation_set(bool key_down);
-void vfo_clk_boost_enter(unsigned int target_freq_hz = 3500000);
+void vfo_clk_boost_enter(unsigned int target_freq_hz);
 void vfo_clk_boost_exit(void);
 void vfo_clk_thermal_guard(void);     
-void vfo_find_max_stable_clock(void); 
+void vfo_find_max_stable_clock(void);
+void vfo_test_pll_extreme_shurm(void);
 
 #endif // VFO_HARDWARE_H

@@ -234,7 +234,7 @@ static void save_ram_to_flash() {
   flash_flush_cache();
 
   // Возвращаем разгон, если он был активен (сеанс ещё идёт)  
-  if (was_boosted) vfo_clk_boost_enter(); 
+  if (was_boosted) vfo_clk_boost_enter(0); 
 
   // Обновляем глобальное состояние менеджера только ПОСЛЕ успешного программирования
   current_active_slot = next_slot;

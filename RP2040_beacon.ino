@@ -1,11 +1,11 @@
 ﻿/**
- * ============================================================================  
+ * ============================================================================
  *  RP2040_beacon.ino — Главный диспетчер и инициализация радиомаяка
- *  Версия 2.14 от 2026-10-02, автор RU0AOG  
- * ============================================================================  
+ *  Версия 2.17 от 2026-10-07, автор RU0AOG
+ * ============================================================================
  *  
- *  НАЗНАЧЕНИЕ  
- *  ----------  
+ *  НАЗНАЧЕНИЕ
+ *  ----------
  *  Ядро прошивки автоматического КВ/УКВ-радиомаяка: связывает все модули  
  *  (генератор, модуляторы, часы, датчики, дисплей, индикацию, файловую систему)  
  *  и по расписанию выводит в эфир сообщения тремя режимами — IFKP, RTTY, CW.  
@@ -75,8 +75,8 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-String BCN_VER = "2.14";
-String BCN_DAT = "2026-10-02";
+String BCN_VER = "2.17";
+String BCN_DAT = "2026-10-07";
 
 bool dev_TX_state  = false;
 
@@ -334,10 +334,31 @@ void check_serial_commands() {
               Serial.println(F("[OCTEST] результат последнего OK-шага сохранится в pll_overclock."));  
               Serial.flush();                        // гарантировать вывод до смены clk_sys  
             
-              vfo_find_max_stable_clock();           // функция сама вернёт систему на pll_nominal  
+              vfo_find_max_stable_clock();
             
               Serial.println(F("[OCTEST] Завершён. Рекомендованный потолок:"));  
               Serial.printf("[OCTEST] clk_sys=%u Hz, fbdiv=%u, p1=%u, p2=%u, VSEL=0x%02X\n",  
+                            (unsigned)pll_overclock.clk_sys_hz, pll_overclock.fbdiv,  
+                            pll_overclock.p1, pll_overclock.p2, pll_overclock.vsel);  
+              Serial.flush();  
+            }  
+            break;
+          }
+
+          // === PLLTEST: стресс-тест поиска максимальной стабильной PLL ===  
+          else if (command.equalsIgnoreCase("PLLTEST")) {  
+            if (is_transmitting || tx_launching) {  
+              Serial.println(F("[PLLTEST] Отказ: идёт передача. Завершите TX и повторите."));  
+            } else {  
+              Serial.println(F("[PLLTEST] Запуск стресс-теста ядра. Зависание на сбойной"));  
+              Serial.println(F("[PLLTEST] ступени нормально - watchdog перезагрузит плату,"));  
+              Serial.println(F("[PLLTEST] результат последнего OK-шага сохранится в pll_overclock."));  
+              Serial.flush();                        // гарантировать вывод до смены clk_sys  
+            
+              vfo_test_pll_extreme_shurm();
+            
+              Serial.println(F("[PLLTEST] Завершён. Рекомендованный потолок:"));  
+              Serial.printf("[PLLTEST] clk_sys=%u Hz, fbdiv=%u, p1=%u, p2=%u, VSEL=0x%02X\n",  
                             (unsigned)pll_overclock.clk_sys_hz, pll_overclock.fbdiv,  
                             pll_overclock.p1, pll_overclock.p2, pll_overclock.vsel);  
               Serial.flush();  

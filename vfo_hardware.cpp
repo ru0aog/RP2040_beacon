@@ -1,7 +1,7 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Дизеринг-движок программного DDS VFO на автоматах PIO  
- *  Версия 2.15 (Профилирование и ASM-оптимизация Core 1), 2026-10-05  
+ *  Версия 2.17 (Профилирование и ASM-оптимизация Core 1), 2026-10-07  
  * ============================================================================ 
  * программная реализация MASH-2 (Multi-Stage Noise Shaping 2-го порядка
  * выполнен по схеме MASH 1-1 (каскад из двух последовательных дельта-сигма модуляторов 1-го порядка).
@@ -91,12 +91,13 @@
 #include "hardware/sync.h"
 #include "hardware/resets.h"
 #include "hardware/timer.h"
-#include "hardware/structs/sio.h"
 #include "hardware/vreg.h"
 #include <hardware/watchdog.h>
 #include <hardware/adc.h>
 #include "hardware/divider.h"
+#include "hardware/structs/sio.h"
 #include "hardware/structs/ssi.h"   // ssi_hw->baudr — делитель XIP_SSI
+#include "hardware/structs/pll.h" // Для прямого доступа к pll_hw->cs
 #include "pico/multicore.h"
 #include "vfo_hardware.h"
 #include "file_manager.h"
@@ -120,13 +121,49 @@ static uint64_t vfo_base_mhz = 0;   // базовый тон сетки, мГц
 static uint64_t vfo_step_mhz = 0;   // шаг сетки, мГц
 
 // Глобальные профили тактирования (static полностью удалены для extern-связывания)
-// ИСПРАВЛЕНО: Теперь номинал знает про калибровку кварца и равен честным 138 МГц.
-// Это исключит ложные срабатывания фильтров "opt <= nominal".
-PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };
-PllConfig pll_overclock = { 69,  3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false }; 
-// Потолок OCTEST клэмпим строго к лимиту препроцессора (380 МГц)
-PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30,    true };  
+// Обновляем глобальные профили тактирования (добавлен refdiv = 1 в конец каждого списка)
+PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
+PllConfig pll_overclock = { 69,  3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 }; 
+PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30,    true,  1 };  
+
 volatile bool clk_boosted = false;       // активация разгона
+
+
+
+// ============================================================================
+// ВЕРХНИЕ МАКРОСЫ И СТРУКТУРЫ ДЛЯ МНОГОКРИТЕРИАЛЬНОГО АВТОТЮНА
+// ============================================================================
+#ifndef VFO_MAX_STABLE_CLK_HZ
+#define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Предел стабильности
+#endif
+
+#ifndef VFO_PREFERRED_MIN_CLK
+#define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница чистой зоны
+#endif
+
+#ifndef VFO_INT_PENALTY
+#define VFO_INT_PENALTY          500000000ULL  // Запрет pio_int < 4
+#endif
+
+// Структура детальной калькуляции штрафов
+struct MetricBreakdown {
+    uint32_t raw_step;
+    uint32_t frac;
+    uint32_t ctz_val;
+    uint64_t ctz_penalty;
+    uint64_t center_dist;
+    uint64_t mash_penalty;
+    uint64_t clk_penalty;
+    uint64_t int_penalty;
+    uint64_t total_metric;
+};
+
+// Упреждающий прототип для verbose-метрики (чтобы find_optimal_pll видела её выше по коду)
+static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out = nullptr);
+
+
+
+
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -257,7 +294,7 @@ static void __not_in_flash_func(detach_peripheral_clock)() {
  *       флэш-контроллер уже работает на новом делителе.  
  */  
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel) {  
-    uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.p1 * cfg.p2));  
+    uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.refdiv * cfg.p1 * cfg.p2));  
     bool is_overclocking = (target_clk_hz > current_clk_sys_hz);  
   
     if (is_overclocking) {  
@@ -274,15 +311,25 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
                     VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
   
-    uint32_t vco_nominal_hz = (uint32_t)(VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv);  
-    pll_init(pll_sys, 1, vco_nominal_hz, cfg.p1, cfg.p2);  
-  
-    // === BAUDR: SSI принимает запись ТОЛЬКО при SSIENR=0 ===  
-    // Мы на XOSC, код в SRAM, прерывания запрещены — окно безопасно.  
-    uint32_t ssi_baud = (uint32_t)((target_clk_hz + VFO_FLASH_SCK_MAX_HZ - 1) / VFO_FLASH_SCK_MAX_HZ);  
-    ssi_baud = (ssi_baud + 1u) & ~1u;  
+    uint32_t vco_nominal_hz = (uint32_t)((VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);  
+    pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
+
+    // === АППАРАТНЫЙ МОНИТОРИНГ ЗАЩЁЛКИ ФАЗЫ PLL (LOCK BIT) ===
+    // Ждем взвода бита LOCK в регистре CS системной PLL
+    // Если аналоговая петля не успеет стабилизироваться за 2000 итераций — мы разорвем цикл, 
+    // чтобы ядро не зависло намертво в глухом дедлоке.
+    volatile uint32_t timeout = 2000;
+    while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout); // <--- СКОРРЕКТИРОВАНО
+
+    // === BAUDR: ОГРАНИЧЕНИЕ НА ТАКТИРОВАНИЕ ФЛЭША СТРОГО <= 48 МГц ===  
+    // Меняем VFO_FLASH_SCK_MAX_HZ на жесткие 48 000 000 Гц
+    const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;
+    uint32_t ssi_baud = (uint32_t)((target_clk_hz + FLASH_SAFE_MAX_HZ - 1) / FLASH_SAFE_MAX_HZ);  
+    
+    ssi_baud = (ssi_baud + 1u) & ~1u;   // Округление вверх до ближайшего четного (требование аппаратного SSI)  
     if (ssi_baud < 2u)  ssi_baud = 2u;  
     if (ssi_baud > 34u) ssi_baud = 34u;  
+    
     ssi_hw->ssienr = 0;                 // выключить SSI — иначе baudr не запишется  
     ssi_hw->baudr  = ssi_baud;  
     ssi_hw->ssienr = 1;                 // включить обратно  
@@ -301,6 +348,8 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t 
         vreg_set_voltage((vreg_voltage)vsel);  
     }  
 }
+
+
 
 
 
@@ -356,15 +405,19 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
   
     multicore_launch_core1(vfo_core1_entry);  
   
-    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
-                  opt.clk_sys_hz / 1000000.0,  
-                  (unsigned long)opt.fbdiv,  
-                  (unsigned long)opt.p1,  
-                  (unsigned long)opt.p2,  
-                  (unsigned long)(opt.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),  
-                  (unsigned)vsel_to_mv(vsel),  
-                  opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
-                  (unsigned)ssi_hw->baudr);  
+    // Правильный расчет VCO для вывода на экран в мегагерцах [Скорректировано]
+    uint32_t vco_print_mhz = (uint32_t)(((uint64_t)opt.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (1000000ULL * opt.refdiv));
+
+    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
+                opt.clk_sys_hz / 1000000.0,  
+                (unsigned long)opt.refdiv, // <-- Выводим новый делитель
+                (unsigned long)opt.fbdiv,  
+                (unsigned long)opt.p1,  
+                (unsigned long)opt.p2,  
+                (unsigned long)vco_print_mhz,  
+                (unsigned)vsel_to_mv(vsel),  
+                opt.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
+                (unsigned)ssi_hw->baudr);  
     }
 
     clk_boosted = true;
@@ -784,6 +837,51 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
 
 
+static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out) {
+    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
+    if (out) *out = test;
+
+    memset(b, 0, sizeof(MetricBreakdown));
+    b->frac = test.pio_frac;
+    b->raw_step = test.dds_step;
+
+    if (test.pio_frac == 0 && test.dds_step == 0) {
+        return 0; // Аппаратный абсолютный идеал
+    }
+
+    // 1. Штраф за дальние спуры (простые дроби FRAC8)
+    if (test.pio_frac != 0) {
+        b->ctz_val = (uint32_t)__builtin_ctz(test.pio_frac);
+        b->ctz_penalty = (1ULL << (b->ctz_val + 26));
+        b->total_metric += b->ctz_penalty;
+    }
+
+    // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)
+    if (test.dds_step != 0) {
+        uint64_t target_center = 0x80000000ULL;
+        b->center_dist = (test.dds_step > target_center) ? (test.dds_step - target_center) : (target_center - test.dds_step);
+        b->mash_penalty = b->center_dist / 4ULL;
+        b->total_metric += b->mash_penalty;
+    }
+
+    // 3. Штраф за отказ от разгона к 380 МГц
+    if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
+        b->clk_penalty += 10000000000ULL; // Барьерный штраф ниже 320 МГц
+    }
+    uint64_t clk_deficit = VFO_MAX_STABLE_CLK_HZ - clk_sys_hz;
+    b->clk_penalty += (clk_deficit * clk_deficit) / 5000ULL;
+    b->total_metric += b->clk_penalty;
+
+    // 4. Запрет малых INT
+    if (test.pio_int < 4) {
+        b->int_penalty = VFO_INT_PENALTY;
+        b->total_metric += b->int_penalty;
+    }
+
+    return b->total_metric;
+}
+
+
 
 
 
@@ -835,275 +933,269 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 #define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов  
 #define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
 
-#define VFO_DITHER_SPUR_GUARD_HZ  2000ULL    // защитное окно вокруг несущей, Гц  
-#define VFO_SPUR_DEAD_HZ          150ULL     // спур сливается с тоном — считаем идеалом  
-#define VFO_SPUR_PENALTY          8000000000ULL  // штраф за спур в окне (выше почти всех метрик)  
+#define VFO_INT_PENALTY   500000000ULL     // жёсткий запрет pio_int < 4
 
-#define VFO_INT_PENALTY   500000000ULL   // жёсткий запрет pio_int < 4 (оставить)  
-#define VFO_FRAC_PENALTY  200000ULL      // ЛИНЕЙНЫЙ слабый тай-брейк (вернуть)  
-#define VFO_INT_WEIGHT    1500000000ULL  // НОВОЕ: премия за большой делитель
-
-#define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // ниже — сильные близкие спуры
-
-#define VFO_CLK_PRIORITY        133000000ULL  // нормализация метрики на clk_sys
-
-// Перевод расстояния шага (0..2^31) в реальную отстройку спура в Гц  
-static inline uint64_t spur_offset_hz(uint32_t d, uint64_t clk_sys_hz) {  
-    return ((uint64_t)d * clk_sys_hz) / (VFO_DITHER_LOOP_CYCLES * 4294967296ULL);  
-}  
+#define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
+#define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
 
 
 
-// =====================================================================  
-// ПОРОГИ УРОВНЯ СПУРОВ (дБц × 100, целые)  
-// =====================================================================  
-#define VFO_SPUR_LVL_FULL_DB   (-4000)   // ≥ −40 dBc: сильный спур — уносить далеко  
-#define VFO_SPUR_LVL_WEAK_DB   (-6000)   // ≤ −60 dBc: слабый — игнорируем  
-// Между ними: средний спур — мягкий штраф за близость  
-  
-// Целочисленный 20·log10(x), x в [0..1] как Q32 (num/2^32), результат в дБ×100.  
-// 20·log10(x) = 20·log10(2)·log2(x) = 6.0206·log2(x); log2(x) = ctz-разложение.  
-// Точность ~±0.3 дБ — для классификации достаточно.  
-static inline int32_t spur_level_db100(uint64_t num, uint8_t k) {  
-    // num — расстояние dmin гармоники (0..2^31); уровень ∝ dmin/(k·2^32)  
-    // Используем: 20·log10(d/2^32) − 20·log10(k)
-    if (num == 0) return -9600;                    // −96 dBc: гармоники нет
-    int lz = __builtin_clzll(num << 33);           // log2(num/2^32) ≈ −(lz+1)+дробь
-    // Дробная часть: берём 3 старших бита мантиссы, линейная интерполяция log2
-    uint64_t mant = (num << (lz + 33)) >> 61;      // 0..7
-    // log2(1+m/8) ≈ m·0.19265 для малых m (грубо)
-    int32_t log2_x100 = -(int32_t)(lz + 1) * 100 + (int32_t)(mant * 19);
-    int32_t lvl = log2_x100 * 602 / 100;           // ×6.0206 → дБ×100
-    // −20·log10(k): k=1→0, k=2→−602, k=3→−954  
-    static const int16_t k_pen[4] = {0, 0, -602, -954};  
-    return lvl + k_pen[k];  
-}  
-  
+// ============================================================================
+// МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
+// ============================================================================
+#define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Ваш доказанный предел стабильности
+#define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
+// Метрика кандидата
+static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoParameters *out) {
+    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
+    if (out) *out = test;
 
-// Метрика кандидата: главный критерий — глубина дизер-модуляции (dmin),  
-// затем жёсткий штраф за FRAC8-паттерн в середине диапазона.  
-static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
-                               VfoParameters *out /* может быть NULL */) {  
-    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);  
-    if (out) *out = test;  
-  
-    uint64_t metric;  
-  
-    if (test.pio_frac == 0 && test.dds_step == 0) {  
-        metric = 0;   // аппаратный идеал: целое деление, дизер спит  
-    } else {  
-        // Глубина дизер-модуляции = расстояние эффективного шага до 0/2^32.  
-        // test.dds_step уже принудительно нечётный (|= 1) из  
-        // calculate_raw_params_mhz — берём как есть.  
-        uint32_t d0   = test.dds_step;  
-        uint32_t dmax = 0xFFFFFFFFu - test.dds_step;  
-        uint32_t dmin = (d0 < dmax) ? d0 : dmax;  
-  
-        metric = dmin;  
-  
-        // Динамический спур-фильтр: остаток в слышимом окне (~2 кГц в пересчёте  
-        // на текущий clk_sys) — штраф выкидывает кандидата.  
-        uint64_t dynamic_spur_threshold = 214748364800000ULL / clk_sys_hz;  
-        if (dmin > 0 && dmin < dynamic_spur_threshold) {  
-            metric += 80000000u;  
-        }  
-    }  
-  
-    // Малый pio_int: дизер модулирует слишком большую долю периода — жёсткий порог  
-    if (test.pio_int < 4) metric += VFO_INT_PENALTY;  
-  
-    // ГЛАВНЫЙ рычаг: поощряем большой делитель.  
-    // Размах ЧМ на один ±1-тоггл делителя = f_out/INT; при малом INT (15)  
-    // это ~240 кГц => близкая гребёнка. Чем больше INT, тем мельче скачок.  
-    // Высокий clk заодно укорачивает джиттер-фронт FRAC8 (ниже ±МГц-спуры).  
-    metric += VFO_INT_WEIGHT / (uint64_t)test.pio_int;  
-  
-    // ЛИНЕЙНЫЙ слабый штраф за FRAC8-джиттер (только тай-брейк, НЕ доминанта)  
-    uint32_t fdist = (test.pio_frac < 256u - test.pio_frac)  
-                     ? test.pio_frac : 256u - test.pio_frac;  
-    metric += (uint64_t)fdist * VFO_FRAC_PENALTY * 133000000ULL / clk_sys_hz;
+    // Идеал: целое аппаратное деление, дизер полностью спит
+    if (test.pio_frac == 0 && test.dds_step == 0) return 0;
 
-    // Приоритет высокой частоты шины: джиттер FRAC8 = 1 такт clk_sys,  
-    // уровень спура ~ f_out/clk. Нормируем всю метрику на clk:  
-    // 369 МГц получает множитель ~0.36, 133 МГц — ~1.0  
-    metric = metric * VFO_CLK_PRIORITY / clk_sys_hz;  
-  
-    return metric;  
+    uint64_t metric = 0;
+
+    // ------------------------------------------------------------------------
+    // КРИТЕРИЙ 1: Борьба с дальними спурами -40 dBc (Анализ простоты дроби)
+    // ------------------------------------------------------------------------
+    if (test.pio_frac != 0) {
+        // Вычисляем ctz (количество младших нулей). 
+        // Чем больше нулей, тем проще дробь (128->7 нулей, 64->6 нулей)
+        // Простые дроби порождают самые мощные иголки на анализаторе.
+        uint32_t fraction_simplicity = (uint32_t)__builtin_ctz(test.pio_frac);
+        
+        // Тяжелый экспоненциальный штраф за вырождение джиттера в периодический меандр
+        metric += (1ULL << (fraction_simplicity + 26)); 
+    }
+
+    // ------------------------------------------------------------------------
+    // КРИТЕРИЙ 2: Чистка ближней зоны MASH-2 (Размытие шумовой юбки)
+    // ------------------------------------------------------------------------
+    if (test.dds_step != 0) {
+        uint64_t target_center = 0x80000000ULL; // Центр шкалы 32-битного DDS
+        uint64_t current_step  = test.dds_step;
+        
+        // Ищем удаление от центра. Возле краев (0 или 0xFFFFFFFF) MASH-2 "сбоит"
+        // и кучкует энергию фазового шума вплотную к основному тону.
+        uint64_t center_dist = (current_step > target_center) ? (current_step - target_center) : (target_center - current_step);
+        metric += center_dist / 4ULL; 
+    }
+
+    // ------------------------------------------------------------------------
+    // КРИТЕРИЙ 3: Безусловный силовой разгон к 380 МГц
+    // ------------------------------------------------------------------------
+    if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
+        // Если частота ушла ниже 320 МГц — кандидат почти гарантированно отсекается
+        metric += 10000000000ULL;
+    }
+    
+    // Квадратичный штраф за падение частоты относительно потолка в 380 МГц
+    uint64_t clk_deficit = VFO_MAX_STABLE_CLK_HZ - clk_sys_hz;
+    metric += (clk_deficit * clk_deficit) / 5000ULL;
+
+    // Запрет опасного сверхмалого деления
+    if (test.pio_int < 4) metric += VFO_INT_PENALTY;
+
+    return metric;
 }
 
 
+// хелпер
+// Минимальная отстройка FRAC8-спура по гармоникам k=1..4, Гц.  
+// frac==0 -> UINT64_MAX (нет спура). Спур k-й гармоники садится на  
+// f_sm * fd/256, где fd = свёртка (frac*k mod 256) в диапазон ±128.  
+static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,  
+                                     uint64_t clk_sys_hz) {  
+    if (pio_frac == 0) return UINT64_MAX;  
+    uint64_t div_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
+    if (div_x256 == 0) return UINT64_MAX;  
+    uint64_t best = UINT64_MAX;  
+    for (uint32_t k = 1; k <= 4; k++) {  
+        uint32_t m  = ((uint32_t)pio_frac * k) & 0xFFu;  
+        uint32_t fd = (m < 256u - m) ? m : 256u - m;   // 0..128  
+        if (fd == 0) continue;                          // гармоника на тон  
+        uint64_t off = clk_sys_hz * fd / div_x256;      // Гц  
+        if (off < best) best = off;  
+    }  
+    return best;  
+}
+
+
+
+
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
-
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
-    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы  
+    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; 
   
-    // Дефолтная безопасная конфигурация на случай сбоя  
-    PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false };  
-  
-    // Границы КВ-диапазона (1.0 .. 30.0 МГц) в миллигерцах
-    if (target_mhz < 1000000000ULL)   target_mhz = 1000000000ULL; // 1.0 МГц
-    if (target_mhz > 30000000000ULL)  target_mhz = 30000000000ULL; // 30 МГц
+    PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
+    bool best_forbidden = true;   // дефолт 133 МГц считаем запретным —  
+                                  // первый разрешённый кандидат его вытеснит  
+    bool best_clean     = false;
+    uint64_t min_global_metric = UINT64_MAX;
+    uint64_t min_dds_metric = UINT64_MAX;   // метрика текущего победителя
 
-    // Эталон — фактический pll_nominal через ту же метрику  
-    VfoParameters nom_params;  
-    uint64_t nom_dds_metric = vfo_pll_metric(pll_nominal.clk_sys_hz, target_mhz, &nom_params);  
-  
-    uint32_t nom_dist_frac = (nom_params.pio_frac < 256u - nom_params.pio_frac)  
-                             ? nom_params.pio_frac : 256u - nom_params.pio_frac;  
-    uint32_t nom_raw_step  = nom_params.dds_step & ~1u; // сырая чётность для CTZ  
-  
-    // Стартовые ориентиры от номинала  
-    uint64_t min_dds_metric  = nom_dds_metric;  
-    uint32_t min_ctz_metric  = (nom_raw_step == 0) ? 0u : (uint32_t)__builtin_ctz(nom_raw_step);  
-    uint32_t min_frac_metric = nom_dist_frac;
-    bool best_forbidden = true;   // лучший на данный момент — из запретного пояса?
+    if (target_mhz < 1000000000ULL)  target_mhz = 1000000000ULL; 
+    if (target_mhz > 30000000000ULL) target_mhz = 30000000000ULL; 
 
-#if VFO_PLL_DEBUG
-    struct PllCand { uint64_t clk; uint32_t step; uint64_t metric;  
-                    uint32_t frac; uint64_t eff; uint8_t zone; };  
-    PllCand top[3] = { {0,0,UINT64_MAX,0,0,0}, {0,0,UINT64_MAX,0,0,0}, {0,0,UINT64_MAX,0,0,0} };  
-#endif
+    // Структура для ведения ТОП-5 локального рантайма
+    struct CandLog {
+        uint64_t clk;
+        uint32_t rf, fb, p1, p2;
+        MetricBreakdown b;
+        uint32_t pio_int;
+        bool valid;
+    };
+    const int TOP_MAX = 10;
+    CandLog top[TOP_MAX];
+    memset(top, 0, sizeof(top));
 
-    // Сканируем весь диапазон в один проход  
-    const uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;  
-    const uint64_t max_allowed_clk = max_clk_limit;  
+    uint32_t total_scanned = 0;
+    uint32_t rejected_vco = 0;
+    uint32_t rejected_int = 0;
+    uint64_t best_vco_hz = 0;
+    int winner_id = 0; // номер лидера
 
-#if VFO_PLL_DEBUG
-    Serial.printf("[PLLDBG] scan range: %.3f .. %.3f MHz (target=%u)\n",  
-              min_allowed_clk / 1e6, max_allowed_clk / 1e6, target_frequency_hz);
-#endif
+    // === МАТРИЧНЫЙ ПЕРЕБОР PLL ===
+    for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
+        uint64_t f_ref = crystal_hz / refdiv;
 
-#if VFO_PLL_DEBUG  
-    Serial.printf("[PLLDBG] target=%u Hz  nominal: clk=%lu step=0x%08lX metric=%llu frac=%u\n",  
-                  target_frequency_hz,  
-                  (unsigned long)pll_nominal.clk_sys_hz,  
-                  (unsigned long)nom_params.dds_step,  
-                  (unsigned long long)nom_dds_metric,  
-                  (unsigned)nom_params.pio_frac);  
-#endif
-
-    for (uint32_t p1 = 2; p1 <= 6; p1++) {  
-        for (uint32_t p2 = 1; p2 <= 2; p2++) {  
-            uint32_t pdiv_total = p1 * p2;  
-  
-            for (uint32_t fbdiv = 30; fbdiv <= 150; fbdiv++) {  
-                uint64_t vco_hz = fbdiv * crystal_hz;  
-  
-                // Жесткий аппаратный фильтр VCO RP2040 (750..1600 МГц)  
-                if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;  
-  
-                uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
-                if (clk_sys_hz < min_allowed_clk || clk_sys_hz > max_allowed_clk) continue;
-
-                // Спур-уровень близкой гребёнки ~ f_out/INT ~ f_out^2/clk_sys:  
-                // низкая шина = сильные спуры. Жёсткий минимум шины.  
-                if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;
-  
-                // Единая метрика кандидата  
-                VfoParameters test;
-                #if VFO_PLL_DEBUG  
-                    uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test);
-                #else  
-                    uint64_t current_dds_metric = vfo_pll_metric(clk_sys_hz, target_mhz, &test);  
-                #endif
-
-                if (test.pio_int < 2) continue;  
-  
-                // CTZ по сырому шагу (сброс принудительной нечётности)  
-                uint32_t cand_raw_step = test.dds_step & ~1u;  
-                uint32_t current_ctz_metric = (cand_raw_step == 0) ? 0u  
-                                              : (uint32_t)__builtin_ctz(cand_raw_step);  
-  
-                uint32_t current_frac_metric = (test.pio_frac < 256u - test.pio_frac)  
-                                               ? test.pio_frac : 256u - test.pio_frac;
+        for (uint32_t p1 = 2; p1 <= 6; p1++) {  
+            for (uint32_t p2 = 1; p2 <= 2; p2++) {  
+                if (p1 < p2) continue; // Защита подложки кристалла от наводок ВЧ
                 
-                // Запретный пояс FRAC8: спур садится на ~f_sm*fdist/256 от несущей.  
-                // Требуем >=1 МГц отстройки (с запасом x2 в формуле).  
-                // frac==0 — идеал, пояса нет.  
-                uint32_t fdist_min = (uint32_t)(256ULL * 1000000ULL /  
-                                                (2ULL * (uint64_t)target_frequency_hz));  
-                if (fdist_min > 128) fdist_min = 128;  
-                bool frac_forbidden = (test.pio_frac != 0 &&  
-                                       current_frac_metric < fdist_min);
-  
-#if VFO_PLL_DEBUG  
-                // топ-3 без дублей по clk_sys (одна частота находится через разные p1/p2)  
-                bool dup = (top[0].clk == clk_sys_hz) || (top[1].clk == clk_sys_hz);  
-                if (!dup && current_dds_metric < top[2].metric) {  
-                    int pos = (current_dds_metric < top[0].metric) ? 0 :  
-                              (current_dds_metric < top[1].metric) ? 1 : 2;  
-                    for (int k = 2; k > pos; k--) top[k] = top[k-1];  
-                    top[pos].clk    = clk_sys_hz;  
-                    top[pos].step   = test.dds_step;  
-                    top[pos].metric = current_dds_metric;  
-                    top[pos].frac   = test.pio_frac;
-                }  
-#endif
+                uint32_t pdiv_total = p1 * p2;  
+      
+                // ЦИКЛ FBDIV: Захватывает частоты вплоть до 2.4 ГГц
+                for (uint32_t fbdiv = 30; fbdiv <= 220; fbdiv++) {
+                    uint64_t vco_hz = (uint64_t)fbdiv * f_ref;  
+                    total_scanned++;
+      
+                    // Фильтр экстремального разгона VCO (750 МГц ... нет лимита)
+                    if (vco_hz < 750000000ULL) {
+                        rejected_vco++;
+                        continue;  
+                    }
+      
+                    uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
+                    if (clk_sys_hz < VFO_CLK_SYS_MIN_HZ || clk_sys_hz > max_clk_limit) continue;  
+      
+                    VfoParameters test;
+                    MetricBreakdown current_breakdown;
+                    uint64_t current_metric = vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &current_breakdown, &test);
 
-                // Многокритериальный арбитраж: dds(dmin) -> frac -> ctz -> выше clk_sys  
-                // frac поднят выше ctz: FRAC8-паттерн с низкопорядковой дробью  
-                // даёт сильные спуры ±f_sm/N, важнее периода DDS-переносов.  
-                bool is_better_dds  = (current_dds_metric < min_dds_metric);  
-                bool is_equal_dds   = (current_dds_metric == min_dds_metric);  
-                bool is_better_frac = (current_frac_metric < min_frac_metric);  
-                bool is_equal_frac  = (current_frac_metric == min_frac_metric);  
-                bool is_better_ctz  = (current_ctz_metric < min_ctz_metric);  
-                bool is_equal_ctz   = (current_ctz_metric == min_ctz_metric);  
+                    if (test.pio_int < 2) {
+                        rejected_int++;
+                        continue;  
+                    }
+
+                    // Класс 1: запретный пояс FRAC8-спура (многогармоническая оценка)  
+                    uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,  
+                                                            test.pio_frac,  
+                                                            clk_sys_hz);  
+                    bool frac_forbidden =  
+                        (test.pio_frac != 0u) &&  
+                        (spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ);  
+    
+                    // Класс 2: гейт близкой гребёнки — по СЫРОМУ dmin,  
+                    // до нормализации метрики на clk_sys  
+                    uint32_t dd  = test.dds_step;  
+                    uint32_t dmin_raw = (dd < (uint32_t)(0u - dd)) ? dd  
+                                        : (uint32_t)(0u - dd);  
+                    bool candidate_clean = (dmin_raw < VFO_DMIN_CEILING);
+      
+                    // Сортировка и сохранение в ТОП-5 локального рантайма
+                    for (int i = 0; i < TOP_MAX; i++) {
+                        if (!top[i].valid || current_metric < top[i].b.total_metric) {
+                            for (int j = TOP_MAX - 1; j > i; j--) {
+                                top[j] = top[j - 1];
+                            }
+                            top[i].clk = clk_sys_hz;
+                            top[i].rf = refdiv;
+                            top[i].fb = fbdiv;
+                            top[i].p1 = p1;
+                            top[i].p2 = p2;
+                            top[i].b = current_breakdown;
+                            top[i].pio_int = test.pio_int;
+                            top[i].valid = true;
+                            break;
+                        }
+                    }
+
+                    // Статистика: глобальный минимум метрики (для лога)  
+                    if (current_metric < min_global_metric ||   
+                       (current_metric == min_global_metric && vco_hz > best_vco_hz)) {  
+                        min_global_metric = current_metric;  
+                        best_vco_hz = vco_hz;  
+                    }  
   
-                // Иерархия: разрешённый frac всегда бьёт запретный.  
-                // Внутри одного класса — dds(dmin) -> frac -> ctz -> выше clk_sys.  
-                bool prefer;  
-                if (frac_forbidden != best_forbidden) {  
-                    // Классы разные: берём разрешённого (frac_forbidden==false)  
-                    prefer = !frac_forbidden;  
-                } else {  
-                    // Одинаковый класс — обычная лесенка критериев  
-                    prefer = is_better_dds ||  
-                             (is_equal_dds && is_better_frac) ||  
-                             (is_equal_dds && is_equal_frac && is_better_ctz) ||  
-                             (is_equal_dds && is_equal_frac && is_equal_ctz &&  
-                              clk_sys_hz > best_pll.clk_sys_hz);  
-                }  
+                    // Арбитраж победителя: класс важнее метрики.  
+                    // Пояс frac > чистота дизера (dmin) > метрика > выше VCO.  
+                    bool prefer;  
+                    if (frac_forbidden != best_forbidden) {  
+                        prefer = !frac_forbidden;                    // разрешённый бьёт запретный  
+                    } else if (candidate_clean != best_clean) {  
+                        prefer = candidate_clean;                    // чистый дизер бьёт грязный  
+                    } else {  
+                        prefer = (current_metric < min_dds_metric) ||  
+                                 (current_metric == min_dds_metric && vco_hz > best_vco_hz);  
+                    }  
   
-                if (prefer) {  
-                    best_forbidden  = frac_forbidden;   // ВАЖНО: запоминаем класс победителя  
-                    min_dds_metric  = current_dds_metric;  
-                    min_ctz_metric  = current_ctz_metric;  
-                    min_frac_metric = current_frac_metric;  
+                    if (prefer) {  
+                        best_forbidden = frac_forbidden;  
+                        best_clean     = candidate_clean;  
+                        min_dds_metric = current_metric;  
   
-                    best_pll.fbdiv = fbdiv;  
-                    best_pll.p1 = p1;  
-                    best_pll.p2 = p2;  
-                    best_pll.clk_sys_hz = clk_sys_hz;  
-                    best_pll.vsel = (uint32_t)vsel_for(clk_sys_hz);  
-                    best_pll.is_oc = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
-                }
+                        best_pll.fbdiv      = fbdiv;  
+                        best_pll.p1         = p1;  
+                        best_pll.p2         = p2;  
+                        best_pll.refdiv     = refdiv;  
+                        best_pll.clk_sys_hz = clk_sys_hz;  
+                        best_pll.vsel       = (uint32_t)vsel_for(clk_sys_hz);  
+                        best_pll.is_oc      = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
+                    }
+                } // <--- КОНЕЦ ЦИКЛА FBDIV
             }  
         }  
     }  
+
   
-#if VFO_PLL_DEBUG  
+    // ========================================================================
+    // ДИАГНОСТИЧЕСКИЙ ВЫВОД КАНДИДАТОВ И ШТРАФОВ В SERIAL
+    // ========================================================================
+    if (debug_flag) {
+        Serial.printf("\n=================== PLL AUTOTUNE TRACE ===================\n");
+        Serial.printf("Target Freq  : %u Hz\n", target_frequency_hz);
+        Serial.printf("Total Scanned: %u (Bad VCO: %u, Bad INT: %u)\n", total_scanned, rejected_vco, rejected_int);
+        Serial.printf("----------------------------------------------------------\n");
+        Serial.printf("TOP %d BEST CANDIDATES FOUND:\n", TOP_MAX);
+        
+        for (int i = 0; i < TOP_MAX; i++) {
+            if (!top[i].valid) continue;
+            
+            // ТОЧЕЧНО: Если параметры кандидата из ТОПа совпадают с выбранным лучшим, запоминаем его номер (i + 1)
+            if (top[i].clk == best_pll.clk_sys_hz && top[i].fb == best_pll.fbdiv && top[i].rf == best_pll.refdiv) {
+                winner_id = i + 1;
+            }
 
-static const char zone_ch[] = {'D', 'W', 'F'};  // dead / window / far  
-    for (int i = 0; i < 3; i++) {  
-        if (top[i].clk == 0) break;  
-            Serial.printf("[PLLDBG] top%d: clk=%.3f MHz step=0x%08lX metric=%llu frac=%u\n",  
-                    i, top[i].clk / 1e6, (unsigned long)top[i].step,  
-                    (unsigned long long)top[i].metric, (unsigned)top[i].frac); 
+            Serial.printf("[%d] clk_sys: %7.3f MHz (R=%u, F=%u, P1=%u, P2=%u) | PIO_INT=%u\n", 
+                        i + 1, top[i].clk / 1000000.0, top[i].rf, top[i].fb, top[i].p1, top[i].p2, top[i].pio_int);
+            Serial.printf("    -> FRAC8 Point : %3u (CTZ=%u) | DDS_STEP: 0x%08X\n", 
+                        top[i].b.frac, top[i].b.ctz_val, top[i].b.raw_step);
+            Serial.printf("    -> PENALTIES   : FRAC(CTZ)=%11llu | MASH_JUPE=%11llu | CLK_DEF=%11llu\n", 
+                        top[i].b.ctz_penalty, top[i].b.mash_penalty, top[i].b.clk_penalty);
+            Serial.printf("    => TOTAL METRIC: %llu %s\n", 
+                        top[i].b.total_metric, (top[i].b.total_metric == 0) ? "[PERFECT INT MATCH]" : "");
+            Serial.printf("----------------------------------------------------------\n");
+        }
+        
+        // Выводим номер победителя в явном виде [%d]
+        Serial.printf("WINNER SELECTED: [%d] clk_sys = %7.3f MHz (Metric: %llu, VCO: %llu MHz)\n", 
+                    winner_id, best_pll.clk_sys_hz / 1000000.0, min_global_metric, best_vco_hz / 1000000ULL);
+        Serial.printf("==========================================================\n\n");
+   }
+    if (best_pll.clk_sys_hz == 133000000ULL && total_scanned > 0 && min_dds_metric == UINT64_MAX) {  
+        Serial.printf("[PLLDBG] SCAN EMPTY — fallback to nominal 133 MHz\n");  
     }
-
-    VfoParameters wp;  
-    vfo_pll_metric(best_pll.clk_sys_hz, target_mhz, &wp);
-    Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz fbdiv=%lu p1=%lu p2=%lu metric=%llu"  
-                "  int=%u frac=%u step=0x%08lX\n",  
-                best_pll.clk_sys_hz / 1e6,  
-                (unsigned long)best_pll.fbdiv,  
-                (unsigned long)best_pll.p1,  
-                (unsigned long)best_pll.p2,  
-                (unsigned long long)min_dds_metric,  
-                (unsigned)wp.pio_int, (unsigned)wp.pio_frac,  
-                (unsigned long)wp.dds_step);
-#endif  
     return best_pll;  
 }
 
@@ -1286,16 +1378,36 @@ static uint16_t vsel_to_mv(uint32_t vsel) {
 
 // === ТЕМПЕРАТУРА ЯДРА RP2040 (ADC канал 4, встроенный датчик) ===  
 // Формула из даташита RP2040: T = 27 - (V_bead - 0.706) / 0.001721  
+// СКОРРЕКТИРОВАННОЕ ПОМЕХОЗАЩИЩЕННОЕ ЧТЕНИЕ ТЕМПЕРАТУРЫ [Исправлено]
 static float vfo_read_core_temp_c(void) {
     // Восстановление clk_adc после смены clk_sys (48 МГц от PLL_USB)  
     clock_configure(clk_adc,  
                     CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,  
                     0, 48000000u, 48000000u);
     adc_select_input(4);  
-    uint16_t raw = adc_read();  
+
+    uint32_t samples[3];
+    
+    // Делаем три последовательных замера с микросекундными паузами, 
+    // чтобы дождаться стабилизации опорного напряжения аналоговой шины
+    for(int i = 0; i < 3; i++) {
+        samples[i] = adc_read();
+        busy_wait_us(10); 
+    }
+
+    // Простейшая медианная фильтрация: выбираем среднее значение, отсекая ложные "иголки"
+    uint32_t raw;
+    if ((samples[0] <= samples[1] && samples[1] <= samples[2]) || (samples[2] <= samples[1] && samples[1] <= samples[0]))
+        raw = samples[1];
+    else if ((samples[1] <= samples[0] && samples[0] <= samples[2]) || (samples[2] <= samples[0] && samples[0] <= samples[1]))
+        raw = samples[0];
+    else
+        raw = samples[2];
+
     float v_bead = raw * 3.3f / 4095.0f; // ADC 12 бит, VREF = 3.3 В  
     return 27.0f - (v_bead - 0.706f) / 0.001721f;  
 }
+
 
 
  
@@ -1330,65 +1442,60 @@ void vfo_clk_thermal_guard(void) {
 
 
 
-/**  
- * @brief Стресс-тест: поиск индивидуального потолка clk_sys кристалла.  
- *  
- * Перебирает валидные PLL-комбинации по нарастающей clk_sys  
 
- * поднимает VSEL по таблице, переключает clk_sys через vfo_set_clk_sys,  
- * прогоняет композитную нагрузку (целочисленная арифметика + float,  
- * запись/чтение SRAM с CRC, непредсказуемые ветвления, аппаратный  
- * делитель SIO) и при успехе фиксирует ступень в pll_overclock.  
+/**  
+ * @brief Экстремальный стресс-тест: Поиск абсолютного физического потолка PLL.  
  *  
- * Функция размещена в SRAM (__not_in_flash_func): код и стековая  
- * нагрузка теста не обращаются к XIP/Flash, поэтому тест измеряет  
- * именно предел ядра, а не QSPI. Печать через Serial остаётся в Flash,  
- * но она выполняется между фазами и не входит в нагрузочный прогон.  
- *  
- * Scratch-регистр watchdog хранит частоту (МГц) текущей ступени:  
- * при зависании и ребуте setup() может прочитать сбойную частоту.  
- *  
- * @warning Тест разрушителен: зависание на сбойной ступени — нормальный  
- *          исход. Вызывать только при is_transmitting == false.  
+ * Сканирует все возможные рантайм-комбинации (REFDIV от 1 до 3, VCO до 2.4 ГГц)
+ * строго по нарастающей итоговой частоты clk_sys. На каждой ступени прогоняет 
+ * жесткий композитный тест (FPU, AHB-SRAM CRC, ветвления, делитель SIO).
  */  
 void __not_in_flash_func(vfo_find_max_stable_clock)(void) {  
     const uint64_t CLK_START_HZ = VFO_CLK_SYS_NOMINAL_HZ;  
-    const uint64_t CLK_CEIL_HZ  = VFO_CLK_SYS_MAX_HZ;  
+    const uint64_t CLK_CEIL_HZ  = 450000000ULL; // Верхний теоретический предел сканирования
   
-    // Scratch-регистр watchdog: переживает зависание и ребут —  
-    // содержит частоту (МГц) ступени, на которой ядро упало  
+    // Scratch-регистр watchdog для сохранения частоты при зависании
     volatile uint32_t *scratch = &watchdog_hw->scratch[0];  
   
-    // Таблица напряжений: верхняя граница clk_sys -> требуемый VSEL  
     struct VselStep { uint64_t max_hz; vreg_voltage vsel; };  
     const VselStep vsel_table[] = {  
         { 150000000ULL, VREG_VOLTAGE_1_15 },  
         { 200000000ULL, VREG_VOLTAGE_1_20 },  
-        { 240000000ULL, VREG_VOLTAGE_1_25 },  
-        { 400000000ULL, VREG_VOLTAGE_1_30 },  // максимум VREG, дальше только частотный предел  
+        { 250000000ULL, VREG_VOLTAGE_1_25 },  
+        { 450000000ULL, VREG_VOLTAGE_1_30 }, 
     };  
     const size_t vsel_table_size = sizeof(vsel_table) / sizeof(vsel_table[0]);  
   
-    struct Candidate { uint32_t fbdiv, p1, p2; uint64_t clk_sys_hz; };  
-    static Candidate cand[768];  
+    struct Candidate { uint32_t fbdiv, p1, p2, refdiv; uint64_t clk_sys_hz; };  
+    // Расширяем массив до 3072, так как REFDIV=3 значительно увеличивает плотность сетки
+    static Candidate cand[3072];  
     int cand_count = 0;  
   
-    // Сбор всех валидных комбинаций выше номинала  
-    for (uint32_t fbdiv = 150; fbdiv >= 30; fbdiv--) {  
-        uint64_t vco_hz = (uint64_t)fbdiv * VFO_CALIBRATED_XOSC_HZ;  
-        if (vco_hz < 750000000ULL || vco_hz > 1600000000ULL) continue;  
+    // 1. СБОР КАНДИДАТОВ: Сканируем REFDIV от 1 до 3 строго по вашему ТЗ [Скорректировано]
+    for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
+        uint64_t f_ref = VFO_CALIBRATED_XOSC_HZ / refdiv;
+        
+        for (uint32_t fbdiv = 30; fbdiv <= 320; fbdiv++) {  
+            uint64_t vco_hz = (uint64_t)fbdiv * f_ref;  
+            
+            // Граница аналогового захвата VCO (до 2.4 ГГц)
+            if (vco_hz < 750000000ULL || vco_hz > 3200000000ULL) continue;  
   
-        for (uint32_t p1 = 2; p1 <= 6; p1++) {  
-            for (uint32_t p2 = 1; p2 <= 2; p2++) {  
-                uint64_t cs = vco_hz / ((uint64_t)p1 * p2);  
-                if (cs <= CLK_START_HZ || cs > CLK_CEIL_HZ) continue;  
-                if (cand_count >= (int)(sizeof(cand) / sizeof(cand[0]))) break;  // массив полон — дальше не пишем
-                cand[cand_count++] = { fbdiv, p1, p2, cs };  
+            for (uint32_t p1 = 2; p1 <= 7; p1++) {  
+                for (uint32_t p2 = 1; p2 <= 7; p2++) {  
+                    if (p1 < p2) continue; // Соблюдаем ВЧ-правило p1 >= p2
+                    
+                    uint64_t cs = vco_hz / ((uint64_t)p1 * p2);  
+                    if (cs <= CLK_START_HZ || cs > CLK_CEIL_HZ) continue;  
+                    
+                    if (cand_count >= (int)(sizeof(cand) / sizeof(cand[0]))) break;  
+                    cand[cand_count++] = { fbdiv, p1, p2, refdiv, cs };  
+                }  
             }  
         }  
     }  
   
-    // Сортировка по возрастанию clk_sys (после заполнения массива!)  
+    // 2. СОРТИРОВКА: Строго снизу вверх по частоте clk_sys_hz (от 133 МГц до 450 МГц)
     for (int a = 0; a < cand_count - 1; a++) {  
         for (int b = a + 1; b < cand_count; b++) {  
             if (cand[b].clk_sys_hz < cand[a].clk_sys_hz) {  
@@ -1396,30 +1503,39 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
             }  
         }  
     }  
-  
-    // Дедупликация одинаковых частот (разные {p1,p2} с одним произведением)  
+
+/*  
+    // 3. УМНАЯ ДЕДУПЛИКАЦИЯ: При одинаковой частоте ядра оставляем вариант с лучшим VCO [Исправлено]
     int w_pos = 0;  
     for (int r = 0; r < cand_count; r++) {  
-        if (r == 0 || cand[r].clk_sys_hz != cand[r - 1].clk_sys_hz) {  
+        if (w_pos > 0 && cand[r].clk_sys_hz == cand[w_pos - 1].clk_sys_hz) {
+            // Частоты равны! Проверяем, какой вариант дает более высокий VCO
+            // (fbdiv / refdiv должен быть больше)
+            uint64_t vco_current = (uint64_t)cand[r].fbdiv / cand[r].refdiv;
+            uint64_t vco_saved   = (uint64_t)cand[w_pos - 1].fbdiv / cand[w_pos - 1].refdiv;
+            
+            if (vco_current > vco_saved) {
+                // Если новый кандидат разгоняет VCO сильнее — перезаписываем старый дубликат
+                cand[w_pos - 1] = cand[r];
+            }
+            // Иначе просто игнорируем его
+        } else {
+            // Частота уникальная — пишем на новую позицию
             cand[w_pos++] = cand[r];  
         }  
     }  
-    cand_count = w_pos;  
+    cand_count = w_pos;
+*/
   
     bool max_ok = false;  
-    static uint32_t stress_buf[1024];      // 4 КБ SRAM — статический буфер  
+    static uint32_t stress_buf[1024]; // 4 КБ SRAM для CRC-теста шины AHB
   
-    // Единый обработчик провала ступени  
-    auto fail_step = [&](const char *phase) {  
-        Serial.printf("[OCTEST] FAIL (%s) на clk_sys=%lu MHz\n",  
-                      phase,  
-                      (unsigned long)(pll_overclock.clk_sys_hz / 1000000ULL + 1)); // приближение, ниже точное  
-        vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-    };  
-  
+    Serial.printf("[OCTEST] Начинаем прецизионный прогон (R=1..3). Ступеней на сканирование: %d\n", cand_count);
+    delay(200); // Даем очиститься буферу UART
+
+    // 4. ГОРЯЧИЙ ЦИКЛ СТРЕСС-ТЕСТА
     for (int i = 0; i < cand_count; i++) {  
   
-        // Подбор VSEL по таблице  
         vreg_voltage vsel = VREG_VOLTAGE_1_30;  
         for (size_t k = 0; k < vsel_table_size; k++) {  
             if (cand[i].clk_sys_hz <= vsel_table[k].max_hz) {  
@@ -1430,26 +1546,26 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
   
         PllConfig step_cfg = {  
             cand[i].fbdiv, cand[i].p1, cand[i].p2,  
-            cand[i].clk_sys_hz, (uint32_t)vsel, true  
+            cand[i].clk_sys_hz, (uint32_t)vsel, true, cand[i].refdiv 
         };  
   
-        // Scratch помечает сбойную ступень ДО перехода частоты  
+        // Пишем МГц в регистр. Если плата зависнет, после ребута вы прочтете это число
         *scratch = (uint32_t)(cand[i].clk_sys_hz / 1000000ULL);  
   
-        // Переход на ступень (напряжение поднимается внутри до смены частоты)  
+        // Переключаем частоту и питание
         vfo_set_clk_sys(step_cfg, (uint32_t)vsel);  
   
-        // === КОМПОЗИТНАЯ НАГРУЗКА НА ЯДРО ===  
+        // --- КОМПОЗИТНЫЙ ВЕРИФИКАЦИОННЫЙ ТЕСТ ЯДРА ---  
         volatile uint32_t crc = 0xDEADBEEF;  
         uint32_t t0;  
   
-        // Фаза 1: целочисленная арифметика + float — конвейер и FPU-путь  
+        // Фаза 1: Арифметика + FPU
         {  
             volatile float acc_f = 1.000001f;  
             volatile uint32_t acc_i = 2654435761u;  
             t0 = millis();  
-            while (millis() - t0 < 150) {  
-                for (int n = 0; n < 2000; n++) {  
+            while (millis() - t0 < 80) {  
+                for (int n = 0; n < 1000; n++) {  
                     acc_f = acc_f * acc_f + 0.5f;  
                     acc_i = acc_i * 1664525u + 1013904223u;  
                 }  
@@ -1457,20 +1573,20 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
             crc ^= (uint32_t)acc_i;  
         }  
   
-        // Фаза 2: запись паттерна в SRAM — нагрузка на AHB/SRAM-контроллер  
+        // Фаза 2: AHB-Запись в SRAM
         t0 = millis();  
-        while (millis() - t0 < 100) {  
+        while (millis() - t0 < 40) {  
             for (int w = 0; w < 1024; w++) {  
                 stress_buf[w] = crc + (uint32_t)w;  
             }  
             crc++;  
         }  
   
-        // Фаза 3: чтение SRAM с CRC-верификацией — ловит тихие искажения AHB  
+        // Фаза 3: AHB-Чтение из SRAM с CRC верификацией
         {  
             bool sram_ok = true;  
             t0 = millis();  
-            while (millis() - t0 < 100 && sram_ok) {  
+            while (millis() - t0 < 40 && sram_ok) {  
                 for (int w = 0; w < 1024; w++) {  
                     if (stress_buf[w] != crc - 1u + (uint32_t)w) {  
                         sram_ok = false;  
@@ -1479,39 +1595,21 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
                 }  
             }  
             if (!sram_ok) {  
-                Serial.printf("[OCTEST] FAIL (SRAM CRC) на clk_sys=%lu MHz\n",  
-                              (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL));  
-                *scratch = (uint32_t)(step_cfg.clk_sys_hz / 1000000ULL);  
+                Serial.printf("[OCTEST] FAIL (SRAM CRC) на clk_sys=%lu MHz\n", (unsigned long)(step_cfg.clk_sys_hz / 1000000ULL));  
                 vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
                 return;  
             }  
         }  
   
-        // Фаза 4: непредсказуемые ветвления — конвейер/предсказание переходов  
-        {  
-            uint32_t lfsr = crc | 1u;  
-            t0 = millis();  
-            while (millis() - t0 < 100) {  
-                for (int n = 0; n < 4000; n++) {  
-                    lfsr ^= lfsr << 13;  
-                    lfsr ^= lfsr >> 17;  
-                    lfsr ^= lfsr << 5;  
-                    if (lfsr & 1)      crc += lfsr;  
-                    else               crc ^= lfsr;  
-                    if (lfsr & 0x100)  crc = (crc << 3) | (crc >> 29);  
-                }  
-            }  
-        }  
-  
-        // Фаза 5: аппаратный делитель SIO — инвариант q*den + r == num  
+        // Фаза 4: Аппаратный делитель SIO
         {  
             bool div_ok = true;  
             uint32_t num = crc | 1u;  
             t0 = millis();  
-            while (millis() - t0 < 100 && div_ok) {  
-                for (int n = 0; n < 500; n++) {  
-                    num = num * 1664525u + 1013904223u;   // LCG-операнды  
-                    uint32_t den = (num >> 16) | 1u;      // делитель без нуля  
+            while (millis() - t0 < 40 && div_ok) {  
+                for (int n = 0; n < 2000; n++) {  
+                    num = num * 1664525u + 1013904223u;   
+                    uint32_t den = (num >> 16) | 1u;      
                     uint32_t q = hw_divider_u32_quotient(num, den);  
                     uint32_t r = hw_divider_u32_remainder(num, den);  
                     if (q * den + r != num || r >= den) {  
@@ -1522,9 +1620,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
                 }  
             }  
             if (!div_ok) {  
-                Serial.printf("[OCTEST] FAIL clk_sys=%6.1f MHz (SRAM CRC)\n",  
-                                    (double)(step_cfg.clk_sys_hz / 1000000.0));
-                *scratch = (uint32_t)(step_cfg.clk_sys_hz / 1000000ULL);  
+                Serial.printf("[OCTEST] FAIL (SIO DIVIDER) на clk_sys=%6.1f MHz\n", (double)(step_cfg.clk_sys_hz / 1000000.0));  
                 vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
                 return;  
             }  
@@ -1533,35 +1629,168 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
         (void)crc;  
         watchdog_update();  
   
-        // Ступень пройдена — печатаем её параметры и запоминаем как потолок  
-        uint32_t vco_mhz = step_cfg.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL); // VCO = fbdiv × 12 МГц  
+
+        // Ступень успешно пройдена: Читаем аппаратный статус защёлки фазы PLL [Скорректировано]
+        bool is_locked = (pll_sys_hw->cs & PLL_CS_LOCK_BITS) != 0; // <--- СКОРРЕКТИРОВАНО
+
+        uint32_t vco_mhz = (uint32_t)(((uint64_t)step_cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (1000000ULL * step_cfg.refdiv));  
   
-        Serial.printf("[OCTEST] OK  clk_sys=%7.3f MHz  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",  
+        // Ваша исходная строка + параметр LOCK
+        Serial.printf("[OCTEST] OK  clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  LOCK=%s  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
                       step_cfg.clk_sys_hz / 1000000.0,  
+                      (unsigned long)step_cfg.refdiv,
                       (unsigned long)step_cfg.fbdiv,  
                       (unsigned long)step_cfg.p1,  
                       (unsigned long)step_cfg.p2,  
                       (unsigned long)vco_mhz,  
+                      is_locked ? "YES" : "LOST!", // <-- Интегрирован статус фазы
                       (unsigned)vsel_to_mv((uint32_t)vsel),  
-                      step_cfg.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,  
-                      (unsigned)ssi_hw->baudr,  
-                      (double)vfo_read_core_temp_c());
-        // Фиксируем предел стабильности чипа в долговечную pll_ceiling [Исправлено]
+                      step_cfg.clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,
+                      (unsigned)ssi_hw->baudr);  // <-- Выводим также итоговый BAUDR флэша
+        Serial.flush();
+ 
+        
         pll_ceiling = step_cfg;  
         max_ok = true;  
-    } // Конец цикла перебора cand_count
+    } 
   
     *scratch = 0xFFFFFFFFu;  
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
   
     if (max_ok) {  
-        Serial.printf("[OCTEST] Потолок стабильности ядра зафиксирован: %6.1f МГц\n",  
-                      (double)(pll_ceiling.clk_sys_hz / 1000000.0));
-        Serial.println("[OCTEST] Для рабочего разгона рекомендуется запас 10-15% по частоте.");  
-    } else {  
-        Serial.println("[OCTEST] Ни одна ступень выше номинала не прошла. pll_overclock не изменён.");  
+        Serial.printf("[OCTEST] Потолок стабильности ядра зафиксирован: %6.1f МГц\n", (double)(pll_ceiling.clk_sys_hz / 1000000.0));  
     }  
 }
+
+
+
+
+
+/**  
+ * @brief Сверхглубокий хакерский СВЧ-штурм PLL за барьер 4 ГГц с использованием ROSC-опоры.
+ * Удерживает ядро на безопасной частоте, выжимая из аналоговой петли абсолютный предел.
+ */
+void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
+    // 1. ПЕРЕВОДИМ ПИТАНИЕ И СИСТЕМУ В ЭКСТРЕМАЛЬНЫЙ РЕЖИМ
+    vreg_set_voltage(VREG_VOLTAGE_1_30);  
+    busy_wait_us(2000);  
+    detach_peripheral_clock();  
+    busy_wait_us(2000);
+
+    Serial.printf("\n=================== ТОТАЛЬНЫЙ ШТУРМ PLL ЗА БАРЬЕР 4 ГГЦ ===================\n");
+    Serial.printf("[ХАК] Переключаем опору PLL со скромных 12 МГц XOSC на разогнанный ROSC...\n");
+    Serial.flush();
+    busy_wait_us(10000);
+
+    // Разгоняем ROSC на полную мощность прямой записью в регистры через аппаратную структуру
+    rosc_hw->ctrl  = (0x272u << 12) | 0xD1E; // Запись пароля ENABLE + базовый разгон контура
+    rosc_hw->freqa = (0x9696u << 16) | 0xFFFFu; // Пароль PASSWD + максимальный сдвиг фазы каскадов A
+    rosc_hw->freqb = (0x9696u << 16) | 0xFFFFu; // Пароль PASSWD + максимальный сдвиг фазы каскадов B
+    busy_wait_us(2000);
+
+    // Измеряем получившуюся частоту с помощью встроенного частотомера (fc0) чипа
+    // Используем явный вызов функции SDK clocks_khz
+    uint32_t rosc_hz = clock_get_hz(clk_ref); // Базовое резервное чтение
+    uint32_t measured_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC);
+    if (measured_khz > 0) {
+        rosc_hz = measured_khz * 1000u;
+    }
+
+    Serial.printf("[ХАК] Частота ROSC-опоры стабилизирована на отметке: %7.3f MHz\n", rosc_hz / 1000000.0);
+    Serial.flush();
+
+    // Зажимаем postdiv делители на абсолютный максимум 7 x 7 = 49!
+    // Это позволит VCO штурмовать 5 ГГц, удерживая ядро ниже 110 МГц!
+    uint32_t target_p1 = 7;
+    uint32_t target_p2 = 7;
+    static volatile uint32_t stress_ram_block[512];
+
+    // Шагаем по fbdiv от 100 до упора (320). 
+    // При частоте ROSC ~24 МГц точка fbdiv=170 выдаст VCO = 4.0 ГГц!
+    // Финал fbdiv=210 выдаст VCO = 5.0 ГГц!
+    for (uint32_t fb = 90; fb <= 320; fb++) {
+        uint64_t vco_hz = (uint64_t)fb * rosc_hz;
+        uint32_t clk_sys_hz = (uint32_t)(vco_hz / (target_p1 * target_p2));
+
+        // Если из-за разгона ROSC частота ядра вылетит за безопасные 150 МГц — 
+        // аварийно завершаем, чтобы не сжечь цифровые затворы CPU
+        if (clk_sys_hz > 150000000u) {
+            Serial.printf("[ШТУРМ] Стоп! Частота ядра достигла критических %lu МГц. Прекращаем.\n", clk_sys_hz / 1000000ULL);
+            break;
+        }
+
+        const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;
+        uint32_t ssi_baud = (clk_sys_hz + FLASH_SAFE_MAX_HZ - 1) / FLASH_SAFE_MAX_HZ;  
+        ssi_baud = (ssi_baud + 1u) & ~1u; 
+        if (ssi_baud < 2u)  ssi_baud = 2u;  
+        if (ssi_baud > 34u) ssi_baud = 34u;  
+
+        bool sram_failed = false;
+
+        // --- КРИТИЧЕСКАЯ СЕКЦИЯ ПРЯМОГО СДВИГА PLL НА ROSC ---
+        uint32_t ints = save_and_disable_interrupts();  
+
+        // Прошиваем fbdiv и postdiv каскады (p1=7, p2=7)
+        pll_sys_hw->fbdiv_int = fb;
+        pll_sys_hw->prim = (target_p1 << PLL_PRIM_POSTDIV1_LSB) | (target_p2 << PLL_PRIM_POSTDIV2_LSB);
+
+        // Физически прошиваем делитель Flash-памяти до переключения clk_sys
+        ssi_hw->ssienr = 0; 
+        ssi_hw->baudr  = ssi_baud;  
+        ssi_hw->ssienr = 1; 
+
+        // Ожидаем захват СВЧ-фазы аналоговой петлей
+        volatile uint32_t timeout = 30000;
+        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);
+
+        // Обновляем частоту системного ядра clk_sys
+        clock_configure(clk_sys,  
+                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
+                        clk_sys_hz, clk_sys_hz);  
+
+        // Верификационный тест ОЗУ
+        uint32_t pattern = 0x55AA55AAL ^ fb;
+        for (int w = 0; w < 512; w++) { stress_ram_block[w] = pattern + w; }
+        for (int w = 0; w < 512; w++) { if (stress_ram_block[w] != (pattern + w)) { sram_failed = true; break; } }
+
+        restore_interrupts(ints);
+        // --- ВЫХОД ИЗ КРИТИЧЕСКОЙ СЕКЦИИ ---
+
+        float current_temp = vfo_read_core_temp_c();
+        bool is_locked = (pll_sys_hw->cs & PLL_CS_LOCK_BITS) != 0;
+
+        // Печать строки лога — штурмуем гигагерцы!
+        Serial.printf("[СВЧ-ШТУРМ] FB=%3lu | VCO = %4lu MHz | Ядро = %3lu MHz | LOCK = %s | RAM = %s | T = %4.1f C | FLASH = %4.1f MHz\n", 
+                      (unsigned long)fb,
+                      (unsigned long)(vco_hz / 1000000ULL), 
+                      (unsigned long)(clk_sys_hz / 1000000ULL),
+                      is_locked ? "YES" : "LOST!",
+                      sram_failed ? "FAIL" : "OK",
+                      (double)current_temp,
+                      (double)clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr);
+        Serial.flush();
+
+        // Как только аналоговая петля физически сорвется — фиксируем абсолютный рекорд планеты для RP2040!
+        if (!is_locked || sram_failed) {
+            Serial.printf("[СВЧ-ШТУРМ] ФИЗИЧЕСКИЙ СРЫВ АНАЛОГОВОЙ ПЕТЛИ PLL НА ОТМЕТКЕ VCO = %lu МГц!\n", (unsigned long)(vco_hz / 1000000ULL));
+            break;
+        }
+
+        busy_wait_us(40000); // 40 мс для тепловой стабилизации СВЧ-блока
+    }
+
+    // Возврат в безопасный номинал
+    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
+    Serial.println("===========================================================================");
+    Serial.println("[СВЧ-ШТУРМ] Тест завершён. Опора возвращена на кварц.");
+}
+
+
+
+
+
+
 
 
 

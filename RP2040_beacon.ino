@@ -487,6 +487,8 @@ void setup() {
 
   init_flash_disk();   // инициализировать флэш-диск для Windows
 
+  vfo_encoder_init();  // энкодер
+
 
   // Инициализация пинов питания шин, если они назначены (не равны -1)
   if (pin_pwr_si != -1) { pinMode(pin_pwr_si, OUTPUT); digitalWrite(pin_pwr_si, LOW); }
@@ -528,6 +530,9 @@ void loop() {
   #endif
   
   watchdog_update();  // сброс сторожевого таймера
+
+  vfo_encoder_poll(); // энкодер
+  // перестройка делается в poll(), не в прерывании: boost-цикл переконфигурирует PLL и перезапускает Core 1, из ISR это запрещено.
   
   // Сброс предпускового флага в начале цикла
   tx_launching = false;

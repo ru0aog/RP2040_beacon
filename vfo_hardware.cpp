@@ -439,8 +439,9 @@ void vfo_clk_boost_exit(void) {
     if (!clk_boosted) return;  
   
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
-
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
+    //vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);
+    vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,  
+                        (uint64_t)(cached_step_hz * 1000.0));
     Serial.println("[BOOST] пересчёт таблицы тонов");
   
     // Пересчёт таблицы тонов обратно под номинальную clk_sys  
@@ -1435,7 +1436,9 @@ void vfo_clk_thermal_guard(void) {
     if (!thermal_throttled && temp >= VFO_THROTTLE_HI_C) {  
         // Аварийный откат на номинал
         vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-        vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
+        //vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
+        vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,  
+                            (uint64_t)(cached_step_hz * 1000.0));
         vfo_set_tone_instant(0);  
         clk_boosted = false;  
         thermal_throttled = true;  
@@ -1446,7 +1449,9 @@ void vfo_clk_thermal_guard(void) {
     else if (thermal_throttled && temp <= VFO_THROTTLE_LO_C) {  
         // Кристалл остыл — ВОЗВРАЩАЕМ АКТИВНЫЙ ПРОФИЛЬ ТЕКУЩЕЙ СЕССИИ (pll_overclock) [Исправлено]
         vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);  
-        vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
+        //vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);
+        vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,  
+                            (uint64_t)(cached_step_hz * 1000.0));
         vfo_set_tone_instant(0);  
         clk_boosted = true;  
         thermal_throttled = false;  
@@ -1804,7 +1809,88 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
 
 
 
+// ==== Энкодер: глобальное состояние ====  
+volatile uint32_t vfo_current_freq_hz  = VFO_ENC_TEST_FREQ_HZ; // текущая рабочая частота 
+volatile uint32_t vfo_tune_step_hz     = 100;       // глобальный шаг перестройки, Гц  
+volatile int32_t  enc_pending_steps    = 0;         // накопленные тики энкодера (ISR)  
+static bool       enc_tx_active        = false;
+  
+// Таблица квадратурного декодера (Gray-code state machine).  
+// Индекс = (prev_AB << 2) | cur_AB. Значения: +1/-1 — шаг, 0 — дребезг/нет события.  
+static const int8_t enc_lut[16] = {  
+     0, -1, +1,  0,  
+    +1,  0,  0, -1,  
+    -1,  0,  0, +1,  
+     0, +1, -1,  0  
+};  
+  
+// Общий ISR для обоих пинов. Вызывается при любом изменении A или B.  
+// Только атомарные операции — никакого Serial/PLL/флэша из прерывания.  
+static void __not_in_flash_func(enc_isr)(void) {  
+    static uint8_t prev_ab = 0;  
+    uint8_t ab = (uint8_t)((gpio_get(ENC_PIN_A) << 1) | gpio_get(ENC_PIN_B));
+    int8_t d = enc_lut[(prev_ab << 2) | ab];  
+    prev_ab = ab;  
+    enc_pending_steps += d;   // накапливаем; обработает vfo_encoder_poll()  
+}  
+  
+void vfo_encoder_init(void) {  
+    pinMode(ENC_PIN_A, INPUT_PULLUP);  
+    pinMode(ENC_PIN_B, INPUT_PULLUP);
+    pinMode(VFO_ENC_SW_PIN, INPUT_PULLUP); 
+    attachInterrupt(digitalPinToInterrupt(ENC_PIN_A), enc_isr, CHANGE);  
+    attachInterrupt(digitalPinToInterrupt(ENC_PIN_B), enc_isr, CHANGE);
+}  
+  
+// Вызывать из loop() каждую итерацию — само переключение частоты тяжёлое  
+// (PLL-скан + перезапуск Core 1), поэтому вынесено из ISR.  
+void vfo_encoder_poll(void) {  
+    // ---- 1. Кнопка: toggle генерации тестовой частоты ----  
+    static bool     sw_last   = true;   // INPUT_PULLUP: нажато = LOW  
+    static uint32_t sw_deb_ms = 0;  
+    bool sw_now = gpio_get(VFO_ENC_SW_PIN);  
+  
+    if (sw_now != sw_last && (millis() - sw_deb_ms) >= VFO_ENC_DEBOUNCE_MS) {  
+        sw_deb_ms = millis();  
+        sw_last   = sw_now;  
+        if (!sw_now) {                       // фронт нажатия  
+            if (!enc_tx_active) {  
+                // ВКЛ: поднять разгон под тестовую частоту и открыть выход  
+                vfo_clk_boost_enter(VFO_ENC_TEST_FREQ_HZ);  
+                vfo_operation_set(true);  
+                enc_tx_active = true;  
+                Serial.printf("[ENC] TX ON  %lu Hz\n",  
+                              (unsigned long)VFO_ENC_TEST_FREQ_HZ);  
+            } else {  
+                // ВЫКЛ: закрыть выход, вернуть номинальную шину  
+                vfo_operation_set(false);  
+                vfo_clk_boost_exit();  
+                enc_tx_active = false;  
+                Serial.printf("[ENC] TX OFF\n");  
+            }  
+        }  
+    }  
+  
+    // ---- 2. Перестройка по тикам энкодера ----  
+    int32_t steps;  
+    noInterrupts();  
+    steps = enc_pending_steps;  
+    enc_pending_steps = 0;  
+    interrupts();  
+    if (steps == 0) return;  
+  
+    vfo_current_freq_hz += (uint32_t)(steps * (int32_t)vfo_tune_step_hz);  
+    if (vfo_current_freq_hz < 1000000UL) vfo_current_freq_hz = 1000000UL;  
+    if (vfo_current_freq_hz > 30000000UL) vfo_current_freq_hz = 30000000UL;
 
+    // если генерация активна — перестраиваем на лету  
+    if (enc_tx_active) {  
+        vfo_clk_boost_exit();                    // номинал + clk_boosted=false  
+        vfo_clk_boost_enter(vfo_current_freq_hz); // новый скан + перезапуск Core 1  
+        vfo_operation_set(true);                  // boost_exit не трогает пин, но подстрахуемся  
+    }
+
+}
 
 
 

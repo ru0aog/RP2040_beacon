@@ -61,4 +61,25 @@ void vfo_clk_thermal_guard(void);
 void vfo_find_max_stable_clock(void);
 void vfo_test_pll_extreme_shurm(void);
 
+
+// --- Энкодер перестройки частоты ---  
+#define ENC_PIN_A            20   // канал A (фаза), INPUT_PULLUP  
+#define ENC_PIN_B            21   // канал B (фаза), INPUT_PULLUP
+#define VFO_ENC_SW_PIN       19        // кнопка (нажатие = замыкание на GND)  
+#define VFO_ENC_TEST_FREQ_HZ 3600000UL // частота генерации по кнопке 
+#define VFO_ENC_DEBOUNCE_MS  30     // щелчков на оборот (справочно, не критично)
+  
+// Шаг перестройки на один щелчок энкодера, Гц. Задаётся снаружи,  
+// можно менять на лету (например, командой из консоли).  
+extern volatile int32_t  vfo_tuning_step_hz;  
+// Текущая рабочая частота VFO, Гц — глобальная точка правды для ISR.  
+extern volatile uint32_t vfo_current_freq_hz;  
+// Накопленные тики энкодера со времени последней обработки.  
+extern volatile int32_t  enc_pending_steps;  
+  
+void vfo_encoder_init(void);          // pinMode + attachInterrupt, вызывать из setup()  
+void vfo_encoder_poll(void);          // обработка накопленных тиков, вызывать из loop()
+
+
+
 #endif // VFO_HARDWARE_H

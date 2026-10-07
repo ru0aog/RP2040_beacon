@@ -246,7 +246,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
         vreg_set_voltage((vreg_voltage)vsel);  
         busy_wait_us(500);  
     }  
-  
+
     detach_peripheral_clock();  
     uint32_t ints_status = save_and_disable_interrupts();  
   
@@ -257,7 +257,17 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                     VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
   
     uint32_t vco_nominal_hz = (uint32_t)((VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);  
-    
+
+
+// перед pll_init — что реально стоит в опоре PLL (CS bits 5:0 = refdiv)  
+#if VFO_PLL_DEBUG  
+    Serial.printf("[PLL] pre: CS=0x%08lX refdiv_hw=%lu XOSC=%lu kHz\n",  
+                  (unsigned long)pll_sys_hw->cs,  
+                  (unsigned long)(pll_sys_hw->cs & PLL_CS_REFDIV_BITS),  
+                  (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC));  
+#endif  
+
+
     pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
 
     // === АППАРАТНЫЙ МОНИТОРИНГ ЗАЩЁЛКИ ФАЗЫ PLL (LOCK BIT) ===
@@ -287,10 +297,70 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
                     target_clk_hz, target_clk_hz);  
   
-    restore_interrupts(ints_status);  
-    current_clk_sys_hz = target_clk_hz;
+    restore_interrupts(ints_status);
 
+ 
+    // --- Самопроверка: при промахе повторяем ВЕСЬ цикл переключения ---  
+    bool locked_ok = false;  
+    for (int attempt = 0; attempt < 3; attempt++) {  
+        busy_wait_us(50);  
+        uint32_t meas_khz   = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);  
+        uint32_t expect_khz = cfg.clk_sys_hz / 1000u;  
+        if (meas_khz > expect_khz * 97u / 100u &&  
+            meas_khz < expect_khz * 103u / 100u) {  
+            locked_ok = true;  
+            break;  
+        }  
 #if VFO_PLL_DEBUG  
+        Serial.printf("[PLL] MISMATCH: meas=%u kHz expect=%u kHz — retry %d\n",  
+                      (unsigned)meas_khz, (unsigned)expect_khz, attempt);  
+#endif  
+        // полный ре-секвенс: назад на XOSC, переинициализация PLL, вперёд на PLL_SYS  
+        clock_configure(clk_sys,  
+                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
+                        VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
+        pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
+        timeout = 20000;  
+        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);  
+        clock_configure(clk_sys,  
+                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
+                        target_clk_hz, target_clk_hz);  
+    }  
+  
+    if (!locked_ok) {  
+        // 3 промаха подряд — безопасный откат на номинал,  
+        // чтобы таблица тонов не считалась от несуществующей частоты  
+#if VFO_PLL_DEBUG  
+        Serial.printf("[PLL] FAIL x3 — fallback to nominal\n");  
+#endif  
+        clock_configure(clk_sys,    
+                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,    
+                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,    
+                        VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);    
+        pll_init(pll_sys, pll_nominal.refdiv,    
+                 (uint32_t)(VFO_CALIBRATED_XOSC_HZ * pll_nominal.fbdiv / pll_nominal.refdiv),    
+                 pll_nominal.p1, pll_nominal.p2);    
+        timeout = 20000;    
+        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);    
+        clock_configure(clk_sys,    
+                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,    
+                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,    
+                        pll_nominal.clk_sys_hz, pll_nominal.clk_sys_hz);    
+        current_clk_sys_hz = pll_nominal.clk_sys_hz;    
+        return;    
+    }
+  
+    current_clk_sys_hz = cfg.clk_sys_hz;
+
+
+#if VFO_PLL_DEBUG
+
+Serial.printf("[PLL] sys_ctrl=0x%08lX selected=0x%02lX\n",  
+                  (unsigned long)clocks_hw->clk[clk_sys].ctrl,  
+                  (unsigned long)clocks_hw->clk[clk_sys].selected);
+
     if (!pll_locked) {  
         Serial.printf("[PLL] !!! NO LOCK: fbdiv=%lu target=%lu Hz — выход НЕДОСТОВЕРЕН\n",  
                     (unsigned long)cfg.fbdiv, (unsigned long)target_clk_hz);
@@ -311,9 +381,9 @@ Serial.printf("[PLL] CS=0x%08lX (refdiv=%lu)  FB=%lu  PRIM=0x%08lX\n",
               (unsigned long)pll_sys_hw->fbdiv_int,  
               (unsigned long)pll_sys_hw->prim);
 #endif 
+  
+    current_clk_sys_hz = cfg.clk_sys_hz;  
 }
-
-
 
 
 
@@ -1225,16 +1295,26 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz); 
     vfo_set_tone_instant(0);
 
-    // Диагностический вывод рантайм-телеметрии в Serial
-    #if VFO_PLL_DEBUG
-        VfoParameters real_base_params = ifkp_tones[0];
-        Serial.printf("\n--- VFO Runtime Diagnostics ---\n");
-        Serial.printf("Target Freq: %u Hz (Grid: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);
-        Serial.printf("clk_sys    : %u Hz (Физический захват PLL: fbdiv=%lu, p1=%lu, p2=%lu)\n", 
-                      current_clk_sys_hz, (unsigned long)target_pll.fbdiv, (unsigned long)target_pll.p1, (unsigned long)target_pll.p2);
-        Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);
-        Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);
-        Serial.printf("-------------------------------\n");
+// Диагностический вывод рантайм-телеметрии в Serial  
+    #if VFO_PLL_DEBUG  
+        VfoParameters real_base_params = ifkp_tones[0];  
+        Serial.printf("\n--- VFO Runtime Diagnostics ---\n");  
+        Serial.printf("Target Freq: %u Hz (Grid: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);  
+        Serial.printf("clk_sys    : %u Hz (Физический захват PLL: refdiv=%lu, fbdiv=%lu, p1=%lu, p2=%lu)\n",  
+                      current_clk_sys_hz,  
+                      (unsigned long)target_pll.refdiv,  
+                      (unsigned long)target_pll.fbdiv,  
+                      (unsigned long)target_pll.p1,  
+                      (unsigned long)target_pll.p2);  
+        // Фактическое состояние регистров PLL на момент печати (refdiv — биты [5:0] CS)  
+        Serial.printf("PLL CS     : 0x%08lX (refdiv=%lu)  FB=%lu  PRIM=0x%08lX\n",  
+                      (unsigned long)pll_sys_hw->cs,  
+                      (unsigned long)(pll_sys_hw->cs & PLL_CS_REFDIV_BITS),  
+                      (unsigned long)pll_sys_hw->fbdiv_int,  
+                      (unsigned long)pll_sys_hw->prim);  
+        Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);  
+        Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);  
+        Serial.printf("-------------------------------\n");  
     #endif
 
 #ifdef VFO_DITHER_ON_CORE1
@@ -1733,9 +1813,40 @@ void vfo_encoder_poll(void) {
                 vfo_set_tone_instant(0);  
                 vfo_operation_set(true);  
                 enc_tx_active = true;  
+
                 Serial.printf("[ENC] TX ON  %lu Hz (clk=%lu kHz)\n",  
                               (unsigned long)vfo_current_freq_hz,  
                               (unsigned long)(current_clk_sys_hz / 1000ULL));  
+
+                uint32_t clkdiv_now = lo_pio->sm[lo_sm].clkdiv;  
+                uint32_t meas_clk   = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
+                uint32_t meas_xosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC) * 1000u;  
+                uint32_t meas_rosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC) * 1000u;  
+                uint32_t sys_ctrl   = clocks_hw->clk[clk_sys].ctrl;  
+                
+                Serial.printf("[DBG] CLKDIV=0x%08lX (int=%lu frac=%lu)  tone[0].int=%lu frac=%lu  "  
+                            "active=%d changed=%d  clk_meas=%lu kHz  CS=0x%08lX FB=%lu PRIM=0x%08lX\n",  
+                            (unsigned long)clkdiv_now,  
+                            (unsigned long)(clkdiv_now >> 16),  
+                            (unsigned long)((clkdiv_now >> 8) & 0xFF),  
+                            (unsigned long)ifkp_tones[0].pio_int,  
+                            (unsigned long)ifkp_tones[0].pio_frac,  
+                            (int)current_active_tone, (int)tone_changed,  
+                            (unsigned long)(meas_clk / 1000u),  
+                            (unsigned long)pll_sys_hw->cs,  
+                            (unsigned long)pll_sys_hw->fbdiv_int,  
+                            (unsigned long)pll_sys_hw->prim);  
+                
+                // Фактическая опора PLL и состояние мультиплексора clk_sys  
+                Serial.printf("[DBG2] XOSC=%u kHz  ROSC=%u kHz  clk_sys.ctrl=0x%08lX (src=%lu aux=%lu)  sys_div=0x%08lX (int=%lu)\n",  
+                            frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC),  
+                            frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC),  
+                            (unsigned long)clocks_hw->clk[clk_sys].ctrl,  
+                            (unsigned long)(clocks_hw->clk[clk_sys].ctrl & CLOCKS_CLK_SYS_CTRL_SRC_BITS),  
+                            (unsigned long)((clocks_hw->clk[clk_sys].ctrl & CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS) >> CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB),  
+                            (unsigned long)clocks_hw->clk[clk_sys].div,  
+                            (unsigned long)(clocks_hw->clk[clk_sys].div >> 8));   // INT-поле clk_sys.div: биты 8..23
+
             } else {  
                 // ВЫКЛ: закрыть ключ, вернуть шину на номинал.  
                 vfo_operation_set(false);  
@@ -1779,9 +1890,41 @@ void vfo_encoder_poll(void) {
         vfo_hardware_init(vfo_current_freq_hz, 10.0);  
         vfo_set_tone_instant(0);  
         vfo_operation_set(true);              // init мог переоткрыть/закрыть пин  
+        
         Serial.printf("[ENC] RETUNE %lu Hz (clk=%lu kHz)\n",  
                       (unsigned long)vfo_current_freq_hz,  
                       (unsigned long)(current_clk_sys_hz / 1000ULL));  
+  
+        // Измеренная частота шины + фактические регистры PLL и делителя SM  
+        uint32_t clkdiv_now = lo_pio->sm[lo_sm].clkdiv;  
+        uint32_t meas_clk   = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
+        uint32_t meas_xosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC) * 1000u;  
+        uint32_t meas_rosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC) * 1000u;  
+        uint32_t sys_ctrl   = clocks_hw->clk[clk_sys].ctrl;  
+        
+        Serial.printf("[DBG] CLKDIV=0x%08lX (int=%lu frac=%lu)  tone[0].int=%lu frac=%lu  "  
+                    "active=%d changed=%d  clk_meas=%lu kHz  CS=0x%08lX FB=%lu PRIM=0x%08lX\n",  
+                    (unsigned long)clkdiv_now,  
+                    (unsigned long)(clkdiv_now >> 16),  
+                    (unsigned long)((clkdiv_now >> 8) & 0xFF),  
+                    (unsigned long)ifkp_tones[0].pio_int,  
+                    (unsigned long)ifkp_tones[0].pio_frac,  
+                    (int)current_active_tone, (int)tone_changed,  
+                    (unsigned long)(meas_clk / 1000u),  
+                    (unsigned long)pll_sys_hw->cs,  
+                    (unsigned long)pll_sys_hw->fbdiv_int,  
+                    (unsigned long)pll_sys_hw->prim);  
+        
+        // Фактическая опора PLL и состояние мультиплексора clk_sys  
+        Serial.printf("[DBG2] XOSC=%u kHz  ROSC=%u kHz  clk_sys.ctrl=0x%08lX (src=%lu aux=%lu)  sys_div=0x%08lX (int=%lu)\n",  
+                    frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC),  
+                    frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC),  
+                    (unsigned long)clocks_hw->clk[clk_sys].ctrl,  
+                    (unsigned long)(clocks_hw->clk[clk_sys].ctrl & CLOCKS_CLK_SYS_CTRL_SRC_BITS),  
+                    (unsigned long)((clocks_hw->clk[clk_sys].ctrl & CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS) >> CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB),  
+                    (unsigned long)clocks_hw->clk[clk_sys].div,  
+                    (unsigned long)(clocks_hw->clk[clk_sys].div >> 8));   // INT-поле clk_sys.div: биты 8..23
+
     }  
     // TX выключен — частота просто обновлена; следующее нажатие  
     // кнопки стартует на новой частоте.  

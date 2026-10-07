@@ -293,7 +293,9 @@ static void __not_in_flash_func(detach_peripheral_clock)() {
  *       регистр пишется безопасно; после возврата clk_sys на PLL_SYS  
  *       флэш-контроллер уже работает на новом делителе.  
  */  
-static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel) {  
+static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32_t vsel) {
+    PllConfig cfg = cfg_in;  
+    if (cfg.refdiv == 0) cfg.refdiv = 1;   // защита от неинициализированного поля
     uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.refdiv * cfg.p1 * cfg.p2));  
     bool is_overclocking = (target_clk_hz > current_clk_sys_hz);  
   

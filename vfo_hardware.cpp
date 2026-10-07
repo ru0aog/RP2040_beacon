@@ -40,48 +40,6 @@
  *  
  *  МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL И ДВУХЪЯДЕРНЫЙ ДИЗЕРИНГ  
  *  -----------------------------------------------------  
- 
- *     и делители (p1, p2). Подбирает частоту тактирования clk_sys (100..133 МГц)  
- *     так, чтобы минимизировать остаток 32-битного шага dds_step (первично)  
- *     и остаток pio_frac (вторично).  
- *  2. Дизеринг на Core 1: Высокоскоростной регистровый Си-конвейер (VFO_DITHER_FAST)  
- *     работает в бесконечном цикле на изолированном ядре. Каждую итерацию  
- *     производится расчет Delta-Sigma модуляции 2-го порядка (MASH-1-1)  
- *     с инъекцией 4-битного псевдослучайного шума (Xorshift32) для декорреляции  
- *     спектра и подавления побочных спуров. Результат атомарно пишется напрямую  
- *     в регистр clkdiv автомата PIO.  
- *  
- *  ДВА ЯДРА И ГОРЯЧИЙ ЦИКЛ  
- *  При VFO_DITHER_ON_CORE1 дизеринг крутится в бесконечном цикле на Core 1  
- *  (vfo_core1_entry). Единственная запись за итерацию — STR в регистр clkdiv  
- *  PIO через шину периферии; она вместе с переходом цикла задаёт нижний  
- *  предел периода, поэтому потолок F_s_dither при clk_sys ~130 МГц — единицы  
- *  МГц. Ветка VFO_DITHER_FAST держит все состояния в регистрах  
- *  ради максимальной F_s_dither; эталонная медленная Си-ветка (else) прогоняет  
- *  состояние через глобальное ОЗУ и служит для сверки.  
- *  
- *  СИНХРОНИЗАЦИЯ  
- *  Обмен Core0<->Core1 (dds_step, target_pio_int/frac8, tone_changed) защищён  
- *  аппаратным спинлоком vfo_spin_lock. Флаг tone_changed опрашивается каждую  
- *  итерацию, но спинлок берётся только в момент фактической смены тона.  
- *  Все функции горячего пути помечены __not_in_flash_func и работают с целыми.  
- *  
- *  ЗНАКОВАЯ НОРМАЛИЗАЦИЯ (критично)  
- *  total_correction MASH-2 может быть отрицательным (-1). current_frac/current_int  
- *  строго int32_t: применяется арифметический сдвиг (asrs) и маска 0xFF, иначе  
- *  логический сдвиг испортил бы clkdiv на итерациях с отрицательной коррекцией.  
- *  
- *  СМЕНА ЧАСТОТЫ / ТОНА  
- *  Смена тона внутри сессии (RTTY mark/space, IFKP) не перезапускает Core 1 и  
- *  не трогает clk_sys — F_s_dither постоянна. Смена базовой частоты диапазона  
- *  = полный цикл reset -> переконфигурация clk_sys (pll_init/clock_configure) ->  
- *  relaunch Core 1; при этом F_s_dither меняется вместе с выбранной clk_sys.  
- *  Отдельной регулируемой «частоты шины» нет — периферия тактируется от clk_sys.  
- *  
- *  ПРЕДЕЛЫ СПЕКТРА  
- *  Дизеринг и автотюн чистят ближнюю зону только пока делитель D достаточно  
- *  велик. У D ~= 2 (10 м) шаг сетки ~= десятки кГц неустраним параметрами софта.  
- *  Дальние горбы MASH и гармоники меандра — задача аналогового выходного ФНЧ.  
  * ============================================================================  
  */
 
@@ -115,6 +73,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
 
 // Добавлен упреждающий прототип Core 1, теперь vfo_clk_boost_enter сможет его вызвать!
 static void __not_in_flash_func(vfo_core1_entry)();
+
+void vfo_clk_boost_arm(void);
 
 static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); 
 static vreg_voltage vsel_for(uint64_t clk_hz);
@@ -185,7 +145,12 @@ static vreg_voltage vsel_for(uint64_t clk_hz) {
 }
 
 
-
+/** @brief Взвести флаг BOOST до следующего vfo_hardware_init()/boost_enter().  
+ *  Используется энкодером, чтобы init выбрал оптимальный PLL-скан,  
+ *  а не номинал 133 МГц. Атомарно для RP2040 (single-core write). */  
+void vfo_clk_boost_arm(void) {  
+    clk_boosted = true;  
+}
 
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
@@ -249,22 +214,6 @@ static uint32_t cached_base_freq_hz = 3500000;
  * безопасный источник (кварцевый резонатор XOSC 12 МГц) и фактически  
  * изолирует периферию (UART, SPI, USB и т.д.) от домена `clk_sys`  
  * на время перепрограммирования `pll_sys`.  
- *  
- * Это обязательный шаг при ретюнинге PLL: когда `pll_sys`  
- * сбрасывается (`reset_block`/`unreset_block_wait`) и меняет частоту  
- * clk_sys, периферия, жёстко привязанная к системной шине, получила бы  
- * скачок тактовой частоты и сбой (потеря baud rate UART, срыв USB).  
- * Детач гарантирует стабильные 12 МГц для clk_peri на всём интервале  
- * переконфигурации.  
- *  
- *       `save_and_disable_interrupts()` и каскадом переинициализации  
- *       `pll_sys`. После возврата clk_sys на PLL периферийный домен  
- *       остаётся на XOSC — это осознанно: clk_peri не зависит от  
- *       автотюна системной частоты.  
- * @note Оперирует регистрами подсистемы CLOCKS/PLL напрямую;  
- *       не является thread-safe вне критической секции инициализации.  
- *  
-
  */
 static void __not_in_flash_func(detach_peripheral_clock)() {  
     clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * 1000000, 48 * 1000000);  
@@ -286,12 +235,6 @@ static void __not_in_flash_func(detach_peripheral_clock)() {
  * QSPI-флэшей (~104-133 МГц) и убивает XIP-доступ. Делитель выбирается  
  * так, чтобы SCK <= VFO_FLASH_SCK_MAX_HZ; BAUDR на RP2040 всегда чётный.  
  *  
- * @param cfg   Конфигурация PLL: fbdiv, p1, p2, clk_sys_hz, vsel, is_oc  
- * @param vsel  Целевое напряжение ядра (например, VREG_VOLTAGE_1_20)  
- *  
- * @note Смена BAUDR выполняется ПОКА clk_sys ещё на XOSC (12 МГц) —  
- *       регистр пишется безопасно; после возврата clk_sys на PLL_SYS  
- *       флэш-контроллер уже работает на новом делителе.  
  */  
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32_t vsel) {
     PllConfig cfg = cfg_in;  
@@ -514,22 +457,6 @@ void vfo_clk_boost_exit(void) {
  * копий в горячем конвейере Core 1 (@ref vfo_core1_entry) без обращения  
  * к ОЗУ и без спинлока.  
  *  
- * @param[in] state  Текущее 32-битное состояние ГПСЧ (не равное 0 —  
- *                   нулевое состояние вырождает генератор в постоянный 0).  
- *  
- * @return Следующее псевдослучайное состояние; из него выделяются  
- *         младшие биты для дизеринга шага DDS  
- *         (см. `VFO_DITHER_RANDOMIZE` в @ref vfo_dither_step и  
- *         @ref vfo_core1_entry).  
- *  
- * @note Помечена `always_inline` + `__not_in_flash_func` — разворачивается  
- *       в 3 пары LSL/LSR+EOR в месте вызова, исполняется из ОЗУ.  
- *       Полный период генератора 2^32−1 при ненулевом стартовом состоянии  
- *       (@ref VFO_RAND_SEED_INIT, пересеивается от `time_us_32()` в  
- * @note Вариант с глобальным состоянием ОЗУ — @ref vfo_xorshift32(),  
- *       используется в медленной эталонной ветке @ref vfo_dither_step.  
- *  
- * @see vfo_xorshift32(), vfo_dither_step(), vfo_core1_entry()  
  */
 static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xorshift32_raw)(uint32_t state) {
     state ^= state << 13;
@@ -548,22 +475,6 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
  * (xor-сдвиги << 13, >> 17, << 5) над глобальной переменной  
  * @c xorshift_state и сохраняет результат обратно в неё.  
  *  
- * @return Следующее псевдослучайное значение; младшие биты  
- *         используются как шум дизеринга шага DDS  
- *         (см. `VFO_DITHER_RANDOMIZE` в @ref vfo_dither_step).  
- *  
- * @note В отличие от чистой версии @ref vfo_xorshift32_raw(),  
- *       обращается к глобальному ОЗУ — используется только в медленной  
- *       эталонной ветке @ref vfo_dither_step (режим Core 0 и отладочная  
- *       ветка Core 1). В быстром регистровом конвейере  
- *       @ref vfo_core1_entry применяется инлайн-версия с локальным  
- *       состоянием @c loc_rand_state, синхронизируемым с  
- *       @c xorshift_state при смене тона.  
- * @note Помечена `always_inline` + `__not_in_flash_func` — исполняется  
- *       из ОЗУ. Стартовое состояние — @ref VFO_RAND_SEED_INIT,  
- *       нулевое состояние вырождает генератор в постоянный 0.  
- *  
- * @see vfo_xorshift32_raw(), vfo_dither_step(), vfo_core1_entry()  
  */
 static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xorshift32)() {
     uint32_t x = xorshift_state;
@@ -584,30 +495,6 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
  * частоты @p local_step в аккумуляторе фазы и по битам переноса формирует  
  * коррекцию делителя частоты автомата PIO. Результат атомарно записывается  
  * в регистр `clkdiv` state machine (INT в битах 31..16, FRAC8 в битах 15..8).  
- *  
- * Зависит от компайл-тайм опций:  
- * - `VFO_USE_MASH2`: двухступенчатый конвейер MASH 1-1 — вторая ступень  
- *   интегрирует состояние первой, перенос второй дифференцируется  
- *   (total_correction = carry1 + carry2 − carry2_prev, диапазон −1..+2);  
- *   иначе — одноступенчатый DDS с коррекцией 0/+1;  
- * - `VFO_DITHER_RANDOMIZE`: к шагу подмешивается 4-битный шум Xorshift32  
- *   с мат. ожиданием 0 для декорреляции спектра и подавления спуров.  
- *  
- * Отрицательная коррекция нормализуется циклами заёма/переноса между  
- * целой и дробной частями делителя (строгая знаковая арифметика int32_t).  
- *  
- * @param[in] local_step  32-битный шаг DDS (дробное приращение частоты,  
- *                        остаток делителя из @ref calculate_raw_params_mhz).  
- * @param[in] local_int   Целая часть базового делителя PIO (INT, >= 2).  
- * @param[in] local_frac  Дробная часть базового делителя PIO (FRAC8, 0..255).  
- *  
- * @note Состояние (аккумуляторы, ГПСЧ) хранится в глобальном ОЗУ  
- *       (@c dds_accumulator, @c dds_accum_m2, @c m2_carry_prev,  
- *       @c xorshift_state) — эта ветка медленнее регистрового конвейера  
- *       `VFO_DITHER_FAST` и служит эталоном для сверки.  
- * @note Помечена `__not_in_flash_func` — исполняется из ОЗУ.  
- *       Вызывается из `vfo_dither_callback` (режим Core 0) и из медленной  
- *       ветки `vfo_core1_entry`.  
  *  
  */
 static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_int, uint32_t local_frac) {
@@ -662,25 +549,6 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
 /**  
  * @brief Таймерный колбэк дизеринга для режима Core 0.  
  *  
- * Вызывается повторяющимся таймером @c sdr_dither_timer с периодом  
- * `VFO_DITHER_INTERVAL_US` (зарегистрирован через `add_repeating_timer_us`  
- * Delta-Sigma модуляции функции @ref vfo_dither_step, передавая текущие  
- * параметры тона из глобальных переменных ОЗУ (@c dds_step,  
- * @c target_pio_int, @c target_pio_frac8), которые обновляет  
- *  
- * @param[in] t  Указатель на структуру повторяющегося таймера SDK  
- *               (не используется).  
- *  
- * @return Всегда @c true — таймер продолжает срабатывать с тем же периодом.  
- *  
- * @note Компилируется только когда `VFO_DITHER_ON_CORE1` не определён —  
- *       в режиме Core 1 модуляцию выполняет горячий цикл  
- *       @ref vfo_core1_entry, а этот колбэк и таймер отсутствуют.  
- * @note Помечена `__not_in_flash_func` — исполняется из ОЗУ в контексте  
- *       прерывания таймера; частота дизеринга ограничена периодом таймера  
- *       и существенно ниже, чем у регистрового конвейера Core 1.  
- *  
- *      vfo_core1_entry()  
  */
 #ifndef VFO_DITHER_ON_CORE1
 static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) {
@@ -694,39 +562,6 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
 
 /**  
  * @brief Точка входа второго ядра (Core 1): бесконечный горячий цикл дизеринга.  
- *  
- * Запускается через `multicore_launch_core1()` и выполняет Delta-Sigma  
- * модуляцию (MASH 1-1 при `VFO_USE_MASH2`, иначе одноступенчатый DDS) на  
- * максимально возможной скорости: единственная операция с периферией за  
- * итерацию — запись результата в регистр `clkdiv` автомата PIO через  
- * кэшированный указатель @c clkdiv_reg. Частота итераций (F_s_dither)  
- * определяется только @c clk_sys и достигает единиц МГц.  
- *  
- * Две компайл-тайм ветки:  
- * - `VFO_DITHER_FAST` — регистровый конвейер без обращения к ОЗУ: все  
- *   состояния (аккумуляторы @c loc_acc1/@c loc_acc2, перенос  
- *   @c loc_m2_carry_prev, ГПСЧ @c loc_rand_state) живут в регистрах;  
- *   переносы извлекаются через `__builtin_add_overflow`, нормализация  
- *   делителя — арифметическим сдвигом (asrs) + маска 0xFF;  
- * - `else` — эталонная медленная ветка: прогоняет состояние через  
- *   глобальные переменные ОЗУ вызовом @ref vfo_dither_step; служит для  
- *   сверки и отладки.  
- *  
- * При `VFO_DITHER_RANDOMIZE` к шагу подмешивается шум Xorshift32  
- * (ряд −3..+3, мат. ожидание 0) для размывания спектральных спуров.  
- *  
- * Синхронизация с Core 0: флаг @c tone_changed опрашивается каждую  
- * итерацию; при смене тона параметры (@c dds_step, @c target_pio_int,  
- * @c target_pio_frac8, @c xorshift_state) перечитываются под аппаратным  
- * спинлоком @c vfo_spin_lock, аккумуляторы сбрасываются.  
- *  
- * Опция `VFO_DITHER_PROFILE` включает тоггл отладочного пина через SIO  
- * для измерения реальной F_s_dither осциллографом/анализатором.  
- *  
- * @note Функция не возвращается. Помечена `__not_in_flash_func` —  
- *       исполняется из ОЗУ. Компилируется только при `VFO_DITHER_ON_CORE1`;  
- *       иначе дизеринг обслуживает таймерный колбэк  
- *       @ref vfo_dither_callback на Core 0.  
  *  
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
@@ -1109,8 +944,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
   
                     // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;
-                    // Верхний предел 1.5 ГГц
-                    if (vco_hz > 1500000000ULL) continue;  // под зависанием ~3.96 с маржой
+                    // Верхний предел PLL_MAX_HZ
+                    if (vco_hz > PLL_MAX_HZ) continue;  // под зависанием ~3.96 с маржой
   
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
                     if (clk_sys_hz < min_allowed_clk ||  
@@ -1840,9 +1675,15 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
 
 // ==== Энкодер: глобальное состояние ====  
 volatile uint32_t vfo_current_freq_hz  = VFO_ENC_TEST_FREQ_HZ; // текущая рабочая частота 
-volatile uint32_t vfo_tune_step_hz     = 5000;       // глобальный шаг перестройки, Гц  
+volatile uint32_t vfo_tune_step_hz     = 500;       // глобальный шаг перестройки, Гц  
 volatile int32_t  enc_pending_steps    = 0;         // накопленные тики энкодера (ISR)  
 static bool       enc_tx_active        = false;
+
+// Антидребезг кнопки энкодера — состояние debounce-машины  
+static bool     enc_sw_last = true;   // предыдущий уровень SW (true = отпущена, INPUT_PULLUP)  
+static uint32_t enc_sw_ms   = 0;      // millis() последнего принятого перепада
+
+#define ENC_TICKS_PER_DETENT 4    // переходов квадратуры на один щелчок (полный шаг энкодера)
 
 // Таблица квадратурного декодера (Gray-code state machine).  
 // Индекс = (prev_AB << 2) | cur_AB. Значения: +1/-1 — шаг, 0 — дребезг/нет события.  
@@ -1874,48 +1715,55 @@ void vfo_encoder_init(void) {
 // Вызывать из loop() каждую итерацию — само переключение частоты тяжёлое  
 // (PLL-скан + перезапуск Core 1), поэтому вынесено из ISR.  
 void vfo_encoder_poll(void) {  
-    // ---- 1. Кнопка: toggle генерации тестовой частоты ----  
-    static bool     sw_last   = true;   // INPUT_PULLUP: нажато = LOW  
-    static uint32_t sw_deb_ms = 0;  
-    bool sw_now = gpio_get(VFO_ENC_SW_PIN);  
   
-    if (sw_now != sw_last && (millis() - sw_deb_ms) >= VFO_ENC_DEBOUNCE_MS) {  
-        sw_deb_ms = millis();  
-        sw_last   = sw_now;  
-        if (!sw_now) {                       // фронт нажатия  
-if (!enc_tx_active) {  
-                vfo_hardware_init(vfo_current_freq_hz, 10.0); // увидит clk_boosted -> найдёт opt сам,  
-                                                              // один set_clk_sys, таблица под бустовый clk  
-                //vfo_set_tone_instant(0);  
-                vfo_operation_set(true);        // включить пин генератора
-                enc_tx_active = true;
-                Serial.printf("[ENC] TX ON  %lu Hz\n",
-                              (unsigned long)vfo_current_freq_hz);
+    // ---------- секция 1: кнопка энкодера (toggle генерации) ----------  
+    bool sw = gpio_get(VFO_ENC_SW_PIN);  
+    uint32_t now_ms = millis();  
+  
+    if (sw != enc_sw_last && (now_ms - enc_sw_ms) > VFO_ENC_DEBOUNCE_MS) {  
+        enc_sw_ms  = now_ms;  
+        enc_sw_last = sw;  
+  
+        if (sw == 0) {                        // нажатие (INPUT_PULLUP)  
+            if (!enc_tx_active) {  
+                // ВКЛ: запуск генерации на vfo_current_freq_hz.  
+                // arm флага ДО init — иначе init возьмёт pll_nominal (133 МГц).  
+                vfo_clk_boost_arm();  
+                vfo_hardware_init(vfo_current_freq_hz, 10.0);  
+                vfo_set_tone_instant(0);  
+                vfo_operation_set(true);  
+                enc_tx_active = true;  
+                Serial.printf("[ENC] TX ON  %lu Hz (clk=%lu kHz)\n",  
+                              (unsigned long)vfo_current_freq_hz,  
+                              (unsigned long)(current_clk_sys_hz / 1000ULL));  
             } else {  
-                // ВЫКЛ: закрыть выход, вернуть номинальную шину  
-                vfo_operation_set(false);       // выключить пин генератора
-                vfo_clk_boost_exit();
-                enc_tx_active = false;
-                Serial.printf("[ENC] TX OFF\n");
+                // ВЫКЛ: закрыть ключ, вернуть шину на номинал.  
+                vfo_operation_set(false);  
+                vfo_clk_boost_exit();         // внутри сам сбрасывает clk_boosted  
+                enc_tx_active = false;  
+                Serial.printf("[ENC] TX OFF\n");  
             }  
         }  
     }  
   
-    // ---- 2. Перестройка ----  
-    int32_t steps;  
-    noInterrupts();  
-    steps = enc_pending_steps;  
+    // ---------- секция 2: накопленные тики энкодера ----------  
+    int32_t ticks;  
+    uint32_t ints = save_and_disable_interrupts();  
+    ticks = enc_pending_steps;  
     enc_pending_steps = 0;  
-    interrupts();  
-    if (steps == 0) return;  
+    restore_interrupts(ints);  
   
-    // Копим тики; ретюн только за полный детент (обычно 4 LUT-перехода)  
-    static int32_t enc_frac = 0;  
-    enc_frac += steps;  
-    const int32_t TICKS_PER_DETENT = 4;   // подстройте под ваш энкодер (2 или 4)  
-    int32_t detents = enc_frac / TICKS_PER_DETENT;  
-    enc_frac -= detents * TICKS_PER_DETENT;  
-    if (detents == 0) return;             // половина щелчка — ждём остаток  
+    if (ticks == 0) return;  
+  
+    // Перевод тиков в детенты: на щелчок типичный энкодер даёт 4 перехода.  
+    int32_t detents = ticks / ENC_TICKS_PER_DETENT;   // ENC_TICKS_PER_DETENT = 4  
+    if (detents == 0) {  
+        // Половина/четверть щелчка — вернуть тики обратно, накапливаем дальше.  
+        ints = save_and_disable_interrupts();  
+        enc_pending_steps += ticks;  
+        restore_interrupts(ints);  
+        return;  
+    }  
   
     int64_t f = (int64_t)vfo_current_freq_hz +  
                 (int64_t)detents * (int64_t)vfo_tune_step_hz;  
@@ -1923,20 +1771,20 @@ if (!enc_tx_active) {
     if (f > 30000000LL) f = 30000000LL;  
     vfo_current_freq_hz = (uint32_t)f;  
   
-    if (enc_tx_active) {
-        // Запускаем умный ретюн. Если частота PLL изменится — ядро Core 1 перезапустится.
-        // Если clk_sys останется прежней — сработает мягкий сброс аккумуляторов дизера через tone_changed.
-        vfo_clk_boost_enter(vfo_current_freq_hz);
-        
-        // На всякий случай дублируем (хотя внутри буста он уже вызвался)
-        vfo_set_tone_instant(0);
-        
-        Serial.printf("[ENC] RETUNE BOOST %lu Hz (clk_sys=%7.3f MHz)\n",    
-                    (unsigned long)vfo_current_freq_hz,    
-                    (double)current_clk_sys_hz / 1000000.0);    
-    }
-
-
+    if (enc_tx_active) {  
+        // Перестройка на лету: один полный цикл init.  
+        // arm обязателен — после предыдущего boost_exit флаг снят,  
+        // и без него init уйдёт на pll_nominal = 133 МГц.  
+        vfo_clk_boost_arm();  
+        vfo_hardware_init(vfo_current_freq_hz, 10.0);  
+        vfo_set_tone_instant(0);  
+        vfo_operation_set(true);              // init мог переоткрыть/закрыть пин  
+        Serial.printf("[ENC] RETUNE %lu Hz (clk=%lu kHz)\n",  
+                      (unsigned long)vfo_current_freq_hz,  
+                      (unsigned long)(current_clk_sys_hz / 1000ULL));  
+    }  
+    // TX выключен — частота просто обновлена; следующее нажатие  
+    // кнопки стартует на новой частоте.  
 }
 
 
@@ -1950,30 +1798,6 @@ if (!enc_tx_active) {
  * Перезагружает параметры PIO-делителя и DDS-шаг для движка дизеринга  
  * без разрыва фазы несущей: изменение применяется на следующей итерации  
  * модулятора, а не мгновенной записью в регистр `clkdiv`.  
- *  
- * Два механизма передачи параметров (компайл-тайм):  
- * - `VFO_DITHER_ON_CORE1` — атомарно обновляет @c target_pio_int,  
- *   @c target_pio_frac8 и @c dds_step под аппаратным спинлоком  
- *   @c vfo_spin_lock и взводит флаг @c tone_changed; Core 1  
- *   (@ref vfo_core1_entry) подхватывает новые значения в начале  
- *   следующей итерации и сбрасывает свои аккумуляторы;  
- * - `else` (таймерный режим Core 0) — та же запись переменных под  
- *   `save_and_disable_interrupts`, но с непосредственным сбросом  
- *   аккумуляторов DDS/MASH-2 (@c dds_accumulator, @c dds_accum_m2,  
- *   @c m2_carry_prev), т.к. колбэк @ref vfo_dither_callback читает  
- *   состояние из глобального ОЗУ.  
- *  
- * @param[in] tone_index  Индекс тона в таблице @ref ifkp_tones  
- *                        (0..VFO_IFKP_TONES_COUNT-1). Тон 0 — CW-несущая.  
- *                        Значения вне диапазона игнорируются; повторный  
- *                        вызов с тем же индексом — no-op.  
- *  
- * @note Помечена `__not_in_flash_func` — исполняется из ОЗУ и безопасна  
- *       для вызова из горячего цикла модемов. Сама по себе не включает  
- *       эфир: коммутацию выхода PIO выполняет @ref vfo_operation_set.  
- *       При смене тона в момент передачи на Core 1 сброс аккумуляторов  
- *       происходит на стороне потребителя — фазовый скачок минимален,  
- *       но не нулевой (частотная, а не фазовая непрерывность).  
  *  
  */
 void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
@@ -2006,27 +1830,7 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 
 /**  
  * @brief Синхронное управление ключом эфира (нажатие/отпускание CW-ключа).  
- *  
  * Коммутирует выходной пин высокочастотного меандра @c pin_freq_out:  
- * при @p key_down == true пин переводится в режим выхода — PIO-автомат  
- * начинает выдавать меандр (передача в эфир); при @p key_down == false  
- * пин переводится в высокоимпедансный вход — генерация на выходе  
- * мгновенно отсекается без остановки PIO-автомата и дизеринга.  
- *  
- * Реализовано через `pio_sm_set_consecutive_pindirs`: направление пина  
- * переключается синхронно с автоматом PIO, что даёт ключевание без  
- * дребезга и фазовых разрывов посреди периода меандра.  
- *  
- * @param[in] key_down  @c true — ключ нажат (TX, пин = выход);  
- *                      @c false — ключ отпущен (RX/пауза, пин = Hi-Z вход).  
- *  
- * @note Помечена `__not_in_flash_func` — исполняется из ОЗУ, безопасна  
- *       для вызова из горячих циклов модемов (CW, RTTY, IFKP).  
- * @note Закомментированный блок ниже функции (управление пином УМ  
- *       @c pin_amp_act и флагом @c dev_TX_state) — неактивный код:  
- *       планировавшаяся синхронная коммутация питания оконечного каскада  
- *       сейчас не выполняется.  
- *  
  */
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)

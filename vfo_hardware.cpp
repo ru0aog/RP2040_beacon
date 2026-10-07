@@ -1081,8 +1081,9 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     uint64_t vco_hz = ref_hz * fbdiv;  
   
                     // Только нижний предел VCO (даташит 750 МГц).  
-                    // Верхний предел ОТКЛЮЧЕН по требованию — проверено до ~3.8 ГГц.  
-                    if (vco_hz < 750000000ULL) continue;  
+                    if (vco_hz < 750000000ULL) continue;
+                    // Верхний предел — проверено до ~3.9 ГГц.
+                    if (vco_hz > 3700000000ULL) continue;  // под зависанием ~3.96 с маржой
   
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
                     if (clk_sys_hz < min_allowed_clk ||  
@@ -1488,7 +1489,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
   
     struct Candidate { uint32_t fbdiv, p1, p2, refdiv; uint64_t clk_sys_hz; };  
     // Расширяем массив до 3072, так как REFDIV=3 значительно увеличивает плотность сетки
-    static Candidate cand[3072];  
+    static Candidate cand[1024];  
     int cand_count = 0;  
   
     // 1. СБОР КАНДИДАТОВ: Сканируем REFDIV от 1 до 3 строго по вашему ТЗ [Скорректировано]

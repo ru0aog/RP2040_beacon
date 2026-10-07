@@ -7,7 +7,7 @@
 // vfo_hardware.h  
 #define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // электрический номинал без вольтмода  
 #define VFO_CLK_SYS_MIN_HZ      100000000ULL  // нижняя граница поиска оптимума  
-#define VFO_CLK_SYS_MAX_HZ      380000000ULL
+#define VFO_CLK_SYS_MAX_HZ      410000000ULL
 #define VFO_FLASH_SCK_MAX_HZ     50000000ULL
 #define VFO_THROTTLE_HI_C   80.0f   
 #define VFO_THROTTLE_LO_C   60.0f   
@@ -71,7 +71,7 @@ void vfo_test_pll_extreme_shurm(void);
   
 // Шаг перестройки на один щелчок энкодера, Гц. Задаётся снаружи,  
 // можно менять на лету (например, командой из консоли).  
-extern volatile int32_t  vfo_tuning_step_hz;  
+extern volatile uint32_t vfo_tune_step_hz;  
 // Текущая рабочая частота VFO, Гц — глобальная точка правды для ISR.  
 extern volatile uint32_t vfo_current_freq_hz;  
 // Накопленные тики энкодера со времени последней обработки.  

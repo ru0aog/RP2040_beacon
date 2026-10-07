@@ -937,7 +937,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 #define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
 #define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
-
+#define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
 
 
 // ============================================================================
@@ -1024,178 +1024,191 @@ static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,
 
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
-    uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
-    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; 
   
+    uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
+    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы  
+  
+    // Дефолтная безопасная конфигурация на случай сбоя  
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
-    bool best_forbidden = true;   // дефолт 133 МГц считаем запретным —  
-                                  // первый разрешённый кандидат его вытеснит  
-    bool best_clean     = false;
-    uint64_t min_global_metric = UINT64_MAX;
-    uint64_t min_dds_metric = UINT64_MAX;   // метрика текущего победителя
-
-    if (target_mhz < 1000000000ULL)  target_mhz = 1000000000ULL; 
-    if (target_mhz > 30000000000ULL) target_mhz = 30000000000ULL; 
-
-    // Структура для ведения ТОП-5 локального рантайма
-    struct CandLog {
-        uint64_t clk;
-        uint32_t rf, fb, p1, p2;
-        MetricBreakdown b;
-        uint32_t pio_int;
-        bool valid;
-    };
-    const int TOP_MAX = 10;
-    CandLog top[TOP_MAX];
-    memset(top, 0, sizeof(top));
-
-    uint32_t total_scanned = 0;
-    uint32_t rejected_vco = 0;
-    uint32_t rejected_int = 0;
-    uint64_t best_vco_hz = 0;
-    int winner_id = 0; // номер лидера
-
-    // === МАТРИЧНЫЙ ПЕРЕБОР PLL ===
-    for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
-        uint64_t f_ref = crystal_hz / refdiv;
-
-        for (uint32_t p1 = 2; p1 <= 6; p1++) {  
-            for (uint32_t p2 = 1; p2 <= 2; p2++) {  
-                if (p1 < p2) continue; // Защита подложки кристалла от наводок ВЧ
-                
+    // Если в вашей PllConfig поля refdiv нет — уберите `1,` и строки присваивания refdiv ниже.  
+  
+    // Границы КВ-диапазона (1.0 .. 30.0 МГц) в миллигерцах  
+    if (target_mhz < 1000000000ULL)  target_mhz = 1000000000ULL;  // 1.0 МГц  
+    if (target_mhz > 30000000000ULL) target_mhz = 30000000000ULL; // 30 МГц  
+  
+    const uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;  
+    const uint64_t max_allowed_clk = max_clk_limit;  
+  
+#if VFO_PLL_DEBUG  
+    Serial.printf("[PLLDBG] scan range: %.3f .. %.3f MHz (target=%u)\n",  
+              min_allowed_clk / 1e6, max_allowed_clk / 1e6, target_frequency_hz);  
+    Serial.printf("[PLLDBG] target=%u Hz  nominal: clk=%lu\n",  
+                  target_frequency_hz, (unsigned long)pll_nominal.clk_sys_hz);  
+#endif  
+  
+    // ---- Классификаторы и состояние арбитража ----  
+    uint64_t min_dds_metric    = UINT64_MAX;  // метрика победителя (не номинала!)  
+    bool     best_forbidden    = true;        // класс победителя: frac в поясе  
+    bool     best_clean        = false;       // класс победителя: грязный dmin  
+    uint64_t best_pll_vco_hz   = 0;           // VCO победителя (тай-брейк при =metric)  
+    uint32_t n_arbit           = 0;           // сколько кандидатов дошло до арбитража  
+  
+#if VFO_PLL_DEBUG  
+    // TOP-10 лог для диагностики (без дублей по clk_sys)  
+    struct CandLog {  
+        uint64_t clk, vco, metric, spur_off;  
+        uint32_t fbdiv, p1, p2, refdiv, step;  
+        uint16_t pio_int;  
+        uint8_t  pio_frac;  
+        bool     forbidden, clean;  
+    };  
+    CandLog top10[10];  
+    for (int i = 0; i < 10; i++) top10[i].metric = UINT64_MAX, top10[i].clk = 0;  
+#endif  
+  
+    // ---- Матричный скан: refdiv × fbdiv × (p1,p2) ----  
+    for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
+        uint64_t ref_hz = crystal_hz / refdiv;   // REFDIV: 1,2,3 → 12,6,4 МГц  
+  
+        for (uint32_t p1 = 1; p1 <= 7; p1++) {  
+            for (uint32_t p2 = 1; p2 <= 7; p2++) {  
                 uint32_t pdiv_total = p1 * p2;  
-      
-                // ЦИКЛ FBDIV: Захватывает частоты вплоть до 2.4 ГГц
-                for (uint32_t fbdiv = 30; fbdiv <= 220; fbdiv++) {
-                    uint64_t vco_hz = (uint64_t)fbdiv * f_ref;  
-                    total_scanned++;
-      
-                    // Фильтр экстремального разгона VCO (750 МГц ... нет лимита)
-                    if (vco_hz < 750000000ULL) {
-                        rejected_vco++;
-                        continue;  
-                    }
-      
+  
+                for (uint32_t fbdiv = 16; fbdiv <= 320; fbdiv++) {  
+                    uint64_t vco_hz = ref_hz * fbdiv;  
+  
+                    // Только нижний предел VCO (даташит 750 МГц).  
+                    // Верхний предел ОТКЛЮЧЕН по требованию — проверено до ~3.8 ГГц.  
+                    if (vco_hz < 750000000ULL) continue;  
+  
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
-                    if (clk_sys_hz < VFO_CLK_SYS_MIN_HZ || clk_sys_hz > max_clk_limit) continue;  
-      
-                    VfoParameters test;
-                    MetricBreakdown current_breakdown;
-                    uint64_t current_metric = vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &current_breakdown, &test);
-
-                    if (test.pio_int < 2) {
-                        rejected_int++;
-                        continue;  
-                    }
-
-                    // Класс 1: запретный пояс FRAC8-спура (многогармоническая оценка)  
+                    if (clk_sys_hz < min_allowed_clk ||  
+                        clk_sys_hz > max_allowed_clk) continue;  
+  
+                    // Жёсткий минимум шины: спур-уровень ~ f_out²/clk_sys  
+                    if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;  
+  
+                    // Единая метрика кандидата (verbose-версия с декомпозицией штрафов)  
+                    VfoParameters test;  
+                    MetricBreakdown brk;  
+                    uint64_t current_dds_metric =  
+                        vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &brk, &test); 
+                    // Если verbose нет — используйте vfo_pll_metric(...) и уберите brk.  
+  
+                    if (test.pio_int < 2) continue;  
+  
+                    // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===  
                     uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,  
-                                                            test.pio_frac,  
-                                                            clk_sys_hz);  
-                    bool frac_forbidden =  
-                        (test.pio_frac != 0u) &&  
-                        (spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ);  
-    
-                    // Класс 2: гейт близкой гребёнки — по СЫРОМУ dmin,  
-                    // до нормализации метрики на clk_sys  
+                                                                test.pio_frac,  
+                                                                clk_sys_hz);  
+                    bool frac_forbidden = (test.pio_frac != 0u) &&  
+                                          (spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ);  
+  
+                    // === КЛАСС 2: чистота дизера по СЫРОМУ dmin (до нормализации!) ===  
                     uint32_t dd  = test.dds_step;  
                     uint32_t dmin_raw = (dd < (uint32_t)(0u - dd)) ? dd  
-                                        : (uint32_t)(0u - dd);  
-                    bool candidate_clean = (dmin_raw < VFO_DMIN_CEILING);
-      
-                    // Сортировка и сохранение в ТОП-5 локального рантайма
-                    for (int i = 0; i < TOP_MAX; i++) {
-                        if (!top[i].valid || current_metric < top[i].b.total_metric) {
-                            for (int j = TOP_MAX - 1; j > i; j--) {
-                                top[j] = top[j - 1];
-                            }
-                            top[i].clk = clk_sys_hz;
-                            top[i].rf = refdiv;
-                            top[i].fb = fbdiv;
-                            top[i].p1 = p1;
-                            top[i].p2 = p2;
-                            top[i].b = current_breakdown;
-                            top[i].pio_int = test.pio_int;
-                            top[i].valid = true;
-                            break;
-                        }
-                    }
-
-                    // Статистика: глобальный минимум метрики (для лога)  
-                    if (current_metric < min_global_metric ||   
-                       (current_metric == min_global_metric && vco_hz > best_vco_hz)) {  
-                        min_global_metric = current_metric;  
-                        best_vco_hz = vco_hz;  
-                    }  
+                                                                   : (uint32_t)(0u - dd);  
+                    bool candidate_clean = (dmin_raw < VFO_DMIN_CEILING);  
   
-                    // Арбитраж победителя: класс важнее метрики.  
-                    // Пояс frac > чистота дизера (dmin) > метрика > выше VCO.  
+                    n_arbit++;  
+  
+#if VFO_PLL_DEBUG  
+                    // TOP-10 без дублей по clk_sys  
+                    bool dup = false;  
+                    for (int i = 0; i < 10; i++)  
+                        if (top10[i].clk == clk_sys_hz) { dup = true; break; }  
+                    if (!dup && current_dds_metric < top10[9].metric) {  
+                        int pos = 9;  
+                        while (pos > 0 && current_dds_metric < top10[pos-1].metric) pos--;  
+                        for (int k = 9; k > pos; k--) top10[k] = top10[k-1];  
+                        top10[pos].clk = clk_sys_hz;  top10[pos].vco = vco_hz;  
+                        top10[pos].metric = current_dds_metric;  
+                        top10[pos].fbdiv = fbdiv; top10[pos].p1 = p1;  
+                        top10[pos].p2 = p2;         top10[pos].refdiv = refdiv;  
+                        top10[pos].step = test.dds_step;  
+                        top10[pos].pio_int = test.pio_int;  
+                        top10[pos].pio_frac = test.pio_frac;  
+                        top10[pos].spur_off = spur_off_hz;  
+                        top10[pos].forbidden = frac_forbidden;  
+                        top10[pos].clean = candidate_clean;  
+                    }  
+#endif  
+  
+                    // === АРБИТРАЖ: класс пояса -> класс чистоты -> метрика -> VCO ===  
+                    // Разрешённый frac всегда бьёт запретный; внутри класса  
+                    // чистый dmin бьёт грязный; дальше — меньшая метрика,  
+                    // при равной метрике — выше VCO (больше запас PLL).  
                     bool prefer;  
                     if (frac_forbidden != best_forbidden) {  
-                        prefer = !frac_forbidden;                    // разрешённый бьёт запретный  
+                        prefer = !frac_forbidden;  
                     } else if (candidate_clean != best_clean) {  
-                        prefer = candidate_clean;                    // чистый дизер бьёт грязный  
+                        prefer = candidate_clean;  
                     } else {  
-                        prefer = (current_metric < min_dds_metric) ||  
-                                 (current_metric == min_dds_metric && vco_hz > best_vco_hz);  
+                        prefer = (current_dds_metric < min_dds_metric) ||  
+                                 (current_dds_metric == min_dds_metric &&  
+                                  vco_hz > best_pll_vco_hz);  
                     }  
   
                     if (prefer) {  
-                        best_forbidden = frac_forbidden;  
-                        best_clean     = candidate_clean;  
-                        min_dds_metric = current_metric;  
+                        best_forbidden  = frac_forbidden;  
+                        best_clean      = candidate_clean;  
+                        min_dds_metric  = current_dds_metric;  
+                        best_pll_vco_hz = vco_hz;  
   
                         best_pll.fbdiv      = fbdiv;  
                         best_pll.p1         = p1;  
                         best_pll.p2         = p2;  
-                        best_pll.refdiv     = refdiv;  
+                        best_pll.refdiv     = refdiv;   // если поля нет — удалить  
                         best_pll.clk_sys_hz = clk_sys_hz;  
                         best_pll.vsel       = (uint32_t)vsel_for(clk_sys_hz);  
                         best_pll.is_oc      = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
-                    }
-                } // <--- КОНЕЦ ЦИКЛА FBDIV
+                    }  
+                }  
             }  
         }  
     }  
-
   
-    // ========================================================================
-    // ДИАГНОСТИЧЕСКИЙ ВЫВОД КАНДИДАТОВ И ШТРАФОВ В SERIAL
-    // ========================================================================
-    if (debug_flag) {
-        Serial.printf("\n=================== PLL AUTOTUNE TRACE ===================\n");
-        Serial.printf("Target Freq  : %u Hz\n", target_frequency_hz);
-        Serial.printf("Total Scanned: %u (Bad VCO: %u, Bad INT: %u)\n", total_scanned, rejected_vco, rejected_int);
-        Serial.printf("----------------------------------------------------------\n");
-        Serial.printf("TOP %d BEST CANDIDATES FOUND:\n", TOP_MAX);
-        
-        for (int i = 0; i < TOP_MAX; i++) {
-            if (!top[i].valid) continue;
-            
-            // ТОЧЕЧНО: Если параметры кандидата из ТОПа совпадают с выбранным лучшим, запоминаем его номер (i + 1)
-            if (top[i].clk == best_pll.clk_sys_hz && top[i].fb == best_pll.fbdiv && top[i].rf == best_pll.refdiv) {
-                winner_id = i + 1;
-            }
-
-            Serial.printf("[%d] clk_sys: %7.3f MHz (R=%u, F=%u, P1=%u, P2=%u) | PIO_INT=%u\n", 
-                        i + 1, top[i].clk / 1000000.0, top[i].rf, top[i].fb, top[i].p1, top[i].p2, top[i].pio_int);
-            Serial.printf("    -> FRAC8 Point : %3u (CTZ=%u) | DDS_STEP: 0x%08X\n", 
-                        top[i].b.frac, top[i].b.ctz_val, top[i].b.raw_step);
-            Serial.printf("    -> PENALTIES   : FRAC(CTZ)=%11llu | MASH_JUPE=%11llu | CLK_DEF=%11llu\n", 
-                        top[i].b.ctz_penalty, top[i].b.mash_penalty, top[i].b.clk_penalty);
-            Serial.printf("    => TOTAL METRIC: %llu %s\n", 
-                        top[i].b.total_metric, (top[i].b.total_metric == 0) ? "[PERFECT INT MATCH]" : "");
-            Serial.printf("----------------------------------------------------------\n");
-        }
-        
-        // Выводим номер победителя в явном виде [%d]
-        Serial.printf("WINNER SELECTED: [%d] clk_sys = %7.3f MHz (Metric: %llu, VCO: %llu MHz)\n", 
-                    winner_id, best_pll.clk_sys_hz / 1000000.0, min_global_metric, best_vco_hz / 1000000ULL);
-        Serial.printf("==========================================================\n\n");
-   }
-    if (best_pll.clk_sys_hz == 133000000ULL && total_scanned > 0 && min_dds_metric == UINT64_MAX) {  
+    // === ЗАЩИТА ОТ ПУСТОГО СКАНА: дефолт выжил только если кандидатов не было ===  
+    if (n_arbit == 0) {  
+#if VFO_PLL_DEBUG  
         Serial.printf("[PLLDBG] SCAN EMPTY — fallback to nominal 133 MHz\n");  
-    }
+#endif  
+        return best_pll;   // дефолт 133 МГц — и никак иначе  
+    }  
+  
+#if VFO_PLL_DEBUG  
+    for (int i = 0; i < 10; i++) {  
+        if (top10[i].clk == 0) break;  
+        Serial.printf("[PLLDBG] top%d: clk=%.3f MHz vco=%.3f MHz refdiv=%lu fbdiv=%lu "  
+                      "p1=%lu p2=%lu metric=%llu frac=%u spur_off=%llu kHz%s%s\n",  
+                i, top10[i].clk / 1e6, top10[i].vco / 1e6,  
+                (unsigned long)top10[i].refdiv, (unsigned long)top10[i].fbdiv,  
+                (unsigned long)top10[i].p1, (unsigned long)top10[i].p2,  
+                (unsigned long long)top10[i].metric, (unsigned)top10[i].pio_frac,  
+                (unsigned long long)(top10[i].spur_off == UINT64_MAX ? 0  
+                                       : top10[i].spur_off / 1000ULL),  
+                top10[i].forbidden ? " [FORB]" : "",  
+                top10[i].clean ? "" : " [DIRTY]");  
+    }  
+  
+    // Победитель: пересчёт параметров для печати  
+    VfoParameters wp;  
+    vfo_pll_metric(best_pll.clk_sys_hz, target_mhz, &wp);  
+    uint64_t w_spur = frac_spur_min_off_hz(wp.pio_int, wp.pio_frac,  
+                                         best_pll.clk_sys_hz);  
+    Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz refdiv=%lu fbdiv=%lu p1=%lu p2=%lu "  
+                  "metric=%llu  int=%u frac=%u step=0x%08lX  spur_off=%llu kHz%s\n",  
+                best_pll.clk_sys_hz / 1e6,  
+                (unsigned long)best_pll.refdiv,  
+                (unsigned long)best_pll.fbdiv,  
+                (unsigned long)best_pll.p1,  
+                (unsigned long)best_pll.p2,  
+                (unsigned long long)min_dds_metric,  
+                (unsigned)wp.pio_int, (unsigned)wp.pio_frac,  
+                (unsigned long)wp.dds_step,  
+                (unsigned long long)(w_spur == UINT64_MAX ? 0 : w_spur / 1000ULL),  
+                best_forbidden ? " [FORBIDDEN]" : "");  
+#endif  
     return best_pll;  
 }
 

@@ -1846,7 +1846,18 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
         {  
             uint32_t proven_vco = (uint32_t)((vco_hz * 97ULL) / 100ULL);  
             vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-            persist_clock_limits(0, proven_vco);  
+            persist_clock_limits(0, proven_vco);
+
+ 
+            uint32_t ints2 = save_and_disable_interrupts();  
+            clock_configure(clk_sys,  
+                            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
+                            clk_sys_hz, clk_sys_hz);  
+            // восстановить baudr под текущую ступень  
+            ssi_hw->ssienr = 0; ssi_hw->baudr = ssi_baud; ssi_hw->ssienr = 1;  
+            restore_interrupts(ints2);
+
             Serial.printf("[ШТУРМ] flash: pll_vco_max=%lu Hz (-3%% от %llu)\n",  
                           (unsigned long)proven_vco, vco_hz);  
             Serial.flush();  

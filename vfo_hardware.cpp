@@ -76,7 +76,6 @@
 // ============================================================================
 // МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
 // ============================================================================
-#define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Ваш доказанный предел стабильности
 #define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
 
 // Структура детальной калькуляции штрафов
@@ -125,9 +124,6 @@ volatile bool clk_boosted = false;       // активация разгона
 // ============================================================================
 // ВЕРХНИЕ МАКРОСЫ И СТРУКТУРЫ ДЛЯ МНОГОКРИТЕРИАЛЬНОГО АВТОТЮНА
 // ============================================================================
-#ifndef VFO_MAX_STABLE_CLK_HZ
-#define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Предел стабильности
-#endif
 
 #ifndef VFO_PREFERRED_MIN_CLK
 #define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница чистой зоны
@@ -912,7 +908,7 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
         b->clk_penalty += 10000000000ULL; // Барьерный штраф ниже 320 МГц
     }
-    uint64_t clk_deficit = VFO_MAX_STABLE_CLK_HZ - clk_sys_hz;
+    uint64_t clk_deficit = clk_limit - clk_sys_hz;
     b->clk_penalty += (clk_deficit * clk_deficit) / 5000ULL;
     b->total_metric += b->clk_penalty;
 

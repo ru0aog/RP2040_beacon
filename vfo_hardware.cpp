@@ -1121,7 +1121,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;
                     // Верхний предел
-                    if (vco_hz > vfo_effective_pll_max()) continue;
+                    if (vco_hz > clk_limit) continue;
   
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
                     if (clk_sys_hz < min_allowed_clk ||  
@@ -1862,7 +1862,7 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
                           (unsigned long)proven_vco, vco_hz);  
             Serial.flush();  
             // Возврат на текущую ступень штурма (p1=p2=7, опора ROSC)  
-            uint32_t ints2 = save_and_disable_interrupts();  
+            ints2 = save_and_disable_interrupts();  
             pll_sys_hw->fbdiv_int = fb;  
             pll_sys_hw->prim = (7u << PLL_PRIM_POSTDIV1_LSB) | (7u << PLL_PRIM_POSTDIV2_LSB);  
             volatile uint32_t t2 = 30000;  

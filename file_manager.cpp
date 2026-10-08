@@ -1,7 +1,7 @@
 ﻿/**  
  * ============================================================================  
  *  file_manager.cpp — Эмуляция USB-MSC (FAT12) и Wear Leveling во Flash  
- *  Версия 2.12 от 2026-10-01, автор RU0AOG  
+ *  Версия 2.19 от 2026-10-08, автор RU0AOG  
  * ============================================================================
  *  
  *  НАЗНАЧЕНИЕ  
@@ -74,6 +74,7 @@
 #include <Adafruit_TinyUSB.h>
 #include <hardware/flash.h>
 #include <hardware/sync.h>
+#include "hardware/structs/ssi.h"   // ssi_hw — управление flash-контроллером (ssienr/baudr)
 #include "vfo_hardware.h"
 
 // ФИЗИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ОБЪЕКТОВ ДЛЯ ЛИНКОВЩИКА

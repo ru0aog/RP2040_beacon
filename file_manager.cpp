@@ -314,12 +314,18 @@ void __not_in_flash_func(persist_clock_limits)(uint64_t new_clk_hz, uint64_t new
     // 1. Читаем текущее и применяем правило "не понижать"  
     uint64_t cur_clk = 0, cur_vco = 0;  
     flash_limits_read(&cur_clk, &cur_vco);  
-    // 0 означает "не трогаем поле" — подставляем хранимое или паспорт  
-    if (new_clk_hz == 0) new_clk_hz = cur_clk ? cur_clk : PASSPORT_CLK_SYS_MAX_HZ;  
-    if (new_vco_hz  == 0) new_vco_hz  = cur_vco ? cur_vco : PASSPORT_PLL_VCO_MAX_HZ;  
+    // 0 = "не трогаем поле" -> подставляем хранимое или паспорт;  
+    // ноль в секторе не лечится сам — заменяем паспортом  
+    if (new_clk_hz == 0 || cur_clk == 0) {  
+        new_clk_hz = (new_clk_hz > cur_clk) ? new_clk_hz  
+                  : (cur_clk ? cur_clk : PASSPORT_CLK_SYS_MAX_HZ);  
+    }  
+    if (new_vco_hz == 0 || cur_vco == 0) {  
+        new_vco_hz = (new_vco_hz > cur_vco) ? new_vco_hz  
+                  : (cur_vco ? cur_vco : PASSPORT_PLL_VCO_MAX_HZ);  
+    }  
     if (new_clk_hz < cur_clk) new_clk_hz = cur_clk;  
     if (new_vco_hz  < cur_vco) new_vco_hz  = cur_vco; 
-    if (new_clk_hz == cur_clk && new_vco_hz == cur_vco) return;  // нечего писать  
   
     // 2. Частоты на безопасный уровень  
     uint32_t ints = save_and_disable_interrupts();  
@@ -1158,15 +1164,6 @@ void init_file_manager() {
     }
   }
 
-  // Чтение лимитов частот
-  uint64_t lim_clk = 0, lim_vco = 0;  
-  flash_limits_read(&lim_clk, &lim_vco);  
-  // валидация диапазона: 0 или в разумных пределах, иначе паспорт  
-  if (lim_clk < VFO_CLK_SYS_NOMINAL_HZ || lim_clk > 500000000ULL) lim_clk = VFO_CLK_SYS_NOMINAL_HZ;  
-  if (lim_vco < 750000000ULL || lim_vco > 5000000000ULL)         lim_vco = 1600000000ULL;  
-  Serial.printf("[LIMITS] clk_sys<=%llu Hz, PLL VCO<=%llu Hz (source=flash, passport=133M/1600M)\n",  
-                (unsigned long long)lim_clk, (unsigned long long)lim_vco);
-
   // Шаг 2: Выгружаем данные в RAM на основе результатов сканирования
   if (slot_found) {
     uint32_t final_flash_src = 0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE);
@@ -1196,6 +1193,17 @@ void init_file_manager() {
   read_and_parse_INFO_txt();  // Парсер настроек INFO.TXT
   read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
   Serial.flush();
+
+  // добавить в конец init_file_manager
+    uint64_t lim_clk = 0, lim_vco = 0;  
+    flash_limits_read(&lim_clk, &lim_vco);  
+    const char* src = "passport";  
+    if (lim_clk > 0) { vfo_max_clk_sys_hz = (uint32_t)lim_clk; src = "flash"; }  
+    if (lim_vco > 0) { vfo_max_pll_vco_hz = (uint32_t)lim_vco; src = "flash"; }  
+    Serial.printf("[LIMITS] clk_sys<=%lu Hz, VCO<=%lu Hz (source=%s)\n",  
+                  (unsigned long)vfo_max_clk_sys_hz,  
+                  (unsigned long)vfo_max_pll_vco_hz, src);
+
 }
 
 

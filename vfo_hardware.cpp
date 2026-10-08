@@ -1818,6 +1818,8 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
         for (int w = 0; w < 512; w++) { stress_ram_block[w] = pattern + w; }
         for (int w = 0; w < 512; w++) { if (stress_ram_block[w] != (pattern + w)) { sram_failed = true; break; } }
 
+        watchdog_update();  // сброс сторожевого таймера
+
         restore_interrupts(ints);
         // --- ВЫХОД ИЗ КРИТИЧЕСКОЙ СЕКЦИИ ---
 

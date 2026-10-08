@@ -250,51 +250,11 @@ static void save_ram_to_flash() {
 }
 
 
-
-// ============================================================================  
-//  Сектор лимитов разгона: dedicated 4KB за пределами дисковой области.  
-//  LIMITS_FLASH_OFFSET должен лежать ВНЕ диапазона FLASH_TARGET_OFFSET ..  
-//  FLASH_TARGET_OFFSET + FLASH_SLOTS * SLOT_SIZE — иначе MSC-запись затрёт его.  
-// ============================================================================  
-
-// отдельный 4-КБ сектор сразу за областью слотов  
-// Адрес dedicated-сектора — СРАЗУ за массивом слотов, за границей диска  
-#define LIMITS_FLASH_OFFSET  (FLASH_TARGET_OFFSET + (uint32_t)FLASH_SLOTS * SLOT_SIZE)
-#define LIMITS_MAGIC         0x4C4D5453u   // 'LMTS'  
-#define LIMITS_REC_SIZE      256u          // программируем страницу целиком  
-  
-struct LimitsRec {  
-    uint32_t magic;  
-    uint32_t seq;  
-    uint64_t clk_sys_hz;      // доказанный потолок ядра, уже с -3%  
-    uint64_t pll_vco_hz;      // доказанный потолок VCO, уже с -3%  
-    uint32_t crc32;           // простая контрольная сумма полей выше  
-};  
-static_assert(sizeof(LimitsRec) <= LIMITS_REC_SIZE, "rec too big");  
-  
-// Чтение при старте (вызвать из init_file_manager после скана слотов)  
-void flash_limits_read(uint64_t* clk_sys_hz, uint64_t* pll_vco_hz) {  
-    const LimitsRec* r = (const LimitsRec*)(XIP_BASE + LIMITS_FLASH_OFFSET);  
-    *clk_sys_hz = 0; *pll_vco_hz = 0;  
-    if (r->magic != LIMITS_MAGIC) return;  
-    uint32_t crc = r->seq ^ (uint32_t)r->clk_sys_hz ^ (uint32_t)(r->clk_sys_hz >> 32)  
-                       ^ (uint32_t)r->pll_vco_hz ^ (uint32_t)(r->pll_vco_hz >> 32);  
-    if (crc != r->crc32) return;  
-    *clk_sys_hz = r->clk_sys_hz;  
-    *pll_vco_hz = r->pll_vco_hz;  
-}
-
-
 uint64_t flash_limits_clk_sys_hz(void) {  
-    uint64_t c = 0, v = 0;  
-    flash_limits_read(&c, &v);  
-    return c;   // 0, если magic/CRC/диапазон не прошли  
+    return (uint64_t)vfo_max_clk_sys_hz;   // загружено из SlotMeta при init  
 }  
-  
 uint64_t flash_limits_vco_hz(void) {  
-    uint64_t c = 0, v = 0;  
-    flash_limits_read(&c, &v);  
-    return v;  
+    return (uint64_t)vfo_max_pll_vco_hz;  
 }
 
 
@@ -306,60 +266,27 @@ uint64_t flash_limits_vco_hz(void) {
  * программировать на разогнанной шине (SCK масштабируется от clk_sys).  
  */  
 
-// persist_clock_limits: пишет LimitsRec в dedicated-сектор.  
-// ВАЖНО: вызывается из штурма, где clk_sys идёт от PLL на ROSC.  
-// Перед erase/program обязательно: clk_sys -> XOSC (12 МГц), ssi baudr -> 2.  
-// После записи clk_sys возвращается на PLL_SYS aux — конфиг PLL не трогаем.  
-void __not_in_flash_func(persist_clock_limits)(uint64_t new_clk_hz, uint64_t new_vco_hz) {
-    // 1. Читаем текущее и применяем правило "не понижать"  
-    uint64_t cur_clk = 0, cur_vco = 0;  
-    flash_limits_read(&cur_clk, &cur_vco);  
-    // 0 = "не трогаем поле" -> подставляем хранимое или паспорт;  
-    // ноль в секторе не лечится сам — заменяем паспортом  
-    if (new_clk_hz == 0 || cur_clk == 0) {  
-        new_clk_hz = (new_clk_hz > cur_clk) ? new_clk_hz  
-                  : (cur_clk ? cur_clk : PASSPORT_CLK_SYS_MAX_HZ);  
-    }  
-    if (new_vco_hz == 0 || cur_vco == 0) {  
-        new_vco_hz = (new_vco_hz > cur_vco) ? new_vco_hz  
-                  : (cur_vco ? cur_vco : PASSPORT_PLL_VCO_MAX_HZ);  
-    }  
-    if (new_clk_hz < cur_clk) new_clk_hz = cur_clk;  
-    if (new_vco_hz  < cur_vco) new_vco_hz  = cur_vco; 
+// persist_clock_limits: пишет LimitsRec 
+void persist_clock_limits(uint64_t new_clk_hz, uint64_t new_vco_hz) {  
+    // Правило "не понижать" + 0 = не трогать поле  
+    if (new_clk_hz == 0 || new_clk_hz < vfo_max_clk_sys_hz)   
+        new_clk_hz = vfo_max_clk_sys_hz;  
+    if (new_vco_hz == 0 || new_vco_hz < vfo_max_pll_vco_hz)   
+        new_vco_hz = vfo_max_pll_vco_hz;  
+    if (new_clk_hz == vfo_max_clk_sys_hz && new_vco_hz == vfo_max_pll_vco_hz)   
+        return;  // нечего писать  
   
-    // 2. Частоты на безопасный уровень  
-    uint32_t ints = save_and_disable_interrupts();  
-    clock_configure(clk_sys,  
-                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
-                    12000000u, 12000000u);  
-    ssi_hw->ssienr = 0;  
-    ssi_hw->baudr  = 2;                 // SCK = 12/2 = 6 МГц — консервативно и быстро  
-    ssi_hw->ssienr = 1;  
+    vfo_max_clk_sys_hz = (uint32_t)new_clk_hz;  
+    vfo_max_pll_vco_hz = (uint32_t)new_vco_hz;  
   
-    // 3. Запись сектора
-    static LimitsRec rec;
-    static uint32_t limits_seq = 0;
-    rec.magic = LIMITS_MAGIC;
-    rec.seq = ++limits_seq;
-    rec.clk_sys_hz = new_clk_hz;
-    rec.pll_vco_hz = new_vco_hz;
-    rec.crc32 = rec.seq ^ (uint32_t)rec.clk_sys_hz ^ (uint32_t)(rec.clk_sys_hz >> 32)
-                      ^ (uint32_t)rec.pll_vco_hz ^ (uint32_t)(rec.pll_vco_hz >> 32);
-    flash_range_erase(LIMITS_FLASH_OFFSET, 4096u);
-    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t *)&rec, sizeof(rec));  
-    flash_flush_cache();          // сброс XIP-кэша после записи
-    // Вернуть clk_sys на PLL до restore_interrupts — иначе система остаётся
-    // на XOSC 12 МГц, и вызывающий работает на опоре вместо рабочей частоты.
-    uint32_t pll_hz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_SYS_CLKSRC_PRIMARY) * 1000u;  
-    clock_configure(clk_sys,  
-                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                    pll_hz, pll_hz);
-    restore_interrupts(ints);  
-    __dsb(); __isb();  
-    Serial.printf("[LIMITS] flash stored: clk_sys<=%llu Hz, VCO<=%llu Hz\n",  
-                  (unsigned long long)rec.clk_sys_hz, (unsigned long long)rec.pll_vco_hz);
+    // Запись через штатный механизм слота: save_ram_to_flash сама  
+    // вшивает лимиты в SlotMeta, откатывает буст, erase+program, ротирует слот  
+    save_ram_to_flash();  
+  
+    Serial.printf("[LIMITS] flash stored: clk_sys<=%lu Hz, VCO<=%lu Hz (slot=%ld seq=%lu)\n",  
+                  (unsigned long)vfo_max_clk_sys_hz,  
+                  (unsigned long)vfo_max_pll_vco_hz,  
+                  (long)current_active_slot, (unsigned long)current_max_seq);  
 }
 
 
@@ -1192,17 +1119,23 @@ void init_file_manager() {
 
   read_and_parse_INFO_txt();  // Парсер настроек INFO.TXT
   read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
-  Serial.flush();
 
-  // добавить в конец init_file_manager
-    uint64_t lim_clk = 0, lim_vco = 0;  
-    flash_limits_read(&lim_clk, &lim_vco);  
-    const char* src = "passport";  
-    if (lim_clk > 0) { vfo_max_clk_sys_hz = (uint32_t)lim_clk; src = "flash"; }  
-    if (lim_vco > 0) { vfo_max_pll_vco_hz = (uint32_t)lim_vco; src = "flash"; }  
-    Serial.printf("[LIMITS] clk_sys<=%lu Hz, VCO<=%lu Hz (source=%s)\n",  
-                  (unsigned long)vfo_max_clk_sys_hz,  
-                  (unsigned long)vfo_max_pll_vco_hz, src);
+  // лимиты из SlotMeta активного слота (checked_meta уже содержит их  
+  // после скана — берите поля меты того слота, что победил по seq)  
+  const char* src = "passport";  
+  if (slot_found && checked_meta.max_clk_sys_hz >= PASSPORT_CLK_SYS_MAX_HZ  
+                  && checked_meta.max_clk_sys_hz <= 500000000u) {  
+      vfo_max_clk_sys_hz = checked_meta.max_clk_sys_hz; src = "flash";  
+  }  
+  if (slot_found && checked_meta.max_pll_vco_hz >= PASSPORT_PLL_VCO_MAX_HZ  
+                  && checked_meta.max_pll_vco_hz <= 5000000000u) {  
+      vfo_max_pll_vco_hz = checked_meta.max_pll_vco_hz; src = "flash";  
+  }  
+  Serial.printf("[LIMITS] clk_sys<=%lu Hz, VCO<=%lu Hz (source=%s)\n",  
+                (unsigned long)vfo_max_clk_sys_hz,  
+                (unsigned long)vfo_max_pll_vco_hz, src);
+    
+  Serial.flush();
 
 }
 

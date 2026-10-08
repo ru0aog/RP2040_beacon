@@ -116,9 +116,10 @@ extern uint32_t vfo_max_pll_vco_hz;
 // Записать достигнутые лимиты во Flash (вызывается из шагов OCTEST/PLLTEST)  
 void persist_clock_limits(uint64_t clk_sys_hz, uint64_t pll_vco_hz);
 
-// Чтение лимитов. 0 = нет валидных данных -> паспортные значения.  
-uint32_t flash_limits_clk_sys_hz(void);  
-uint32_t flash_limits_vco_hz(void);
+// Чтение сырых значений лимитов из dedicated-сектора (0 = невалидно/пусто)  
+uint64_t flash_limits_clk_sys_hz(void);  
+uint64_t flash_limits_vco_hz(void);
+
 
 // доступ к переменным из других модулей
 extern int32_t current_active_slot;

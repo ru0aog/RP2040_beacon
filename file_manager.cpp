@@ -285,6 +285,19 @@ void flash_limits_read(uint64_t* clk_sys_hz, uint64_t* pll_vco_hz) {
 }
 
 
+uint64_t flash_limits_clk_sys_hz(void) {  
+    uint64_t c = 0, v = 0;  
+    flash_limits_read(&c, &v);  
+    return c;   // 0, если magic/CRC/диапазон не прошли  
+}  
+  
+uint64_t flash_limits_vco_hz(void) {  
+    uint64_t c = 0, v = 0;  
+    flash_limits_read(&c, &v);  
+    return v;  
+}
+
+
 /**  
  * @brief Сохранить доказанные тестами лимиты разгона во Flash.  
  * Обновляет глобальные vfo_max_*_hz (ненулевой аргумент = обновить это поле)  

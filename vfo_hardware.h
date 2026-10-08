@@ -7,11 +7,25 @@
 // vfo_hardware.h  
 #define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // электрический номинал без вольтмода  
 #define VFO_CLK_SYS_MIN_HZ      100000000ULL  // нижняя граница поиска оптимума  
-#define VFO_CLK_SYS_MAX_HZ      400000000ULL  // 410
-#define PLL_MAX_HZ             3900000000ULL  // 3.9
+#define VFO_CLK_SYS_MAX_HZ      400000000ULL  // 410 - дефайн остаётся как АБСОЛЮТНЫЙ аппаратный барьер
+#define PLL_MAX_HZ             3900000000ULL  // 3.9 - дефайн остаётся как АБСОЛЮТНЫЙ аппаратный барьер
 #define VFO_FLASH_SCK_MAX_HZ     50000000ULL
 #define VFO_THROTTLE_HI_C   80.0f   
-#define VFO_THROTTLE_LO_C   60.0f   
+#define VFO_THROTTLE_LO_C   60.0f
+
+// рабочий лимит как переменные — min(дефайн, flash-значение)
+extern uint32_t vfo_max_clk_sys_hz;   // из Flash, паспорт=133 МГц  
+extern uint32_t vfo_max_pll_vco_hz;   // из Flash, паспорт=1600 МГц 
+
+// Эффективный лимит поиска: flash-доказанный, но не выше аппаратного барьера  
+static inline uint64_t vfo_effective_clk_max(void) {  
+    uint64_t lim = (uint64_t)vfo_max_clk_sys_hz;  
+    return (lim < VFO_CLK_SYS_MAX_HZ) ? lim : VFO_CLK_SYS_MAX_HZ;  
+}  
+static inline uint64_t vfo_effective_pll_max(void) {  
+    uint64_t lim = (uint64_t)vfo_max_pll_vco_hz;  
+    return (lim < PLL_MAX_HZ) ? lim : PLL_MAX_HZ;  
+}
 
 struct PllConfig {
     uint32_t fbdiv;
@@ -51,7 +65,9 @@ extern int pin_freq_out;
 #define VFO_OUTPUT_PIN       (pin_freq_out)
 
 // Прототипы с аргументами по умолчанию
-PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = VFO_CLK_SYS_MAX_HZ);
+uint64_t vfo_effective_clk_max(void);  
+PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = 0); // 0 = auto
+
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
 void vfo_set_tone_instant(uint8_t tone_index);
 void vfo_operation_set(bool key_down);

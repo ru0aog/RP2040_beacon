@@ -1,7 +1,7 @@
 ﻿/**
  * ============================================================================
  *  RP2040_beacon.ino — Главный диспетчер и инициализация радиомаяка
- *  Версия 2.17 от 2026-10-07, автор RU0AOG
+ *  Версия 2.19 от 2026-10-08, автор RU0AOG
  * ============================================================================
  *  
  *  НАЗНАЧЕНИЕ
@@ -168,6 +168,9 @@ void check_serial_commands() {
           LCD_print(">"+command, 1, 0);
 
           if (command.equalsIgnoreCase("?")) {
+            // СТАЛО — добавить в вывод конфигурации (команда "?" или после инициализации):  
+            Serial.printf("[LIMITS] clk_sys<=%lu Hz, PLL VCO<=%lu Hz (source=flash, passport=133M/1600M)\n",  
+                          (unsigned long)vfo_max_clk_sys_hz, (unsigned long)vfo_max_pll_vco_hz);
             print_current_settings();
             print_current_date();
             print_current_time();

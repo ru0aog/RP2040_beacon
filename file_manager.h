@@ -92,16 +92,29 @@ extern bool is_transmitting; // Ссылка на флаг занятости э
 
 
 // ============================================================================
-// Константы и метаданные для циклического выравнивания износа (Wear Leveling)
+// Служебная зона FLASH-диска
 // ============================================================================
+struct __attribute__((packed)) SlotMeta {  
+  uint32_t magic;  
+  uint32_t seq;  
+  uint32_t max_clk_sys_hz;   // доказанный OCTEST потолок шины (−3% от достигнутого)  
+  uint32_t max_pll_vco_hz;   // доказанный PLLTEST потолок VCO (−3% от достигнутого)  
+}; 
+
+// Константы и метаданные для циклического выравнивания износа (Wear Leveling)
 #define FLASH_SLOTS         8
 #define SLOT_SIZE           DISK_SIZE_BYTES // 128 КБ (кратно размеру стирания 4 КБ)
 #define SLOT_MAGIC          0xBEA1C011      // Уникальный маркер валидности слота
 
-struct __attribute__((packed)) SlotMeta {
-  uint32_t magic;
-  uint32_t seq;
-};
+#define PASSPORT_CLK_SYS_MAX_HZ  133000000UL   // паспортный потолок clk_sys  
+#define PASSPORT_PLL_VCO_MAX_HZ 1600000000UL   // паспортный потолок VCO 
+
+// Действующие лимиты разгона: загружаются из Flash, до прогона тестов — паспортные  
+extern uint32_t vfo_max_clk_sys_hz;  
+extern uint32_t vfo_max_pll_vco_hz;  
+  
+// Записать достигнутые лимиты во Flash (вызывается из шагов OCTEST/PLLTEST)  
+void persist_clock_limits(uint32_t clk_sys_hz, uint32_t pll_vco_hz);
 
 // доступ к переменным из других модулей
 extern int32_t current_active_slot;

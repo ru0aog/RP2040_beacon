@@ -128,6 +128,11 @@ TaskItem beacon_schedule[MAX_SCHEDULE_TASKS];
 int32_t  current_active_slot = -1; // активный слот
 uint32_t current_max_seq     = 0;  // число перезаписей
 
+// Лимиты разгона: паспортные до первого успешного OCTEST/PLLTEST  
+uint32_t vfo_max_clk_sys_hz = PASSPORT_CLK_SYS_MAX_HZ;  
+uint32_t vfo_max_pll_vco_hz = PASSPORT_PLL_VCO_MAX_HZ;
+
+
 volatile bool pc_file_written = false;
 
 bool led_enable_flag = true;    // По умолчанию LED-индикация включена
@@ -218,9 +223,11 @@ static void save_ram_to_flash() {
   uint32_t target_flash_addr = FLASH_TARGET_OFFSET + (next_slot * SLOT_SIZE);
 
   // Внедряем метаданные износа в скрытые от FAT байты в самом конце буфера ОЗУ (Сектор 255)
-  SlotMeta* meta = (SlotMeta*)&ram_disk_buffer[DISK_SIZE_BYTES - sizeof(SlotMeta)];
-  meta->magic = SLOT_MAGIC;
-  meta->seq = next_seq;
+  SlotMeta* meta = (SlotMeta*)&ram_disk_buffer[DISK_SIZE_BYTES - sizeof(SlotMeta)];  
+  meta->magic = SLOT_MAGIC;  
+  meta->seq = next_seq;  
+  meta->max_clk_sys_hz = vfo_max_clk_sys_hz;   // лимиты путешествуют вместе со слотом  
+  meta->max_pll_vco_hz = vfo_max_pll_vco_hz;
 
   // Флэш нельзя программировать на разогнанной clk_sys — откатываем частоту на номинал  
   bool was_boosted = clk_boosted;  
@@ -1023,12 +1030,22 @@ void init_file_manager() {
     // Проверка количества записей в каталоге (смещение 17 в бут-секторе BPB)
     uint8_t root_entries_count = *(const uint8_t*)(flash_addr_abs + 17);
 
-    if (checked_meta.magic == SLOT_MAGIC && sig_low == 0x55 && sig_high == 0xAA && root_entries_count == 48) {
-      if (checked_meta.seq >= current_max_seq) {
-        current_max_seq = checked_meta.seq;
-        current_active_slot = i;
-        slot_found = true;
-      }
+    if (checked_meta.magic == SLOT_MAGIC && sig_low == 0x55 && sig_high == 0xAA && root_entries_count == 48) {  
+      if (checked_meta.seq >= current_max_seq) {  
+        current_max_seq = checked_meta.seq;  
+        current_active_slot = i;  
+        slot_found = true;  
+        // Лимиты из старых образов читаются как 0xFFFFFFFF (стёртая flash) или 0 —  
+        // это невалидно, тогда остаются паспортные  
+        if (checked_meta.max_clk_sys_hz >= PASSPORT_CLK_SYS_MAX_HZ &&  
+            checked_meta.max_clk_sys_hz <= 1000000000UL) {  
+          vfo_max_clk_sys_hz = checked_meta.max_clk_sys_hz;  
+        }  
+        if (checked_meta.max_pll_vco_hz >= PASSPORT_PLL_VCO_MAX_HZ &&  
+            checked_meta.max_pll_vco_hz <= 6000000000ULL) {  
+          vfo_max_pll_vco_hz = checked_meta.max_pll_vco_hz;  
+        }  
+      }  
     }
   }
 
@@ -1501,6 +1518,11 @@ void force_reset_to_default_disk() {
   pin_pwr_ds   = -1;  // часы RTC
   pin_pwr_bm   = -1;  // климатический датчик
   pin_pwr_dl   = -1;  // дисплей
+
+  // при формате лимиты возвращаются на паспортные:  
+  vfo_max_clk_sys_hz = PASSPORT_CLK_SYS_MAX_HZ;  
+  vfo_max_pll_vco_hz = PASSPORT_PLL_VCO_MAX_HZ;
+
   // 1. Генерирует чистую структуру FAT12 в ОЗУ и сама вызывает save_ram_to_flash()
   create_default_fat_with_info_file(); 
   

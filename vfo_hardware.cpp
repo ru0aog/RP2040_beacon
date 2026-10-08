@@ -9,6 +9,11 @@
  * и работает без обращения к ОЗУ. Благодаря этому частота расчета дизеринга 
  * достигает своего физического потолка — нескольких мегагерц.
  
+ план:
+      - абсолютное значение частоты локального кварцевого генератора заменить
+        на относительную коррекцию +/- ppm
+      - добавить запись/чтение результатов разгона во флэш
+
  2.18 от 2026-10-08
       - улучшение метрики: введены штрафы за узлы, у которых dds_step садится возле простых дробей шкалы 1/4,1/2,3/4, k/8
       - 
@@ -128,9 +133,17 @@ PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFA
 PllConfig pll_overclock = { 69,  3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 }; 
 PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30,    true,  1 };  
 
+// Эффективный потолок clk_sys: из flash-служебной зоны (после octest),  
+// иначе паспортный номинал. Не выше жёсткого дефайна.  
+uint64_t vfo_effective_clk_max(void) {  
+    uint64_t from_flash = flash_limits_clk_sys_hz();   // 0 = нет данных в служебной зоне  
+    uint64_t cap = from_flash ? from_flash : VFO_CLK_SYS_NOMINAL_HZ;  
+    return (cap < VFO_CLK_SYS_MAX_HZ) ? cap : VFO_CLK_SYS_MAX_HZ;  
+}
+
 volatile bool clk_boosted = false;       // активация разгона
 
-
+ 
 
 // ============================================================================
 // ВЕРХНИЕ МАКРОСЫ И СТРУКТУРЫ ДЛЯ МНОГОКРИТЕРИАЛЬНОГО АВТОТЮНА
@@ -469,7 +482,7 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
     }  
   
     // 1. Поиск оптимума (один проход)  
-    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, VFO_CLK_SYS_MAX_HZ);  
+    PllConfig opt = vfo_find_optimal_pll(target_freq_hz, vfo_effective_clk_max());  
   
     // 2. Сравнение метрик  
     uint64_t target_mhz = (uint64_t)target_freq_hz * 1000ULL;  
@@ -1057,7 +1070,9 @@ static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
   
     uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
-    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы  
+    uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы
+
+    uint64_t clk_limit = (max_clk_limit == 0) ? vfo_effective_clk_max() : max_clk_limit;
   
     // Дефолтная безопасная конфигурация на случай сбоя  
     PllConfig best_pll = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
@@ -1071,6 +1086,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     const uint64_t max_allowed_clk = max_clk_limit;  
   
 #if VFO_PLL_DEBUG  
+    Serial.printf("[PLLDBG] limits: clk_sys<=%.1f MHz, VCO<=%.0f MHz (flash)\n",  
+              vfo_effective_clk_max() / 1e6, vfo_effective_pll_max() / 1e6);
     Serial.printf("[PLLDBG] scan range: %.3f .. %.3f MHz (target=%u)\n",  
               min_allowed_clk / 1e6, max_allowed_clk / 1e6, target_frequency_hz);  
     Serial.printf("[PLLDBG] target=%u Hz  nominal: clk=%lu\n",  
@@ -1111,8 +1128,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
   
                     // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;
-                    // Верхний предел PLL_MAX_HZ
-                    if (vco_hz > PLL_MAX_HZ) continue;  // под зависанием ~3.96 с маржой
+                    // Верхний предел
+                    if (vco_hz > vfo_effective_pll_max()) continue;
   
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
                     if (clk_sys_hz < min_allowed_clk ||  
@@ -1298,7 +1315,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     if (clk_boosted) { 
         // Если активирован BOOST — запускаем матричный поиск ЛУЧШЕЙ частоты PLL
         // строго под НОВУЮ целевую частоту в пределах стабильного потолка pll_ceiling
-        target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_MAX_HZ); 
+        target_pll = vfo_find_optimal_pll(base_freq_hz, clk_limit); 
         
         // Синхронизируем рабочий профиль оверклока для Термогуарда
         pll_overclock = target_pll;
@@ -1696,7 +1713,17 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
  
         
         pll_ceiling = step_cfg;  
-        max_ok = true;  
+        max_ok = true;
+
+        // Перезаписываем достигнутый потолок во Flash со сдвигом -3%.  
+        // Flash пишется только на номинале: откат -> сохранение -> возврат на ступень.  
+        uint32_t proven_hz = (uint32_t)((step_cfg.clk_sys_hz * 97ULL) / 100ULL);  
+        vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
+        persist_clock_limits(proven_hz, 0);   // 0 = не трогаем лимит PLL  
+        Serial.printf("[OCTEST] flash: clk_sys_max=%lu Hz (-3%% от достигнутых %llu)\n",  
+                      (unsigned long)proven_hz, step_cfg.clk_sys_hz);  
+        Serial.flush();  
+        vfo_set_clk_sys(step_cfg, (uint32_t)vsel);
     } 
   
     *scratch = 0xFFFFFFFFu;  
@@ -1822,7 +1849,30 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
             break;
         }
 
+        // Зафиксировать достигнутый VCO во Flash со сдвигом -3%.  
+        // clk_sys здесь <= 150 МГц, но для записи flash откатываемся на номинал.  
+        {  
+            uint32_t proven_vco = (uint32_t)((vco_hz * 97ULL) / 100ULL);  
+            vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
+            persist_clock_limits(0, proven_vco);  
+            Serial.printf("[ШТУРМ] flash: pll_vco_max=%lu Hz (-3%% от %llu)\n",  
+                          (unsigned long)proven_vco, vco_hz);  
+            Serial.flush();  
+            // Возврат на текущую ступень штурма (p1=p2=7, опора ROSC)  
+            uint32_t ints2 = save_and_disable_interrupts();  
+            pll_sys_hw->fbdiv_int = fb;  
+            pll_sys_hw->prim = (7u << PLL_PRIM_POSTDIV1_LSB) | (7u << PLL_PRIM_POSTDIV2_LSB);  
+            volatile uint32_t t2 = 30000;  
+            while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --t2);  
+            clock_configure(clk_sys,  
+                            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
+                            clk_sys_hz, clk_sys_hz);  
+            restore_interrupts(ints2);  
+        } 
+
         busy_wait_us(40000); // 40 мс для тепловой стабилизации СВЧ-блока
+
     }
 
     // Возврат в безопасный номинал

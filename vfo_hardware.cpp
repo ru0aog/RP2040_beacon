@@ -1,17 +1,28 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Дизеринг-движок программного DDS VFO на автоматах PIO  
- *  Версия 2.17 (Профилирование и ASM-оптимизация Core 1), 2026-10-07  
+ *  Версия 2.18 (Профилирование и ASM-оптимизация Core 1), 2026-10-08  
  * ============================================================================ 
  * программная реализация MASH-2 (Multi-Stage Noise Shaping 2-го порядка
  * выполнен по схеме MASH 1-1 (каскад из двух последовательных дельта-сигма модуляторов 1-го порядка).
  * Конвейер полностью развернут внутри регистров процессора ARM Cortex-M0+ на изолированном ядре Core 1 
  * и работает без обращения к ОЗУ. Благодаря этому частота расчета дизеринга 
  * достигает своего физического потолка — нескольких мегагерц.
+ 
+ 2.18 от 2026-10-08
+      - улучшение метрики: введены штрафы за узлы, у которых dds_step садится возле простых дробей шкалы 1/4,1/2,3/4, k/8
+      - 
+
+ 2.17 от 2026-10-07
+      - устранён самопроизвольный сброс POSTDIV1 в 2 (состояние 1 исключили)
+      - добавлено предсказание частоты отстройки основных спуров
+      - стабилизирована работа в режиме разгона
+      - добавлена процедура теста максимальной скорости VCO PLL
+      - добавлено включение и перестройка частоты энкодером
 
 Архитектурная схема (MASH 1-1)
-В коде параллельно работают два 32-битных регистра-аккумулятора: loc_acc1 (первая ступень) и loc_acc2 (вторая ступень).
-- Первая ступень интегрирует (накапливает) входное дробное приращение частоты step (оно же dds_step). 
+ В коде параллельно работают два 32-битных регистра-аккумулятора: loc_acc1 (первая ступень) и loc_acc2 (вторая ступень).
+ - Первая ступень интегрирует (накапливает) входное дробное приращение частоты step (оно же dds_step). 
  При каждом её переполнении формируется бит переноса carry1.
  - Вторая ступень интегрирует не входной шаг, а текущее состояние фазы первой ступени (loc_acc1). 
  При её переполнении формируется бит переноса carry2.
@@ -78,6 +89,18 @@
 #define VFO_MAX_STABLE_CLK_HZ    380000000ULL  // Ваш доказанный предел стабильности
 #define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
 
+// Структура детальной калькуляции штрафов
+struct MetricBreakdown {
+    uint32_t raw_step;
+    uint32_t frac;
+    uint32_t ctz_val;
+    uint64_t ctz_penalty;
+    uint64_t center_dist;
+    uint64_t mash_penalty;
+    uint64_t clk_penalty;
+    uint64_t int_penalty;
+    uint64_t total_metric;
+};
 
 // ============================================================================
 // ПРОТОТИПЫ (ОБЪЯВЛЕНИЯ) ВНУТРЕННИХ ФУНКЦИЙ ФАЙЛА
@@ -86,7 +109,8 @@ static void detach_peripheral_clock();
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel);
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit);
-
+// Упреждающий прототип для verbose-метрики (чтобы find_optimal_pll видела её выше по коду)
+static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out = nullptr);
 
 // Добавлен упреждающий прототип Core 1, теперь vfo_clk_boost_enter сможет его вызвать!
 static void __not_in_flash_func(vfo_core1_entry)();
@@ -123,21 +147,9 @@ volatile bool clk_boosted = false;       // активация разгона
 #define VFO_INT_PENALTY          500000000ULL  // Запрет pio_int < 4
 #endif
 
-// Структура детальной калькуляции штрафов
-struct MetricBreakdown {
-    uint32_t raw_step;
-    uint32_t frac;
-    uint32_t ctz_val;
-    uint64_t ctz_penalty;
-    uint64_t center_dist;
-    uint64_t mash_penalty;
-    uint64_t clk_penalty;
-    uint64_t int_penalty;
-    uint64_t total_metric;
-};
 
-// Упреждающий прототип для verbose-метрики (чтобы find_optimal_pll видела её выше по коду)
-static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out = nullptr);
+
+
 
 
 
@@ -832,6 +844,25 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
 
 
+ 
+// Минимальное КОЛЬЦЕВОЕ расстояние dds_step до якорей k/8 (единицы 2^-32).  
+// Якоря: k * 2^29, k = 0..7. Якорь 8/8 = 2^32 совпадает с 0 по кольцу —  
+// кольцевая арифметика покрывает его автоматически.  
+// Максимум результата = 2^28 (половина интервала k/8).  
+static uint32_t dds_step_min_dist_to_k8(uint32_t step) {  
+    uint32_t best = (1u << 28);          // 268435456 — теоретический максимум  
+    for (uint32_t k = 0; k < 8; k++) {  
+        uint32_t a = k << 29;            // якорь k/8 шкалы  
+        uint32_t d = step - a;           // беззнаковая разность — уже на кольце  
+        if (d > 0x80000000u) d = 0u - d; // min(d, 2^32 - d)  
+        if (d < best) best = d;  
+    }  
+    return best;  
+}
+
+
+
+
 
 static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out) {
     VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
@@ -851,13 +882,20 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->ctz_penalty = (1ULL << (b->ctz_val + 26));
         b->total_metric += b->ctz_penalty;
     }
-
-    // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)
-    if (test.dds_step != 0) {
-        uint64_t target_center = 0x80000000ULL;
-        b->center_dist = (test.dds_step > target_center) ? (test.dds_step - target_center) : (target_center - test.dds_step);
-        b->mash_penalty = b->center_dist / 4ULL;
-        b->total_metric += b->mash_penalty;
+ 
+    // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
+    if (test.dds_step != 0) {  
+        uint64_t target_center = 0x80000000ULL;  
+        b->center_dist = (test.dds_step > target_center) ? (test.dds_step - target_center) : (target_center - test.dds_step);  
+        b->mash_penalty = b->center_dist / 4ULL;  
+  
+        // Штраф за близость к простым дробям k/8 шкалы  
+        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
+        if (dist_k8 < (1u << 24)) {  
+            uint64_t deficit = (uint64_t)((1u << 24) - dist_k8);  
+            b->mash_penalty += (deficit * deficit) >> 12;  
+        }  
+        b->total_metric += b->mash_penalty;  
     }
 
     // 3. Штраф за отказ от разгона к 380 МГц
@@ -950,18 +988,29 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoPara
         metric += (1ULL << (fraction_simplicity + 26)); 
     }
 
-    // ------------------------------------------------------------------------
-    // КРИТЕРИЙ 2: Чистка ближней зоны MASH-2 (Размытие шумовой юбки)
-    // ------------------------------------------------------------------------
-    if (test.dds_step != 0) {
-        uint64_t target_center = 0x80000000ULL; // Центр шкалы 32-битного DDS
-        uint64_t current_step  = test.dds_step;
-        
-        // Ищем удаление от центра. Возле краев (0 или 0xFFFFFFFF) MASH-2 "сбоит"
-        // и кучкует энергию фазового шума вплотную к основному тону.
-        uint64_t center_dist = (current_step > target_center) ? (current_step - target_center) : (target_center - current_step);
-        metric += center_dist / 4ULL; 
+
+    // ------------------------------------------------------------------------  
+    // КРИТЕРИЙ 2: Чистка ближней зоны MASH-2 (Размытие шумовой юбки)  
+    // ------------------------------------------------------------------------  
+    if (test.dds_step != 0) {  
+        uint64_t target_center = 0x80000000ULL; // Центр шкалы 32-битного DDS  
+        uint64_t current_step  = test.dds_step;  
+          
+        // Ищем удаление от центра. Возле краев (0 или 0xFFFFFFFF) MASH-2 "сбоит"  
+        // и кучкует энергию фазового шума вплотную к основному тону.  
+        uint64_t center_dist = (current_step > target_center) ? (current_step - target_center) : (target_center - current_step);  
+        metric += center_dist / 4ULL;  
+  
+        // Штраф за близость к простым дробям шкалы k/8 (вкл. края 0 и 2^32).  
+        // Дистанция < 2^24 (±6.3% от октавы) -> idle-тоны в ближней зоне.  
+        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
+        if (dist_k8 < (1u << 24)) {  
+            // квадратичный штраф: чем ближе к якорю, тем хуже  
+            uint64_t deficit = (uint64_t)((1u << 24) - dist_k8);  
+            metric += (deficit * deficit) >> 12;   // до ~2^36 в нуле  
+        }  
     }
+
 
     // ------------------------------------------------------------------------
     // КРИТЕРИЙ 3: Безусловный силовой разгон к 380 МГц
@@ -1318,24 +1367,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     uint64_t base_target_chz = (uint64_t)base_freq_hz * 100ULL; 
     uint64_t snapped_base_chz = base_target_chz;
 
-#ifdef VFO_SNAP_TO_GRID
-    uint32_t min_dds_metric = 0xFFFFFFFFu;
-    for (int32_t offset_chz = -10; offset_chz <= 10; offset_chz++) {
-        uint64_t candidate_chz = (uint64_t)((int64_t)base_target_chz + offset_chz);
-        // Математика calculate_raw_params_mhz жестко опирается на РЕАЛЬНУЮ clk_sys_hz
-        VfoParameters candidate_params = calculate_raw_params_mhz(current_clk_sys_hz, candidate_chz * 10ULL);
-        uint32_t dstep = candidate_params.dds_step; 
-        uint32_t dist_to_0 = dstep; 
-        uint32_t dist_to_max = 0xFFFFFFFFu - dstep;
-        uint32_t current_metric = (dist_to_0 < dist_to_max) ? dist_to_0 : dist_to_max;
-        
-        if (current_metric < min_dds_metric) { 
-            min_dds_metric = current_metric; 
-            snapped_base_chz = candidate_chz; 
-        }
-    }
-#endif
-
     vfo_base_mhz = snapped_base_chz * 10ULL; 
     vfo_step_mhz = (uint64_t)(step_hz * 1000.0);  
     
@@ -1361,7 +1392,9 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
                       (unsigned long)pll_sys_hw->fbdiv_int,  
                       (unsigned long)pll_sys_hw->prim);  
         Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);  
-        Serial.printf("DDS Step   : 0x%08X (%u)\n", real_base_params.dds_step, real_base_params.dds_step);  
+        Serial.printf("DDS Step   : 0x%08X (%u)  dist_to_k8=%u LSB\n",  
+                    real_base_params.dds_step, real_base_params.dds_step,  
+                    (unsigned)dds_step_min_dist_to_k8(real_base_params.dds_step)); 
         Serial.printf("-------------------------------\n");  
     #endif
 
@@ -2027,6 +2060,3 @@ void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, key_down);
 }
-
-
-

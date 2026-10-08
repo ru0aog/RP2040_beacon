@@ -119,25 +119,6 @@ PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30
 
 volatile bool clk_boosted = false;       // активация разгона
 
- 
-
-// ============================================================================
-// ВЕРХНИЕ МАКРОСЫ И СТРУКТУРЫ ДЛЯ МНОГОКРИТЕРИАЛЬНОГО АВТОТЮНА
-// ============================================================================
-
-#ifndef VFO_PREFERRED_MIN_CLK
-#define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница чистой зоны
-#endif
-
-#ifndef VFO_INT_PENALTY
-#define VFO_INT_PENALTY          500000000ULL  // Запрет pio_int < 4
-#endif
-
-
-
-
-
-
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -145,8 +126,6 @@ static float    vfo_read_core_temp_c(void);
 
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz,  
                                VfoParameters* out = nullptr);
-
-
 
 
 // Помощник автоматического определения напряжения ядра под частоту шины  
@@ -904,11 +883,12 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->mash_penalty;  
     }
 
-    // 3. Штраф за отказ от разгона к 380 МГц
+    // 3. Штраф за отказ от разгона (ниже 320 МГц)
     if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
         b->clk_penalty += 10000000000ULL; // Барьерный штраф ниже 320 МГц
     }
-    uint64_t clk_deficit = vfo_max_clk_sys_hz - clk_sys_hz;
+
+    uint64_t clk_deficit = (clk_sys_hz >= vfo_max_clk_sys_hz) ? 0 : (vfo_max_clk_sys_hz - clk_sys_hz);
     b->clk_penalty += (clk_deficit * clk_deficit) / 5000ULL;
     b->total_metric += b->clk_penalty;
 

@@ -65,7 +65,7 @@ extern int pin_freq_out;
 #define VFO_OUTPUT_PIN       (pin_freq_out)
 
 // Прототипы с аргументами по умолчанию
-uint64_t vfo_effective_clk_max(void);  
+
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = 0); // 0 = auto
 
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);

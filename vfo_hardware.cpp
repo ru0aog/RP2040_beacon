@@ -133,14 +133,6 @@ PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFA
 PllConfig pll_overclock = { 69,  3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 }; 
 PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30,    true,  1 };  
 
-// Эффективный потолок clk_sys: из flash-служебной зоны (после octest),  
-// иначе паспортный номинал. Не выше жёсткого дефайна.  
-uint64_t vfo_effective_clk_max(void) {  
-    uint64_t from_flash = flash_limits_clk_sys_hz();   // 0 = нет данных в служебной зоне  
-    uint64_t cap = from_flash ? from_flash : VFO_CLK_SYS_NOMINAL_HZ;  
-    return (cap < VFO_CLK_SYS_MAX_HZ) ? cap : VFO_CLK_SYS_MAX_HZ;  
-}
-
 volatile bool clk_boosted = false;       // активация разгона
 
  
@@ -1315,7 +1307,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     if (clk_boosted) { 
         // Если активирован BOOST — запускаем матричный поиск ЛУЧШЕЙ частоты PLL
         // строго под НОВУЮ целевую частоту в пределах стабильного потолка pll_ceiling
-        target_pll = vfo_find_optimal_pll(base_freq_hz, clk_limit); 
+        target_pll = vfo_find_optimal_pll(base_freq_hz, vfo_effective_clk_max());
         
         // Синхронизируем рабочий профиль оверклока для Термогуарда
         pll_overclock = target_pll;

@@ -248,6 +248,25 @@ static void save_ram_to_flash() {
   current_max_seq = next_seq;
 }
 
+/**  
+ * @brief Сохранить доказанные тестами лимиты разгона во Flash.  
+ * Обновляет глобальные vfo_max_*_hz (ненулевой аргумент = обновить это поле)  
+ * и вызывает перезапись текущего слота с новой SlotMeta.  
+ * ВАЖНО: вызывать только на номинальной clk_sys — flash нельзя  
+ * программировать на разогнанной шине (SCK масштабируется от clk_sys).  
+ */  
+void persist_clock_limits(uint32_t clk_sys_hz, uint32_t pll_vco_hz) {  
+    if (clk_sys_hz != 0 && clk_sys_hz >= PASSPORT_CLK_SYS_MAX_HZ &&  
+        clk_sys_hz <= VFO_CLK_SYS_MAX_HZ) {  
+        vfo_max_clk_sys_hz = clk_sys_hz;  
+    }  
+    if (pll_vco_hz != 0 && pll_vco_hz >= PASSPORT_PLL_VCO_MAX_HZ &&  
+        (uint64_t)pll_vco_hz <= PLL_MAX_HZ) {  
+        vfo_max_pll_vco_hz = pll_vco_hz;  
+    }  
+    save_ram_to_flash();  // запишет текущий слот с обновлённой SlotMeta  
+}
+
 // Вспомогательная функция для записи 12-битной ячейки в таблицу FAT12
 static void set_fat12_entry(uint32_t fat_start_bytes, uint16_t cluster, uint16_t value) {
   uint32_t byte_offset = fat_start_bytes + ((cluster * 3) / 2);

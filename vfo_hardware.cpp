@@ -859,28 +859,28 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
                 uint32_t d = (test.pio_frac > anchor)  
                            ? (test.pio_frac - anchor)  
                            : (anchor - test.pio_frac);  
-                if (d < 8u) {  
-                    b->ctz_penalty += (1ULL << 33);   // практически запрет  
+                // выход из обоих циклов — штраф начисляем один раз  
+                if (d < 8u) {    
+                    b->ctz_penalty += (1ULL << 33);  
+                    n = 8;          // гасим внешний цикл  
                     break;  
-                }  
+                } 
             }  
         }  
         b->total_metric += b->ctz_penalty;  
     }
  
     // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
-    if (test.dds_step != 0) {  
-        uint64_t target_center = 0x80000000ULL;  
-        b->center_dist = (test.dds_step > target_center) ? (test.dds_step - target_center) : (target_center - test.dds_step);  
-        b->mash_penalty = b->center_dist / 4ULL;  
-  
-        // Штраф за близость к простым дробям k/8 шкалы  
-        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);    
-        if (dist_k8 < VFO_K8_BELT) {    
-            uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);    
-            b->mash_penalty += (deficit * deficit) >> 14;      // нормировка под 2^26  
+    //    Штраф за близость dds_step к якорям k/8 (короткий период паттерна  
+    //    переносов -> дискретный idle tone вместо шумовой полки)  
+    if (test.dds_step != 0) {    
+        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
+        b->center_dist = dist_k8;   // для диагностики: теперь это dist_k8  
+        if (dist_k8 < VFO_K8_BELT) {      
+            uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);      
+            b->mash_penalty = (deficit * deficit) >> 14;      // нормировка под 2^26  
         }  
-        b->total_metric += b->mash_penalty;  
+        b->total_metric += b->mash_penalty;    
     }
 
     // 3. Штраф за отказ от разгона (ниже 320 МГц)
@@ -996,8 +996,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     if (target_mhz < 1000000000ULL)  target_mhz = 1000000000ULL;  // 1.0 МГц  
     if (target_mhz > 30000000000ULL) target_mhz = 30000000000ULL; // 30 МГц  
   
-    const uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;  
-    const uint64_t max_allowed_clk = max_clk_limit;  
+    const uint64_t min_allowed_clk = VFO_CLK_SYS_MIN_HZ;    
+    const uint64_t max_allowed_clk = clk_limit;       // = flash-лимит при max_clk_limit==0
   
 #if VFO_PLL_DEBUG  
     Serial.printf("[PLLDBG] limits: clk_sys<=%.1f MHz, VCO<=%.0f MHz (flash)\n",  
@@ -1035,10 +1035,12 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
   
         for (uint32_t p1 = 2; p1 <= 7; p1++) {   // p1 >= 2: режим p1=1 даёт ровное деление на 2 при VCO < ~2.8 ГГц  
             for (uint32_t p2 = 1; p2 <= 7; p2++) {  
+                if (p1 < p2) continue;   // ВЧ-правило: старший постделитель первым,  
+                                        // иначе PLL работает в режиме, который  
+                                        // OCTEST никогда не проверял  
                 uint32_t pdiv_total = p1 * p2;  
-  
                 for (uint32_t fbdiv = 16; fbdiv <= 320; fbdiv++) {  
-                    uint64_t vco_hz = ref_hz * fbdiv;  
+                    uint64_t vco_hz = ref_hz * fbdiv;
   
                     // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;

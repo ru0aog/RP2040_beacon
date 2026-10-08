@@ -315,19 +315,19 @@ void persist_clock_limits(uint64_t new_clk_hz, uint64_t new_vco_hz) {
     ssi_hw->baudr  = 2;                 // SCK = 12/2 = 6 МГц — консервативно и быстро  
     ssi_hw->ssienr = 1;  
   
-    // 3. Запись сектора  
-    static LimitsRec rec;  
-    static uint32_t limits_seq = 0;  
-    rec.magic = LIMITS_MAGIC;  
-    rec.seq = ++limits_seq;  
-    rec.clk_sys_hz = new_clk_hz;  
-    rec.pll_vco_hz = new_vco_hz;  
-    rec.crc32 = rec.seq ^ (uint32_t)rec.clk_sys_hz ^ (uint32_t)(rec.clk_sys_hz >> 32)  
-                      ^ (uint32_t)rec.pll_vco_hz ^ (uint32_t)(rec.pll_vco_hz >> 32);  
-    flash_range_erase(LIMITS_FLASH_OFFSET, 4096u);  
-    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t *)&rec, sizeof(rec));  
-    // Вернуть clk_sys на PLL до restore_interrupts — иначе система остаётся  
-    // на XOSC 12 МГц, и вызывающий работает на опоре вместо рабочей частоты.  
+    // 3. Запись сектора
+    static LimitsRec rec;
+    static uint32_t limits_seq = 0;
+    rec.magic = LIMITS_MAGIC;
+    rec.seq = ++limits_seq;
+    rec.clk_sys_hz = new_clk_hz;
+    rec.pll_vco_hz = new_vco_hz;
+    rec.crc32 = rec.seq ^ (uint32_t)rec.clk_sys_hz ^ (uint32_t)(rec.clk_sys_hz >> 32)
+                      ^ (uint32_t)rec.pll_vco_hz ^ (uint32_t)(rec.pll_vco_hz >> 32);
+    flash_range_erase(LIMITS_FLASH_OFFSET, 4096u);
+    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t *)&rec, sizeof(rec));
+    // Вернуть clk_sys на PLL до restore_interrupts — иначе система остаётся
+    // на XOSC 12 МГц, и вызывающий работает на опоре вместо рабочей частоты.
     clock_configure(clk_sys,  
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  

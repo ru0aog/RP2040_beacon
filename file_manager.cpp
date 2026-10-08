@@ -250,8 +250,16 @@ static void save_ram_to_flash() {
 }
 
 
+
+// ============================================================================  
+//  Сектор лимитов разгона: dedicated 4KB за пределами дисковой области.  
+//  LIMITS_FLASH_OFFSET должен лежать ВНЕ диапазона FLASH_TARGET_OFFSET ..  
+//  FLASH_TARGET_OFFSET + FLASH_SLOTS * SLOT_SIZE — иначе MSC-запись затрёт его.  
+// ============================================================================  
+
 // отдельный 4-КБ сектор сразу за областью слотов  
-#define LIMITS_FLASH_OFFSET  (FLASH_TARGET_OFFSET + FLASH_SLOTS * SLOT_SIZE)  
+// Адрес dedicated-сектора — СРАЗУ за массивом слотов, за границей диска  
+#define LIMITS_FLASH_OFFSET  (FLASH_TARGET_OFFSET + (uint32_t)FLASH_SLOTS * SLOT_SIZE)
 #define LIMITS_MAGIC         0x4C4D5453u   // 'LMTS'  
 #define LIMITS_REC_SIZE      256u          // программируем страницу целиком  
   
@@ -284,6 +292,7 @@ void flash_limits_read(uint64_t* clk_sys_hz, uint64_t* pll_vco_hz) {
  * ВАЖНО: вызывать только на номинальной clk_sys — flash нельзя  
  * программировать на разогнанной шине (SCK масштабируется от clk_sys).  
  */  
+
 // persist_clock_limits: пишет LimitsRec в dedicated-сектор.  
 // ВАЖНО: вызывается из штурма, где clk_sys идёт от PLL на ROSC.  
 // Перед erase/program обязательно: clk_sys -> XOSC (12 МГц), ssi baudr -> 2.  
@@ -316,9 +325,17 @@ void persist_clock_limits(uint64_t new_clk_hz, uint64_t new_vco_hz) {
     rec.crc32 = rec.seq ^ (uint32_t)rec.clk_sys_hz ^ (uint32_t)(rec.clk_sys_hz >> 32)  
                       ^ (uint32_t)rec.pll_vco_hz ^ (uint32_t)(rec.pll_vco_hz >> 32);  
     flash_range_erase(LIMITS_FLASH_OFFSET, 4096u);  
-    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t*)&rec, LIMITS_REC_SIZE);  
+    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t *)&rec, sizeof(rec));  
+    // Вернуть clk_sys на PLL до restore_interrupts — иначе система остаётся  
+    // на XOSC 12 МГц, и вызывающий работает на опоре вместо рабочей частоты.  
+    clock_configure(clk_sys,  
+                    CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
+                    CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
+                    12 * MHZ, 12 * MHZ);  
     restore_interrupts(ints);  
-    flash_flush_cache();  
+    __dsb(); __isb();  
+    Serial.printf("[LIMITS] flash stored: clk_sys<=%llu Hz, VCO<=%llu Hz\n",  
+                  (unsigned long long)rec.clk_sys_hz, (unsigned long long)rec.pll_vco_hz);  
 }
 
 

@@ -1121,30 +1121,30 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;
                     // Верхний предел
-                    if (vco_hz > vfo_effective_pll_max()) continue;          // лимит VCO из flash (1600М…3.9Г)  
+                    if (vco_hz > vfo_effective_pll_max()) continue;          // лимит VCO из flash (1600М…3.9Г)
                     
-                    uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
-                    if (clk_sys_hz < min_allowed_clk ||  
+                    uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;
+                    if (clk_sys_hz < min_allowed_clk ||
                         clk_sys_hz > clk_limit) continue;                     // лимит clk_sys из flash (133М…400М)
 
-                    // Жёсткий минимум шины: спур-уровень ~ f_out²/clk_sys  
-                    if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;  
+                    // Жёсткий минимум шины: спур-уровень ~ f_out²/clk_sys
+                    if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;
   
-                    // Единая метрика кандидата (verbose-версия с декомпозицией штрафов)  
-                    VfoParameters test;  
-                    MetricBreakdown brk;  
-                    uint64_t current_dds_metric =  
-                        vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &brk, &test); 
-                    // Если verbose нет — используйте vfo_pll_metric(...) и уберите brk.  
+                    // Единая метрика кандидата (verbose-версия с декомпозицией штрафов)
+                    VfoParameters test;
+                    MetricBreakdown brk;
+                    uint64_t current_dds_metric =
+                        vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &brk, &test);
+                    // Если verbose нет — используйте vfo_pll_metric(...) и уберите brk
   
-                    if (test.pio_int < 2) continue;  
+                    if (test.pio_int < 2) continue;
   
-                    // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===  
-                    uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,  
-                                                                test.pio_frac,  
-                                                                clk_sys_hz);  
-                    bool frac_forbidden = (test.pio_frac != 0u) &&  
-                                          (spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ);  
+                    // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===
+                    uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,
+                                                                test.pio_frac,
+                                                                clk_sys_hz);
+                    bool frac_forbidden = (test.pio_frac != 0u) &&
+                                          (spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ);
   
                     // === КЛАСС 2: чистота дизера по СЫРОМУ dmin (до нормализации!) ===  
                     uint32_t dd  = test.dds_step;  

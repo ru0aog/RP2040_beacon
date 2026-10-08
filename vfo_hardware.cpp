@@ -749,16 +749,18 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
         // int32_t r_bits = (int32_t)(loc_rand_state & 0x01u); // 1-bit бит  0    диапазона -1..+1
         // int32_t r_bits = (int32_t)(loc_rand_state & 0x03u); // 2-bit биты 0..1 диапазона -3..+3
-        // int32_t r_bits = (int32_t)(loc_rand_state & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
+           int32_t r_bits = (int32_t)(loc_rand_state & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
         // int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x1Fu); // 5-bit
         
         // Умножаем на 2 и вычитаем 15. Получаем симметричный ряд нечетных чисел от -15 до +15.
         // Математическое ожидание строго равно 0.0
         // step += ((r_bits << 1) - 1);  // 1-bit
         // step += ((r_bits << 1) - 3);  // 2-bit
-        // step += ((r_bits << 1) - 7);  // 3-bit
+           step += ((r_bits << 1) - 7);  // 3-bit
         // step += ((r_bits << 1) - 15); // 4-bit
-         step = l_step;                   // декорреляция целой части отключена
+        // step += ((r_bits << 1) - 31); // 5-bit
+        // step = l_step;                   // декорреляция целой части отключена
 
 #endif
 
@@ -804,13 +806,16 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         
         // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x01u); // 1-bit биты 0    диапазона -1..+1
         // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x03u); // 2-bit биты 0..1 диапазона -3..+3
-        // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
+           int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
         // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
+        // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x1Fu); // 5-bit  
+
         // current_frac += (fr_bits << 1) - 1;                         // 1-bit биты 0    диапазона -1..+1
         // current_frac += (fr_bits << 1) - 3;                         // 2-bit биты 0..3 диапазона -3..+3
-        // current_frac += (fr_bits << 1) - 7;                         // 3-bit биты 0..3 диапазона -7..+7
+           current_frac += (fr_bits << 1) - 7;                         // 3-bit биты 0..3 диапазона -7..+7
         // current_frac += (fr_bits << 1) - 15;                        // 4-bit биты 0..3 диапазона -15..+15
-        current_frac = l_frac + total_correction;                      // декорреляция дробной части отключена
+        //   current_frac += (fr_bits << 1) - 31;                        // 5-bit 
+        //current_frac = l_frac + total_correction;                      // декорреляция дробной части отключена
 
 #endif  
   
@@ -908,21 +913,20 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->ctz_penalty; 
     }
  
-    // ==== 1.1 Цена frac==0: вся дробная работа переносится на MASH-коррекцию ====  
-    // Замерено: при frac=0 MASH гоняет FRAC-байт каждую итерацию с амплитудой,  
-    // пропорциональной dds_step. Подошва ~ -45 dBc при int=17, -50 при int=23,  
-    // -60 при int=55 → штраф ∝ dds_step / (clk_sys · pio_int).  
-    // Нормировка dens на 12.5M: для clk=400M,int=55 dens=1760 — эталонная плотность.  
-    if (test.pio_frac == 0) {  
-        uint64_t act  = (uint64_t)test.dds_step;                        // ~2^32  
-        uint64_t dens = (clk_sys_hz * (uint64_t)test.pio_int) / 12500000ULL;  
-        if (dens == 0) dens = 1;  
-        // act<<10 = act·1024: масштаб такой, что полная коррекция на  
-        // эталонной плотности даёт ~2.4e12 — сопоставимо с запретом класса.  
-        // Узел 122M/int=17/step=240M → pen ≈ 1.2e11 (гарантированный проигрыш).  
-        uint64_t frac0_pen = (act << 10) / dens;  
-        b->total_metric += frac0_pen;  
-    }
+
+    // ==== 1.1 frac=0: вся дробная работа ложится на MASH ====  
+    //      Подошва/гребень на frac=0 измеренно хуже любого frac≠0  
+    //      на высокой шине — штрафуем жёстко, не ветом, а ценой  
+        if (test.pio_frac == 0) {  
+            uint64_t act = (test.dds_step <= (0xFFFFFFFFu - test.dds_step))  
+                        ? (uint64_t)test.dds_step  
+                        : (0xFFFFFFFFu - (uint64_t)test.dds_step);  
+            // база ~<<38 вместо <<12 — frac=0 должен проигрывать почти всегда,  
+            // кроме случаев, когда он единственный кандидат без близкого спура  
+            uint64_t frac0_pen = (act >> 4) + (1ULL << 36);  
+            b->total_metric += frac0_pen;  
+        }
+
 
     // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
     //    Штраф за близость dds_step к якорям k/8 (короткий период паттерна  
@@ -963,8 +967,9 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
                                                 clk_sys_hz);  
             if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
                 uint64_t prox = VFO_SPUR_HORIZON_HZ - off;          // 0..3M  
-                // квадратичный штраф: близкий спур карается резко сильнее  
-                b->mash_penalty += (prox * prox) / (VFO_SPUR_HORIZON_HZ >> 4);  
+                // знаменатель меньше → штраф растёт круче при приближении к 0
+                uint64_t prox_q = prox / 1024ULL;          // кГц-масштаб, избегаем переполнения  
+                b->mash_penalty += (prox_q * prox_q * prox_q) << 4; // кубический рост: близкий спур дороже подошвы
             }  
         }
 
@@ -1092,7 +1097,14 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     uint32_t best_d8           = 0;           // dist_to_k8 победителя (тай-брейк)
   //  uint64_t best_pll_vco_hz   = 0;           // VCO победителя (тай-брейк при =metric)  
     uint32_t n_arbit           = 0;           // сколько кандидатов дошло до арбитража  
-  
+
+    // --- отдельный трекер лучшего frac=0-кандидата ---  
+    uint64_t best_frac0_metric   = UINT64_MAX;  
+    uint64_t best_frac0_clk      = 0;  
+    uint32_t best_frac0_fbdiv    = 0, best_frac0_p1 = 0, best_frac0_p2 = 0;  
+    uint32_t best_frac0_refdiv   = 0;  
+    uint32_t n_frac0_seen        = 0;      // сколько frac=0-кандидатов встретилось
+
 #if VFO_PLL_DEBUG  
     // TOP-10 лог для диагностики (без дублей по clk_sys)  
     struct CandLog {  
@@ -1102,13 +1114,13 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
         uint8_t  pio_frac;  
         bool     forbidden, clean;  
     };  
-    CandLog top10[10];  
+    CandLog top10[20];  
     for (int i = 0; i < 10; i++) top10[i].metric = UINT64_MAX, top10[i].clk = 0;  
 #endif  
   
     // ---- Матричный скан: refdiv × fbdiv × (p1,p2) ----  
-    //for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
-    uint32_t refdiv = 1;
+for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
+    //uint32_t refdiv = 1;
     uint64_t ref_hz = crystal_hz / refdiv;   // REFDIV: 1,2,3 → 12,6,4 МГц  
   
         for (uint32_t p1 = 2; p1 <= 7; p1++) {   // p1 >= 2: режим p1=1 даёт ровное деление на 2 при VCO < ~2.8 ГГц  
@@ -1139,6 +1151,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                         vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &brk, &test);
   
                     if (test.pio_int < 2) continue;
+
+                    if (test.pio_int < 32) continue;   // подошва −50 dBc и хуже — отсекаем
   
                     // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===
                     uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,
@@ -1169,7 +1183,19 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     bool     cand_frac_zero = (test.pio_frac == 0u);  
                     uint32_t cand_d8 = dds_step_min_dist_to_k8(test.dds_step); 
                     n_arbit++;  
-  
+
+                    if (test.pio_frac == 0) {  
+                        n_frac0_seen++;  
+                        if (current_dds_metric < best_frac0_metric) {  
+                            best_frac0_metric = current_dds_metric;  
+                            best_frac0_clk    = clk_sys_hz;  
+                            best_frac0_fbdiv  = fbdiv;  
+                            best_frac0_p1     = p1;  
+                            best_frac0_p2     = p2;  
+                            best_frac0_refdiv = refdiv;  
+                        }  
+                    }
+
 #if VFO_PLL_DEBUG  
                     // TOP-10 без дублей по clk_sys  
                     bool dup = false;  
@@ -1193,13 +1219,14 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
 #endif  
   
                     // === АРБИТРАЖ
-                    // Иерархия: forbidden → metric → выше clk_sys
-                    // ни одного класса, только цена:  
-                    // forbidden/clean больше не классы — цена близости спура  
-                    // и грязного step уже в метрике (prox² и mash_penalty)  
-                    bool prefer = (current_dds_metric < min_dds_metric) ||  
-                                  (current_dds_metric == min_dds_metric &&  
-                                   clk_sys_hz > best_pll.clk_sys_hz);
+                    bool prefer;  
+                    if (frac_forbidden != best_forbidden) {  
+                        prefer = !frac_forbidden;  
+                    } else {  
+                        prefer = (current_dds_metric < min_dds_metric) ||  
+                                 (current_dds_metric == min_dds_metric &&  
+                                  clk_sys_hz > best_pll.clk_sys_hz);  
+                    }
   
                     if (prefer) {    
                         best_forbidden  = frac_forbidden;    
@@ -1218,8 +1245,24 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     }  
                 }  
             }  
-        }  
- 
+        }
+    }
+
+#ifdef VFO_PLL_DEBUG_SCAN  
+    Serial.printf("[PLLDBG] frac0: seen=%lu", (unsigned long)n_frac0_seen);  
+    if (n_frac0_seen) {  
+        Serial.printf("  best: clk=%.3f MHz refdiv=%lu fbdiv=%lu p1=%lu p2=%lu metric=%llu\n",  
+                      best_frac0_clk / 1e6,  
+                      (unsigned long)best_frac0_refdiv,  
+                      (unsigned long)best_frac0_fbdiv,  
+                      (unsigned long)best_frac0_p1,  
+                      (unsigned long)best_frac0_p2,  
+                      (unsigned long long)best_frac0_metric);  
+    } else {  
+        Serial.printf("  (нет frac=0-кандидатов на этой сетке)\n");  
+    }  
+#endif
+
     // === ЗАЩИТА ОТ ПУСТОГО СКАНА: дефолт выжил только если кандидатов не было ===  
     if (n_arbit == 0) {  
 #if VFO_PLL_DEBUG  

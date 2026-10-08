@@ -1120,17 +1120,11 @@ void init_file_manager() {
   read_and_parse_INFO_txt();  // Парсер настроек INFO.TXT
   read_and_parse_SET_txt();   // Парсер инженерных настроек SET.TXT
 
-  // лимиты из SlotMeta активного слота (checked_meta уже содержит их  
-  // после скана — берите поля меты того слота, что победил по seq)  
-  const char* src = "passport";  
-  if (slot_found && checked_meta.max_clk_sys_hz >= PASSPORT_CLK_SYS_MAX_HZ  
-                  && checked_meta.max_clk_sys_hz <= 500000000u) {  
-      vfo_max_clk_sys_hz = checked_meta.max_clk_sys_hz; src = "flash";  
-  }  
-  if (slot_found && checked_meta.max_pll_vco_hz >= PASSPORT_PLL_VCO_MAX_HZ  
-                  && checked_meta.max_pll_vco_hz <= 5000000000u) {  
-      vfo_max_pll_vco_hz = checked_meta.max_pll_vco_hz; src = "flash";  
-  }  
+  // лимиты уже загружены внутри скана при выборе победителя по seq;  
+  // здесь только диагностический вывод  
+    const char* src = "passport";  
+    if (vfo_max_clk_sys_hz > PASSPORT_CLK_SYS_MAX_HZ ||  
+        vfo_max_pll_vco_hz > PASSPORT_PLL_VCO_MAX_HZ) src = "flash";
   Serial.printf("[LIMITS] clk_sys<=%lu Hz, VCO<=%lu Hz (source=%s)\n",  
                 (unsigned long)vfo_max_clk_sys_hz,  
                 (unsigned long)vfo_max_pll_vco_hz, src);

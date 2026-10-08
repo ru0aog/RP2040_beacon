@@ -369,6 +369,17 @@ void check_serial_commands() {
             break;
           }
 
+          // показать лимиты частоты
+          else if (command.equalsIgnoreCase("limits")) {  
+              Serial.printf("[LIMITS] active: clk_sys<=%lu Hz, VCO<=%lu Hz\n",  
+                            (unsigned long)vfo_max_clk_sys_hz,  
+                            (unsigned long)vfo_max_pll_vco_hz);  
+              uint64_t f_clk = flash_limits_clk_sys_hz();  // 0 = сектор невалиден/пуст  
+              uint64_t f_vco = flash_limits_vco_hz();
+              Serial.printf("[LIMITS] flash raw: clk_sys=%llu, vco=%llu\n",  
+                            (unsigned long long)f_clk, (unsigned long long)f_vco);  
+          }
+
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();

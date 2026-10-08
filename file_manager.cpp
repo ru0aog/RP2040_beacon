@@ -301,8 +301,11 @@ void __not_in_flash_func(persist_clock_limits)(uint64_t new_clk_hz, uint64_t new
     // 1. Читаем текущее и применяем правило "не понижать"  
     uint64_t cur_clk = 0, cur_vco = 0;  
     flash_limits_read(&cur_clk, &cur_vco);  
+    // 0 означает "не трогаем поле" — подставляем хранимое или паспорт  
+    if (new_clk_hz == 0) new_clk_hz = cur_clk ? cur_clk : PASSPORT_CLK_SYS_MAX_HZ;  
+    if (new_vco_hz  == 0) new_vco_hz  = cur_vco ? cur_vco : PASSPORT_PLL_VCO_MAX_HZ;  
     if (new_clk_hz < cur_clk) new_clk_hz = cur_clk;  
-    if (new_vco_hz  < cur_vco) new_vco_hz  = cur_vco;  
+    if (new_vco_hz  < cur_vco) new_vco_hz  = cur_vco; 
     if (new_clk_hz == cur_clk && new_vco_hz == cur_vco) return;  // нечего писать  
   
     // 2. Частоты на безопасный уровень  

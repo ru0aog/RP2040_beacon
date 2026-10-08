@@ -1121,12 +1121,12 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     // Только нижний предел VCO (даташит 750 МГц)
                     if (vco_hz < 750000000ULL) continue;
                     // Верхний предел
-                    if (vco_hz > clk_limit) continue;
-  
+                    if (vco_hz > vfo_effective_pll_max()) continue;          // лимит VCO из flash (1600М…3.9Г)  
+                    
                     uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
                     if (clk_sys_hz < min_allowed_clk ||  
-                        clk_sys_hz > max_allowed_clk) continue;  
-  
+                        clk_sys_hz > clk_limit) continue;                     // лимит clk_sys из flash (133М…400М)
+
                     // Жёсткий минимум шины: спур-уровень ~ f_out²/clk_sys  
                     if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;  
   

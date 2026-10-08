@@ -908,7 +908,7 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
         b->clk_penalty += 10000000000ULL; // Барьерный штраф ниже 320 МГц
     }
-    uint64_t clk_deficit = clk_limit - clk_sys_hz;
+    uint64_t clk_deficit = vfo_max_clk_sys_hz - clk_sys_hz;
     b->clk_penalty += (clk_deficit * clk_deficit) / 5000ULL;
     b->total_metric += b->clk_penalty;
 

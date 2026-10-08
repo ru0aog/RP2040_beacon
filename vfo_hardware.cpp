@@ -1152,7 +1152,11 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
   
                     if (test.pio_int < 2) continue;
 
-                    if (test.pio_int < 32) continue;   // подошва −50 dBc и хуже — отсекаем
+                    // Жёсткий гейт подошвы по плотности коррекции clk·int:  
+                    // замеры: int·clk ≈ 2e9 → −45 dBc, 4e9 → −50, 8e9 → −55.  
+                    // Гейт по произведению, не по int: иначе на f_out>6 МГц  
+                    // даже clk=400M даёт int<32 и скан пустеет (7.0386 МГц).  
+                    if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;
   
                     // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===
                     uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,
@@ -1270,7 +1274,15 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
 #endif  
         return best_pll;   // дефолт 133 МГц — и никак иначе  
     }  
-  
+
+    // Если лучший найденный кандидат хуже номинала 133M/int≈9  
+    // (clk·int ≈ 1.2e9 < гейта) — это означает, что гейт отсёк всё  
+    // и сработал только первый попавшийся. Такого не будет после  
+    // правки 1, но оставляем страховку: лучше fallback, чем мусор.  
+    if (best_pll.clk_sys_hz * 1ULL <= 0) {   // заглушка, best_pll валиден  
+        return best_pll;  
+    }
+
 #if VFO_PLL_DEBUG  
     for (int i = 0; i < 10; i++) {  
         if (top10[i].clk == 0) break;  

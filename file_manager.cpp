@@ -325,17 +325,19 @@ void persist_clock_limits(uint64_t new_clk_hz, uint64_t new_vco_hz) {
     rec.crc32 = rec.seq ^ (uint32_t)rec.clk_sys_hz ^ (uint32_t)(rec.clk_sys_hz >> 32)
                       ^ (uint32_t)rec.pll_vco_hz ^ (uint32_t)(rec.pll_vco_hz >> 32);
     flash_range_erase(LIMITS_FLASH_OFFSET, 4096u);
-    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t *)&rec, sizeof(rec));
+    flash_range_program(LIMITS_FLASH_OFFSET, (const uint8_t *)&rec, sizeof(rec));  
+    flash_flush_cache();          // сброс XIP-кэша после записи
     // Вернуть clk_sys на PLL до restore_interrupts — иначе система остаётся
     // на XOSC 12 МГц, и вызывающий работает на опоре вместо рабочей частоты.
+    uint32_t pll_hz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_SYS_CLKSRC_PRIMARY) * 1000u;  
     clock_configure(clk_sys,  
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                    12 * MHZ, 12 * MHZ);  
+                    pll_hz, pll_hz);
     restore_interrupts(ints);  
     __dsb(); __isb();  
     Serial.printf("[LIMITS] flash stored: clk_sys<=%llu Hz, VCO<=%llu Hz\n",  
-                  (unsigned long long)rec.clk_sys_hz, (unsigned long long)rec.pll_vco_hz);  
+                  (unsigned long long)rec.clk_sys_hz, (unsigned long long)rec.pll_vco_hz);
 }
 
 

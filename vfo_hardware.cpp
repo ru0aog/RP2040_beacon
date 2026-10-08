@@ -1521,19 +1521,26 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
     const size_t vsel_table_size = sizeof(vsel_table) / sizeof(vsel_table[0]);  
   
     struct Candidate { uint32_t fbdiv, p1, p2, refdiv; uint64_t clk_sys_hz; };  
-    // Расширяем массив до 3072, так как REFDIV=3 значительно увеличивает плотность сетки
-    static Candidate cand[1024];  
+    // Дедупликация схлопывает конфиги с одинаковым clk_sys — реальных  
+    // уникальных ступеней заметно меньше тысячи, 512 хватает с запасом.  
+    static Candidate cand[512];    
+    const int CAND_CAP = (int)(sizeof(cand) / sizeof(cand[0]));  
+    bool cand_overflow = false;
     int cand_count = 0;  
   
-    // 1. СБОР КАНДИДАТОВ: Сканируем REFDIV от 1 до 3 строго по вашему ТЗ [Скорректировано]
-    for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
+    // 1. СБОР КАНДИДАТОВ
+    uint32_t refdiv = 1; {
         uint64_t f_ref = VFO_CALIBRATED_XOSC_HZ / refdiv;
         
         for (uint32_t fbdiv = 30; fbdiv <= 320; fbdiv++) {  
             uint64_t vco_hz = (uint64_t)fbdiv * f_ref;  
             
             // Граница аналогового захвата VCO
-            if (vco_hz < 750000000ULL || vco_hz > 3200000000ULL) continue;  
+            // Нижний предел VCO — даташит 750 МГц  
+            if (vco_hz < 750000000ULL) continue;  
+            // Верхний предел — доказанный PLLTEST потолок из flash (паспорт 1600М),  
+            // зажатый аппаратным барьером PLL_MAX_HZ  
+            if (vco_hz > vfo_effective_pll_max()) continue;
   
             for (uint32_t p1 = 2; p1 <= 7; p1++) {  
                 for (uint32_t p2 = 1; p2 <= 7; p2++) {  
@@ -1542,13 +1549,14 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
                     uint64_t cs = vco_hz / ((uint64_t)p1 * p2);  
                     if (cs <= CLK_START_HZ || cs > CLK_CEIL_HZ) continue;  
                     
-                    if (cand_count >= (int)(sizeof(cand) / sizeof(cand[0]))) break;  
-                    cand[cand_count++] = { fbdiv, p1, p2, refdiv, cs };  
+                    if (cand_count >= CAND_CAP) { cand_overflow = true; goto cand_done; }  
+                    cand[cand_count++] = { fbdiv, p1, p2, refdiv, cs }; 
                 }  
             }  
         }  
     }  
-  
+  cand_done:
+
     // 2. СОРТИРОВКА: Строго снизу вверх по частоте clk_sys_hz (от 133 МГц до 450 МГц)
     for (int a = 0; a < cand_count - 1; a++) {  
         for (int b = a + 1; b < cand_count; b++) {  
@@ -1558,34 +1566,49 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
         }  
     }  
 
-/*  
-    // 3. УМНАЯ ДЕДУПЛИКАЦИЯ: При одинаковой частоте ядра оставляем вариант с лучшим VCO [Исправлено]
-    int w_pos = 0;  
-    for (int r = 0; r < cand_count; r++) {  
-        if (w_pos > 0 && cand[r].clk_sys_hz == cand[w_pos - 1].clk_sys_hz) {
-            // Частоты равны! Проверяем, какой вариант дает более высокий VCO
-            // (fbdiv / refdiv должен быть больше)
-            uint64_t vco_current = (uint64_t)cand[r].fbdiv / cand[r].refdiv;
-            uint64_t vco_saved   = (uint64_t)cand[w_pos - 1].fbdiv / cand[w_pos - 1].refdiv;
-            
-            if (vco_current > vco_saved) {
-                // Если новый кандидат разгоняет VCO сильнее — перезаписываем старый дубликат
-                cand[w_pos - 1] = cand[r];
-            }
-            // Иначе просто игнорируем его
-        } else {
-            // Частота уникальная — пишем на новую позицию
-            cand[w_pos++] = cand[r];  
-        }  
-    }  
-    cand_count = w_pos;
-*/
+    // после сортировки равные clk_sys_hz стоят рядом,  
+    // так что один проход корректно схлопывает дубли. При равной частоте  
+    // оставляем вариант с большим fbdiv/refdiv (выше VCO = стабильнее петля).  
+        int w_pos = 0;    
+        for (int r = 0; r < cand_count; r++) {    
+            if (w_pos > 0 && cand[r].clk_sys_hz == cand[w_pos - 1].clk_sys_hz) {  
+                uint64_t vco_current = (uint64_t)cand[r].fbdiv / cand[r].refdiv;  
+                uint64_t vco_saved   = (uint64_t)cand[w_pos - 1].fbdiv / cand[w_pos - 1].refdiv;  
+                if (vco_current > vco_saved) {  
+                    cand[w_pos - 1] = cand[r];  
+                }  
+            } else {  
+                cand[w_pos++] = cand[r];    
+            }    
+        }    
+        cand_count = w_pos;
   
     bool max_ok = false;  
     static uint32_t stress_buf[1024]; // 4 КБ SRAM для CRC-теста шины AHB
   
-    Serial.printf("[OCTEST] Начинаем прецизионный прогон (R=1..3). Ступеней на сканирование: %d\n", cand_count);
+
+    Serial.printf("[OCTEST] Начинаем прецизионный прогон (R=1..3). Ступеней на сканирование: %d%s\n",  
+                  cand_count, cand_overflow ? " [OVERFLOW — увеличьте cand[]]" : "");
     delay(200); // Даем очиститься буферу UART
+
+    // --- ДЕЦИМАЦИЯ СЕТКИ: не более ~80 ступеней ---  
+    // Проходим отсортированный список с шагом stride, всегда включаем  
+    // самый высокий кандидат, чтобы потолок измерялся до края.  
+    {  
+        const int MAX_STEPS = 80;  
+        if (cand_count > MAX_STEPS) {  
+            int stride = (cand_count + MAX_STEPS - 1) / MAX_STEPS; // ceil  
+            int w = 0;  
+            for (int i = 0; i < cand_count; i += stride) {  
+                cand[w++] = cand[i];  
+            }  
+            // Последний (максимальный) кандидат — обязательно в списке  
+            if (cand[w - 1].clk_sys_hz != cand[cand_count - 1].clk_sys_hz) {  
+                cand[w++] = cand[cand_count - 1];  
+            }  
+            cand_count = w;  
+        }  
+    }
 
     // 4. ГОРЯЧИЙ ЦИКЛ СТРЕСС-ТЕСТА
     for (int i = 0; i < cand_count; i++) {  

@@ -980,12 +980,15 @@ void print_current_settings() {
   Serial.print("Физический адрес флеш: 0x"); Serial.println(0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE), HEX);
 
   // Данные по лимитам ядра
-  Serial.println("--- Максимальные частоты ядра ---");
+  Serial.println("--- Частотный план ядра ---");
   const char* src = (vfo_max_clk_sys_hz != PASSPORT_CLK_SYS_MAX_HZ ||  vfo_max_pll_vco_hz != PASSPORT_PLL_VCO_MAX_HZ)  ? "считано из FLASH" : "passport (тесты не проводились)"; 
-  Serial.print("Источник данных       : "); Serial.println(src);
-  Serial.printf("ФАПЧ ГУН       PLL VCO: <= %lu    МГц (passport = 1600 МГц) x %.2f\n",
+  Serial.print("Источник данных        : "); Serial.println(src);
+  Serial.printf("Опорный кварц     XOSC : %.6f МГц\n", VFO_XOSC_NOMINAL_HZ / 1e6);
+  Serial.printf("Коррекция кварца  corr : %+.3f ppm\n", (double)VFO_XOSC_CORR_PPB / 1000.0);
+  Serial.printf("Частота CALIBRATED_XOSC: %llu Hz\n", (unsigned long long)VFO_CALIBRATED_XOSC_HZ);
+  Serial.printf("ФАПЧ ГУН        PLL VCO: <= %lu    МГц (passport = 1600 МГц) x %.2f\n",
                 (unsigned long)(vfo_max_pll_vco_hz / 1000000UL), (double)vfo_max_pll_vco_hz / (double)PASSPORT_PLL_VCO_MAX_HZ);  
-  Serial.printf("Системная шина CLK_SYS: <= %.3f МГц (passport =  133 МГц) x %.2f\n",
+  Serial.printf("Системная шина  CLK_SYS: <= %.3f МГц (passport =  133 МГц) x %.2f\n",
                 vfo_max_clk_sys_hz / 1e6, (double)vfo_max_clk_sys_hz / (double)PASSPORT_CLK_SYS_MAX_HZ);
 
   Serial.println("=====================================");

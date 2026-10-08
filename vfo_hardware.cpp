@@ -1841,30 +1841,31 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
             break;
         }
 
-        // Зафиксировать достигнутый VCO во Flash со сдвигом -3%.  
-        // clk_sys здесь <= 150 МГц, но для записи flash откатываемся на номинал.  
+        // === ФИКСАЦИЯ ШАГА: откат на номинал -> запись flash -> возврат на ступень ===  
         {  
             uint32_t proven_vco = (uint32_t)((vco_hz * 97ULL) / 100ULL);  
+  
+            // 1. Полный откат: clk_sys на номинал 133 МГц через штатный путь,  
+            //    напряжение на VREG_VOLTAGE_DEFAULT. Все внешние опасные состояния сняты.  
             vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-            persist_clock_limits(0, proven_vco);
-
- 
-            uint32_t ints2 = save_and_disable_interrupts();  
-            clock_configure(clk_sys,  
-                            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                            clk_sys_hz, clk_sys_hz);  
-            // восстановить baudr под текущую ступень  
-            ssi_hw->ssienr = 0; ssi_hw->baudr = ssi_baud; ssi_hw->ssienr = 1;  
-            restore_interrupts(ints2);
-
+  
+            // 2. Запись в dedicated-сектор (внутри: XOSC + baudr=2 на время erase/program,  
+            //    возврат на текущий выход PLL_SYS после записи).  
+            persist_clock_limits(0, proven_vco);  
+  
             Serial.printf("[ШТУРМ] flash: pll_vco_max=%lu Hz (-3%% от %llu)\n",  
-                          (unsigned long)proven_vco, vco_hz);  
+                          (unsigned long)proven_vco, (unsigned long long)vco_hz);  
             Serial.flush();  
-            // Возврат на текущую ступень штурма (p1=p2=7, опора ROSC)  
-            ints2 = save_and_disable_interrupts();  
+  
+            // 3. Возврат на ступень штурма ОДИН раз: экстремальный вольтаж,  
+            //    PLL на ROSC-опоре с текущим fb, clk_sys на частоту шага, baudr под него.  
+            vreg_set_voltage(VREG_VOLTAGE_1_30);  
+            busy_wait_us(500);  
+  
+            uint32_t ints2 = save_and_disable_interrupts();  
             pll_sys_hw->fbdiv_int = fb;  
-            pll_sys_hw->prim = (7u << PLL_PRIM_POSTDIV1_LSB) | (7u << PLL_PRIM_POSTDIV2_LSB);  
+            pll_sys_hw->prim = (target_p1 << PLL_PRIM_POSTDIV1_LSB) | (target_p2 << PLL_PRIM_POSTDIV2_LSB);  
+            ssi_hw->ssienr = 0; ssi_hw->baudr = ssi_baud; ssi_hw->ssienr = 1;  
             volatile uint32_t t2 = 30000;  
             while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --t2);  
             clock_configure(clk_sys,  
@@ -1872,12 +1873,8 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
                             CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
                             clk_sys_hz, clk_sys_hz);  
             restore_interrupts(ints2);  
-        } 
-
-        busy_wait_us(40000); // 40 мс для тепловой стабилизации СВЧ-блока
-
+        }
     }
-
     // Возврат в безопасный номинал
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
     Serial.println("===========================================================================");

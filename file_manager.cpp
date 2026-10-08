@@ -297,7 +297,7 @@ void flash_limits_read(uint64_t* clk_sys_hz, uint64_t* pll_vco_hz) {
 // ВАЖНО: вызывается из штурма, где clk_sys идёт от PLL на ROSC.  
 // Перед erase/program обязательно: clk_sys -> XOSC (12 МГц), ssi baudr -> 2.  
 // После записи clk_sys возвращается на PLL_SYS aux — конфиг PLL не трогаем.  
-void persist_clock_limits(uint64_t new_clk_hz, uint64_t new_vco_hz) {  
+void __not_in_flash_func(persist_clock_limits)(uint64_t new_clk_hz, uint64_t new_vco_hz) {
     // 1. Читаем текущее и применяем правило "не понижать"  
     uint64_t cur_clk = 0, cur_vco = 0;  
     flash_limits_read(&cur_clk, &cur_vco);  

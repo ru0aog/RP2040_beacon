@@ -9,21 +9,6 @@
  * и работает без обращения к ОЗУ. Благодаря этому частота расчета дизеринга 
  * достигает своего физического потолка — нескольких мегагерц.
  
- план:
-      - абсолютное значение частоты локального кварцевого генератора заменить
-        на относительную коррекцию +/- ppm
-
- 2.18 от 2026-10-08
-      - улучшение метрики: введены штрафы за узлы, у которых dds_step садится возле простых дробей шкалы 1/4,1/2,3/4, k/8
-      - добавить запись/чтение результатов разгона в/из флэш
-
- 2.17 от 2026-10-07
-      - устранён самопроизвольный сброс POSTDIV1 к 2 в режиме разгона (состояние POSTDIV1=1 исключено)
-      - добавлено предсказание частоты отстройки основных спуров
-      - стабилизирована работа в режиме разгона
-      - добавлена процедура теста максимальной скорости VCO PLL
-      - добавлено включение и перестройка частоты энкодером
-
 Архитектурная схема (MASH 1-1)
  В коде параллельно работают два 32-битных регистра-аккумулятора: loc_acc1 (первая ступень) и loc_acc2 (вторая ступень).
  - Первая ступень интегрирует (накапливает) входное дробное приращение частоты step (оно же dds_step). 
@@ -84,6 +69,7 @@
 
 #define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
 #define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
+#define VFO_K8_BELT            (1u << 26)   // пояс отсечения у якорей k/8: ±25% октавы
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
 
 
@@ -775,13 +761,13 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
         // Линейный беспереходный расчет дизера под фиксированные 4 бита (VFO_DITHER_RAND_BITS)
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
-        // int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu);
-        int32_t r_bits = (int32_t)(loc_rand_state & 0x03u);
+        int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu);    // 4-bit
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x03u); // 2-bit
         
         // Умножаем на 2 и вычитаем 15. Получаем симметричный ряд нечетных чисел от -15 до +15.
         // Математическое ожидание строго равно 0.0
-        // step += ((r_bits << 1) - 15); 
-        step += ((r_bits << 1) - 3); // Ряд: -3, -1, +1, +3
+        step += ((r_bits << 1) - 15); // 4-bit
+        // step += ((r_bits << 1) - 3); // 2-bit
 #endif
 
         int32_t total_correction = 0;
@@ -879,10 +865,32 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     }
 
     // 1. Штраф за дальние спуры (простые дроби FRAC8)
-    if (test.pio_frac != 0) {
-        b->ctz_val = (uint32_t)__builtin_ctz(test.pio_frac);
-        b->ctz_penalty = (1ULL << (b->ctz_val + 26));
-        b->total_metric += b->ctz_penalty;
+    // добавляем запретный пояс вокруг простых дробей ±8 LSB
+    if (test.pio_frac != 0) {  
+        // 1a. Базовый штраф за сам факт frac≠0 — аппаратная дробь делителя  
+        //     всегда гоняет делитель циклически → спур. frac=0 бесплатен.  
+        b->ctz_penalty = (1ULL << 30);  
+  
+        // 1b. Простота дроби: ctz — чем больше младших нулей, тем короче  
+        //     период паттерна (128=1/2 → ctz 7, самый опасный)  
+        b->ctz_val = (uint32_t)__builtin_ctz(test.pio_frac);  
+        b->ctz_penalty += (1ULL << (b->ctz_val + 26));  
+  
+        // 1c. Запретная зона вокруг простых рациональных точек FRAC8:  
+        //     frac≈k·256/N для N=2..8, допуск ±8 единиц  
+        for (uint32_t n = 2; n <= 8; n++) {  
+            for (uint32_t k = 1; k < n; k++) {  
+                uint32_t anchor = (k * 256u) / n;  
+                uint32_t d = (test.pio_frac > anchor)  
+                           ? (test.pio_frac - anchor)  
+                           : (anchor - test.pio_frac);  
+                if (d < 8u) {  
+                    b->ctz_penalty += (1ULL << 33);   // практически запрет  
+                    break;  
+                }  
+            }  
+        }  
+        b->total_metric += b->ctz_penalty;  
     }
  
     // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
@@ -892,10 +900,10 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->mash_penalty = b->center_dist / 4ULL;  
   
         // Штраф за близость к простым дробям k/8 шкалы  
-        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
-        if (dist_k8 < (1u << 24)) {  
-            uint64_t deficit = (uint64_t)((1u << 24) - dist_k8);  
-            b->mash_penalty += (deficit * deficit) >> 12;  
+        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);    
+        if (dist_k8 < VFO_K8_BELT) {    
+            uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);    
+            b->mash_penalty += (deficit * deficit) >> 14;      // нормировка под 2^26  
         }  
         b->total_metric += b->mash_penalty;  
     }
@@ -968,68 +976,9 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 
 // Метрика кандидата
-static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoParameters *out) {
-    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
-    if (out) *out = test;
-
-    // Идеал: целое аппаратное деление, дизер полностью спит
-    if (test.pio_frac == 0 && test.dds_step == 0) return 0;
-
-    uint64_t metric = 0;
-
-    // ------------------------------------------------------------------------
-    // КРИТЕРИЙ 1: Борьба с дальними спурами -40 dBc (Анализ простоты дроби)
-    // ------------------------------------------------------------------------
-    if (test.pio_frac != 0) {
-        // Вычисляем ctz (количество младших нулей). 
-        // Чем больше нулей, тем проще дробь (128->7 нулей, 64->6 нулей)
-        // Простые дроби порождают самые мощные иголки на анализаторе.
-        uint32_t fraction_simplicity = (uint32_t)__builtin_ctz(test.pio_frac);
-        
-        // Тяжелый экспоненциальный штраф за вырождение джиттера в периодический меандр
-        metric += (1ULL << (fraction_simplicity + 26)); 
-    }
-
-
-    // ------------------------------------------------------------------------  
-    // КРИТЕРИЙ 2: Чистка ближней зоны MASH-2 (Размытие шумовой юбки)  
-    // ------------------------------------------------------------------------  
-    if (test.dds_step != 0) {  
-        uint64_t target_center = 0x80000000ULL; // Центр шкалы 32-битного DDS  
-        uint64_t current_step  = test.dds_step;  
-          
-        // Ищем удаление от центра. Возле краев (0 или 0xFFFFFFFF) MASH-2 "сбоит"  
-        // и кучкует энергию фазового шума вплотную к основному тону.  
-        uint64_t center_dist = (current_step > target_center) ? (current_step - target_center) : (target_center - current_step);  
-        metric += center_dist / 4ULL;  
-  
-        // Штраф за близость к простым дробям шкалы k/8 (вкл. края 0 и 2^32).  
-        // Дистанция < 2^24 (±6.3% от октавы) -> idle-тоны в ближней зоне.  
-        uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
-        if (dist_k8 < (1u << 24)) {  
-            // квадратичный штраф: чем ближе к якорю, тем хуже  
-            uint64_t deficit = (uint64_t)((1u << 24) - dist_k8);  
-            metric += (deficit * deficit) >> 12;   // до ~2^36 в нуле  
-        }  
-    }
-
-
-    // ------------------------------------------------------------------------
-    // КРИТЕРИЙ 3: Безусловный силовой разгон к 380 МГц
-    // ------------------------------------------------------------------------
-    if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
-        // Если частота ушла ниже 320 МГц — кандидат почти гарантированно отсекается
-        metric += 10000000000ULL;
-    }
-    
-    // Квадратичный штраф за падение частоты относительно потолка в 380 МГц
-    uint64_t clk_deficit = VFO_MAX_STABLE_CLK_HZ - clk_sys_hz;
-    metric += (clk_deficit * clk_deficit) / 5000ULL;
-
-    // Запрет опасного сверхмалого деления
-    if (test.pio_int < 4) metric += VFO_INT_PENALTY;
-
-    return metric;
+static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoParameters *out) {  
+    MetricBreakdown b;  
+    return vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &b, out);  
 }
 
 
@@ -1132,7 +1081,6 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     MetricBreakdown brk;
                     uint64_t current_dds_metric =
                         vfo_pll_metric_verbose(clk_sys_hz, target_mhz, &brk, &test);
-                    // Если verbose нет — используйте vfo_pll_metric(...) и уберите brk
   
                     if (test.pio_int < 2) continue;
   

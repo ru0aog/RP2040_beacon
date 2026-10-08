@@ -890,36 +890,38 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->ctz_val = (uint32_t)__builtin_ctz(test.pio_frac);  
         b->ctz_penalty += (1ULL << (b->ctz_val + 26));  
   
-        // 1c. Запретная зона вокруг простых рациональных точек FRAC8:  
-        //     frac≈k·256/N для N=2..8, допуск ±8 единиц  
+        // 1c. добавить градуированный штраф за близость FRAC8-спура
         for (uint32_t n = 2; n <= 8; n++) {  
             for (uint32_t k = 1; k < n; k++) {  
                 uint32_t anchor = (k * 256u) / n;  
-                uint32_t d = (test.pio_frac > anchor)  
-                           ? (test.pio_frac - anchor)  
-                           : (anchor - test.pio_frac);  
-                // выход из обоих циклов — штраф начисляем один раз  
-                if (d < 8u) {    
-                    b->ctz_penalty += (1ULL << 33);  
-                    n = 8;          // гасим внешний цикл  
-                    break;  
-                } 
+                uint32_t d = (test.pio_frac > anchor) ? (test.pio_frac - anchor)  
+                                                      : (anchor - test.pio_frac);  
+                if (d < 8u) { b->ctz_penalty += (1ULL << 33); n = 8; break; }  
             }  
         }  
-        b->total_metric += b->ctz_penalty;  
+        // штраф пропорционален близости спура к несущей (не вето!)  
+        uint64_t spur = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
+        if (spur != UINT64_MAX && spur < VFO_SPUR_MIN_OFFSET_HZ) {  
+            uint64_t prox = VFO_SPUR_MIN_OFFSET_HZ - spur;   // 0..1e6  
+            b->ctz_penalty += (prox * prox) >> 8;            // квадратичный, подберите нормировку  
+        }  
+        b->total_metric += b->ctz_penalty; 
     }
  
     // ==== 1.1 Цена frac==0: вся дробная работа переносится на MASH-коррекцию ====  
-    // Джиттер int/int±1 с темпом ~dds_step; опасен при низком clk·int  
-    // (узел 178.5M/int=25 дал подошву -50 dBc и комб ±5 кГц).  
-    // Штраф ∝ активность коррекции / оверсэмплинг.  
+    // Замерено: при frac=0 MASH гоняет FRAC-байт каждую итерацию с амплитудой,  
+    // пропорциональной dds_step. Подошва ~ -45 dBc при int=17, -50 при int=23,  
+    // -60 при int=55 → штраф ∝ dds_step / (clk_sys · pio_int).  
+    // Нормировка dens на 12.5M: для clk=400M,int=55 dens=1760 — эталонная плотность.  
     if (test.pio_frac == 0) {  
-        uint64_t act  = (uint64_t)test.dds_step;                       // масштаб ~2^32  
+        uint64_t act  = (uint64_t)test.dds_step;                        // ~2^32  
         uint64_t dens = (clk_sys_hz * (uint64_t)test.pio_int) / 12500000ULL;  
         if (dens == 0) dens = 1;  
-        uint64_t frac0_pen = (act << 8) / dens;  
+        // act<<10 = act·1024: масштаб такой, что полная коррекция на  
+        // эталонной плотности даёт ~2.4e12 — сопоставимо с запретом класса.  
+        // Узел 122M/int=17/step=240M → pen ≈ 1.2e11 (гарантированный проигрыш).  
+        uint64_t frac0_pen = (act << 10) / dens;  
         b->total_metric += frac0_pen;  
-        // диагностика: можно переиспользовать b->int_penalty или добавить поле  
     }
 
     // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
@@ -935,15 +937,22 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->mash_penalty;    
     }
 
-    // 3. Штраф за подъём шумовой подошвы (обратный oversampling).  
-        //    Плотность коррекции MASH = clk_sys/(VFO_DITHER_LOOP_CYCLES·f_out):  
-        //    чем ниже clk_sys, тем реже итерации на период выхода и тем выше  
-        //    квантованный шум вокруг несущей. Линейный закон: 400M → 0,  
-        //    200M → 1<<30, 100M → 3<<30.  
-        if (clk_sys_hz < VFO_SHELF_REF_CLK_HZ) {  
-            b->clk_penalty = ((VFO_SHELF_REF_CLK_HZ - clk_sys_hz)  
-                            * (1ULL << 30)) / VFO_SHELF_REF_CLK_HZ;  
-        }  
+    // 3. Штраф за подъём шумовой подошвы.    
+        //    Замерено линейно в дБ: полка ~ -20·log10(clk_sys·pio_int) + const    
+        //    (int=17→-45 dBc, int=55→-60 dBc). Поэтому штрафуем произведение    
+        //    clk·int, а не clk_sys одно. Нормировка: эталон 400M·int55 → 0.    
+        {    
+            // dens_t = clk_sys·pio_int / (400M·55) — относительная плотность    
+            // коррекции к эталону. pen = (1 - dens_t)·SCALE при dens_t<1.    
+            const uint64_t DEN_REF = 400000000ULL * 55ULL;   // эталон clk·int    
+            uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;    
+            if (dens < DEN_REF) {    
+                // линейно в (1 - dens/DEN_REF), максимум 1<<30    
+                b->clk_penalty = ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF;    
+            } else {    
+                b->clk_penalty = 0;    
+            }    
+        }    
         b->total_metric += b->clk_penalty;
 
     // 3b. Уровень FRAC8-спура: чем ближе спур к несущей и чем короче  
@@ -1183,17 +1192,14 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     }  
 #endif  
   
-                    // === АРБИТРАЖ: запрет -> чистота -> метрика -> выше clk ===  
-                    bool prefer;  
-                    if (frac_forbidden != best_forbidden) {  
-                        prefer = !frac_forbidden;  
-                    } else if (candidate_clean != best_clean) {  
-                        prefer = candidate_clean;  
-                    } else {  
-                        prefer = (current_dds_metric < min_dds_metric) ||  
-                                 (current_dds_metric == min_dds_metric &&  
-                                  clk_sys_hz > best_pll.clk_sys_hz);  
-                    }
+                    // === АРБИТРАЖ
+                    // Иерархия: forbidden → metric → выше clk_sys
+                    // ни одного класса, только цена:  
+                    // forbidden/clean больше не классы — цена близости спура  
+                    // и грязного step уже в метрике (prox² и mash_penalty)  
+                    bool prefer = (current_dds_metric < min_dds_metric) ||  
+                                  (current_dds_metric == min_dds_metric &&  
+                                   clk_sys_hz > best_pll.clk_sys_hz);
   
                     if (prefer) {    
                         best_forbidden  = frac_forbidden;    

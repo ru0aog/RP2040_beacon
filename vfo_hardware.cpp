@@ -71,8 +71,13 @@
 #define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
 #define VFO_K8_BELT            (1u << 25)   // пояс отсечения у якорей k/8: 1u << 26 ±25% октавы
                             // (1u << 25)   // ~3 МГц офсет спура при clk~390M
-                            // (1u << 26)   // ~6-7 МГц офсет спура при clk~390M  
+                            // (1u << 26)   // ~6-7 МГц офсет спура при clk~390M
+#define VFO_SHELF_REF_CLK_HZ   400000000ULL // опора нормировки подошвы: 400M = нулевой штраф  
+#define VFO_SPUR_HORIZON_HZ    3000000ULL   // спур ближе 3 МГц — штраф за уровень
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
+#define VFO_FRAC_DITHER          1    // дизер FRAC-байта делителя PIO: размывает  
+                                      // спуры простых дробей (1/2, 1/4, 5/8...)  
+
 
 
 // ============================================================================
@@ -105,6 +110,10 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
 
 // Добавлен упреждающий прототип Core 1, теперь vfo_clk_boost_enter сможет его вызвать!
 static void __not_in_flash_func(vfo_core1_entry)();
+
+// forward declaration  
+static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,  
+                                     uint64_t clk_sys_hz);
 
 void vfo_clk_boost_arm(void);
 
@@ -738,13 +747,19 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
         // Линейный беспереходный расчет дизера под фиксированные 4 бита (VFO_DITHER_RAND_BITS)
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
-        int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu);    // 4-bit
-        // int32_t r_bits = (int32_t)(loc_rand_state & 0x03u); // 2-bit
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x01u); // 1-bit бит  0    диапазона -1..+1
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x03u); // 2-bit биты 0..1 диапазона -3..+3
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
+        // int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
         
         // Умножаем на 2 и вычитаем 15. Получаем симметричный ряд нечетных чисел от -15 до +15.
         // Математическое ожидание строго равно 0.0
-        step += ((r_bits << 1) - 15); // 4-bit
-        // step += ((r_bits << 1) - 3); // 2-bit
+        // step += ((r_bits << 1) - 1);  // 1-bit
+        // step += ((r_bits << 1) - 3);  // 2-bit
+        // step += ((r_bits << 1) - 7);  // 3-bit
+        // step += ((r_bits << 1) - 15); // 4-bit
+         step = l_step;                   // декорреляция целой части отключена
+
 #endif
 
         int32_t total_correction = 0;
@@ -773,15 +788,37 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         }
 #endif
 
-        // ЗНАКОВАЯ НОРМАЛИЗАЦИЯ: переменные принудительно приведены к int32_t
-        int32_t current_frac = l_frac + total_correction;
-        int32_t current_int  = l_int;
+        // ЗНАКОВАЯ НОРМАЛИЗАЦИЯ: переменные принудительно приведены к int32_t  
+        int32_t current_frac = l_frac + total_correction;  
+        int32_t current_int  = l_int;  
+  
+#ifdef VFO_FRAC_DITHER  
+        // Декорреляция спектра аппаратной дробной части делителя PIO.
+        // Берём биты 8..11 того же xorshift-состояния (биты 0..3 уже ушли в дизер  
+        // шага — пересечения корреляции минимальны).  
+        // Симметричный ряд нечётных значений -15..+15, матожидание = 0,  
+        // поэтому средний коэффициент деления (и выходная частота) не смещается.  
+        // Амплитуда ±15/256 LSB делителя: для INT=55 это ±0.1% периода,  
+        // для INT=7 — ±0.8% — достаточно, чтобы паттерн простых дробей  
+        // (frac=64, 128, 160...) потерял периодичность и спур размазался в полку.  
+        
+        // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x01u); // 1-bit биты 0    диапазона -1..+1
+        // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x03u); // 2-bit биты 0..1 диапазона -3..+3
+        // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
+        // int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
+        // current_frac += (fr_bits << 1) - 1;                         // 1-bit биты 0    диапазона -1..+1
+        // current_frac += (fr_bits << 1) - 3;                         // 2-bit биты 0..3 диапазона -3..+3
+        // current_frac += (fr_bits << 1) - 7;                         // 3-bit биты 0..3 диапазона -7..+7
+        // current_frac += (fr_bits << 1) - 15;                        // 4-bit биты 0..3 диапазона -15..+15
+        current_frac = l_frac + total_correction;                      // декорреляция дробной части отключена
 
-        // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1
-        current_int += (current_frac >> 8); 
-        current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка
-
-        // Единственная STR-запись в шину периферии PIO за итерацию
+#endif  
+  
+        // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1  
+        current_int += (current_frac >> 8);   
+        current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка  
+  
+        // Единственная STR-запись в шину периферии PIO за итерацию  
         *clkdiv_reg = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
 
 #else
@@ -885,14 +922,29 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->mash_penalty;    
     }
 
-    // 3. Штраф за отказ от разгона (ниже 320 МГц)
-    if (clk_sys_hz < VFO_PREFERRED_MIN_CLK) {
-        b->clk_penalty += 10000000000ULL; // Барьерный штраф ниже 320 МГц
-    }
+    // 3. Штраф за подъём шумовой подошвы (обратный oversampling).  
+        //    Плотность коррекции MASH = clk_sys/(VFO_DITHER_LOOP_CYCLES·f_out):  
+        //    чем ниже clk_sys, тем реже итерации на период выхода и тем выше  
+        //    квантованный шум вокруг несущей. Линейный закон: 400M → 0,  
+        //    200M → 1<<30, 100M → 3<<30.  
+        if (clk_sys_hz < VFO_SHELF_REF_CLK_HZ) {  
+            b->clk_penalty = ((VFO_SHELF_REF_CLK_HZ - clk_sys_hz)  
+                            * (1ULL << 30)) / VFO_SHELF_REF_CLK_HZ;  
+        }  
+        b->total_metric += b->clk_penalty;
 
-    uint64_t clk_deficit = (clk_sys_hz >= vfo_max_clk_sys_hz) ? 0 : (vfo_max_clk_sys_hz - clk_sys_hz);
-    b->clk_penalty += (clk_deficit * clk_deficit) / 5000ULL;
-    b->total_metric += b->clk_penalty;
+    // 3b. Уровень FRAC8-спура: чем ближе спур к несущей и чем короче  
+        //     период паттерна, тем он выше. spur_off уже считается в арбитраже,  
+        //     здесь — его градуированный штраф (линейный, до горизонта).  
+        if (test.pio_frac != 0) {  
+            uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac,  
+                                                clk_sys_hz);  
+            if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
+                uint64_t prox = VFO_SPUR_HORIZON_HZ - off;          // 0..3M  
+                // квадратичный штраф: близкий спур карается резко сильнее  
+                b->mash_penalty += (prox * prox) / (VFO_SPUR_HORIZON_HZ >> 4);  
+            }  
+        }
 
     // 4. Запрет малых INT
     if (test.pio_int < 4) {
@@ -1013,8 +1065,10 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // ---- Классификаторы и состояние арбитража ----  
     uint64_t min_dds_metric    = UINT64_MAX;  // метрика победителя (не номинала!)  
     bool     best_forbidden    = true;        // класс победителя: frac в поясе  
-    bool     best_clean        = false;       // класс победителя: грязный dmin  
-    uint64_t best_pll_vco_hz   = 0;           // VCO победителя (тай-брейк при =metric)  
+    bool     best_clean        = false;       // класс победителя: грязный dmin
+    bool     best_frac_zero    = false;       // класс победителя: frac==0  
+    uint32_t best_d8           = 0;           // dist_to_k8 победителя (тай-брейк)
+  //  uint64_t best_pll_vco_hz   = 0;           // VCO победителя (тай-брейк при =metric)  
     uint32_t n_arbit           = 0;           // сколько кандидатов дошло до арбитража  
   
 #if VFO_PLL_DEBUG  
@@ -1054,7 +1108,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                         clk_sys_hz > clk_limit) continue;                     // лимит clk_sys из flash (133М…400М)
 
                     // Жёсткий минимум шины: спур-уровень ~ f_out²/clk_sys
-                    if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;
+                    // if (clk_sys_hz < VFO_CLK_SYS_PREF_MIN_HZ) continue;
   
                     // Единая метрика кандидата (verbose-версия с декомпозицией штрафов)
                     VfoParameters test;
@@ -1090,7 +1144,8 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     uint32_t dmin_raw = (dd < (uint32_t)(0u - dd)) ? dd  
                                                                    : (uint32_t)(0u - dd);  
                     bool candidate_clean = (dmin_raw < VFO_DMIN_CEILING);  
-  
+                    bool     cand_frac_zero = (test.pio_frac == 0u);  
+                    uint32_t cand_d8 = dds_step_min_dist_to_k8(test.dds_step); 
                     n_arbit++;  
   
 #if VFO_PLL_DEBUG  
@@ -1115,10 +1170,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     }  
 #endif  
   
-                    // === АРБИТРАЖ: класс пояса -> класс чистоты -> метрика -> VCO ===  
-                    // Разрешённый frac всегда бьёт запретный; внутри класса  
-                    // чистый dmin бьёт грязный; дальше — меньшая метрика,  
-                    // при равной метрике — выше VCO (больше запас PLL).  
+                    // === АРБИТРАЖ: запрет -> чистота -> метрика -> выше clk ===  
                     bool prefer;  
                     if (frac_forbidden != best_forbidden) {  
                         prefer = !frac_forbidden;  
@@ -1127,14 +1179,15 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     } else {  
                         prefer = (current_dds_metric < min_dds_metric) ||  
                                  (current_dds_metric == min_dds_metric &&  
-                                  vco_hz > best_pll_vco_hz);  
-                    }  
+                                  clk_sys_hz > best_pll.clk_sys_hz);  
+                    }
   
-                    if (prefer) {  
-                        best_forbidden  = frac_forbidden;  
-                        best_clean      = candidate_clean;  
-                        min_dds_metric  = current_dds_metric;  
-                        best_pll_vco_hz = vco_hz;  
+                    if (prefer) {    
+                        best_forbidden  = frac_forbidden;    
+                        best_clean      = candidate_clean;    
+                        best_frac_zero  = cand_frac_zero;            // НОВОЕ  
+                        best_d8         = cand_d8;                   // НОВОЕ  
+                        min_dds_metric  = current_dds_metric;    
   
                         best_pll.fbdiv      = fbdiv;  
                         best_pll.p1         = p1;  
@@ -1147,8 +1200,7 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                 }  
             }  
         }  
-    //}  
-  
+ 
     // === ЗАЩИТА ОТ ПУСТОГО СКАНА: дефолт выжил только если кандидатов не было ===  
     if (n_arbit == 0) {  
 #if VFO_PLL_DEBUG  

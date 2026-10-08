@@ -909,6 +909,19 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->ctz_penalty;  
     }
  
+    // ==== 1.1 Цена frac==0: вся дробная работа переносится на MASH-коррекцию ====  
+    // Джиттер int/int±1 с темпом ~dds_step; опасен при низком clk·int  
+    // (узел 178.5M/int=25 дал подошву -50 dBc и комб ±5 кГц).  
+    // Штраф ∝ активность коррекции / оверсэмплинг.  
+    if (test.pio_frac == 0) {  
+        uint64_t act  = (uint64_t)test.dds_step;                       // масштаб ~2^32  
+        uint64_t dens = (clk_sys_hz * (uint64_t)test.pio_int) / 12500000ULL;  
+        if (dens == 0) dens = 1;  
+        uint64_t frac0_pen = (act << 8) / dens;  
+        b->total_metric += frac0_pen;  
+        // диагностика: можно переиспользовать b->int_penalty или добавить поле  
+    }
+
     // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
     //    Штраф за близость dds_step к якорям k/8 (короткий период паттерна  
     //    переносов -> дискретный idle tone вместо шумовой полки)  

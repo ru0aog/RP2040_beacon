@@ -948,8 +948,8 @@ void print_current_settings() {
   // Вывод аппаратной конфигурации пинов из SET.TXT
   Serial.println("--- Аппаратная конфигурация (SET.TXT) ---");
   Serial.print("Пин ВЧ-выхода   (FREQ_OUT): "); Serial.println(pin_freq_out);
-  Serial.print("Выход частоты TX  (Si5351): CLK"); Serial.println(si5351_clk_tx_out);
   Serial.print("Пин активации УМ (AMP_ACT): "); Serial.println(pin_amp_act);
+  Serial.print("Выход частоты TX  (Si5351): CLK"); Serial.println(si5351_clk_tx_out);
   Serial.print("Пины поддиапазонов        : ");
   for (int k = 0; k < 4; k++) {
     Serial.print(subband_pins[k]); if (k < 3) Serial.print(", ");
@@ -973,12 +973,20 @@ void print_current_settings() {
     Serial.println(scan_exclude_list);
   }
 
-
   // Диагностика износа ячеек и активных слотов памяти
   Serial.println("--- Статистика износа флеш-памяти ---");
   Serial.print("Активный слот флеша  : "); Serial.println(current_active_slot != -1 ? String(current_active_slot) : "Не определен");
   Serial.print("Счетчик записей (seq): "); Serial.println(current_max_seq);
   Serial.print("Физический адрес флеш: 0x"); Serial.println(0x10000000 + FLASH_TARGET_OFFSET + (current_active_slot * SLOT_SIZE), HEX);
+
+  // Данные по лимитам ядра
+  Serial.println("--- Максимальные частоты ядра ---");
+  const char* src = (vfo_max_clk_sys_hz != PASSPORT_CLK_SYS_MAX_HZ ||  vfo_max_pll_vco_hz != PASSPORT_PLL_VCO_MAX_HZ)  ? "считано из FLASH" : "passport (тесты не проводились)"; 
+  Serial.print("Источник данных       : "); Serial.println(src);
+  Serial.printf("ФАПЧ ГУН       PLL VCO: <= %lu    МГц (passport = 1600 МГц) x %.2f\n",
+                (unsigned long)(vfo_max_pll_vco_hz / 1000000UL), (double)vfo_max_pll_vco_hz / (double)PASSPORT_PLL_VCO_MAX_HZ);  
+  Serial.printf("Системная шина CLK_SYS: <= %.3f МГц (passport =  133 МГц) x %.2f\n",
+                vfo_max_clk_sys_hz / 1e6, (double)vfo_max_clk_sys_hz / (double)PASSPORT_CLK_SYS_MAX_HZ);
 
   Serial.println("=====================================");
 }

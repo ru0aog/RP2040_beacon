@@ -168,9 +168,6 @@ void check_serial_commands() {
           LCD_print(">"+command, 1, 0);
 
           if (command.equalsIgnoreCase("?")) {
-            // СТАЛО — добавить в вывод конфигурации (команда "?" или после инициализации):  
-            Serial.printf("[LIMITS] clk_sys<=%lu Hz, PLL VCO<=%lu Hz (source=flash, passport=133M/1600M)\n",  
-                          (unsigned long)vfo_max_clk_sys_hz, (unsigned long)vfo_max_pll_vco_hz);
             print_current_settings();
             print_current_date();
             print_current_time();
@@ -371,9 +368,14 @@ void check_serial_commands() {
 
           // показать лимиты частоты
           else if (command.equalsIgnoreCase("limits")) {
-          Serial.printf("[LIMITS] active: clk_sys<=%lu Hz, VCO<=%lu Hz\n",  
-                        (unsigned long)vfo_max_clk_sys_hz,  
-                        (unsigned long)vfo_max_pll_vco_hz); 
+            const char* src = (vfo_max_clk_sys_hz != PASSPORT_CLK_SYS_MAX_HZ ||  
+                               vfo_max_pll_vco_hz != PASSPORT_PLL_VCO_MAX_HZ)  
+                              ? "flash" : "passport";  
+            Serial.printf("[LIMITS] clk_sys<=%.3f МГц, PLL VCO<=%lu МГц "  
+                          "(source=%s, passport=133M/1600M)\n",  
+                          vfo_max_clk_sys_hz / 1e6,  
+                          (unsigned long)(vfo_max_pll_vco_hz / 1000000UL),  
+                          src); 
           }
 
           else if (command.startsWith("setparam ")) {

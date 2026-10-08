@@ -1068,8 +1068,22 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
                     uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,
                                                                 test.pio_frac,
                                                                 clk_sys_hz);
-                    bool frac_forbidden = (test.pio_frac != 0u) &&
-                                          (spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ);
+
+
+                    // запрет и по близости спура, И по низкому знаменателю дроби  
+                        bool simple_frac = false;  
+                        if (test.pio_frac != 0u) {  
+                            for (uint32_t n = 2; n <= 4 && !simple_frac; n++)      // только N=2,3,4 — самые злые  
+                                for (uint32_t k = 1; k < n; k++) {  
+                                    uint32_t anchor = (k * 256u) / n;  
+                                    uint32_t d = (test.pio_frac > anchor) ? test.pio_frac - anchor  
+                                                                        : anchor - test.pio_frac;  
+                                    if (d < 8u) { simple_frac = true; break; }  
+                                }  
+                        }  
+                        bool frac_forbidden = (test.pio_frac != 0u) &&  
+                                            ((spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ) || simple_frac);
+
   
                     // === КЛАСС 2: чистота дизера по СЫРОМУ dmin (до нормализации!) ===  
                     uint32_t dd  = test.dds_step;  

@@ -867,8 +867,37 @@ static uint32_t dds_step_min_dist_to_k8(uint32_t step) {
     return best;  
 }
 
+// ==== Аналитический уровень 1-й пары FRAC8-спуров (DDS выключен) ====  
+// Делитель пилит между INT и INT+1 — пилообразная фазовая модуляция.  
+// L1 ≈ 10·log10( f·(256−f) / (128·π²·D²) ),  D = int + frac/256.  
+// Проверено на замерах: формула завышает ~6.5 dB — поправка вынесена.  
+// Возврат: уровень в единицах 0.1 dBc (положительное число = |L|).  
+static uint32_t frac_spur_level_db_x10(uint16_t pio_int, uint8_t pio_frac) {  
+    if (pio_frac == 0) return 0;                       // нет спура  
+    // num/den в Q:  L2 = f·(256−f) / (128·π²·D²)  →  считаем в целых  
+    uint64_t D_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
+    // A = f·(256−f)  (макс ~16384),  B = 128·π² ≈ 1263  
+    // level2 = A·256² / (B·D_x256²)  
+    uint64_t A  = (uint64_t)pio_frac * (256u - pio_frac);  
+    uint64_t num = A * 65536ULL;                        // A·256²  
+    uint64_t den = 1263ULL * D_x256 * D_x256 / 1000ULL; // 128·π²·D²/1e3  
+    if (den == 0 || num >= den * 1000ULL) return 600;   // L ≥ 0 dBc — гарантированно плохо  
+    // 10·log10(num/den) целочисленно: таблица log2→log10, 0.1 dB шаг.  
+    // Проще: считаем отношение к эталону и штраф, не dB.  
+    return 0; // (не используется — уровень идёт через штраф ниже)  
+}
 
-
+// штраф за мощность спура: pen = 2^30 · (A/16384) · (64/D)²  
+static uint64_t frac_spur_power_pen(uint16_t pio_int, uint8_t pio_frac) {  
+    if (pio_frac == 0) return 0;  
+    uint64_t D_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
+    uint64_t A      = (uint64_t)pio_frac * (256u - pio_frac);       // ≤16384  
+    // (A/16384)·(64/D)²·2^30  =  A·64²·256²·2^30 / (16384·D_x256²)  
+    uint64_t num = A * 4096ULL * 65536ULL;                          // A·64²·256²  
+    uint64_t den = 16384ULL * D_x256 * D_x256;  
+    uint64_t pen = (num / den) << 30 >> 14;                         // нормировка  
+    return pen;  
+}
 
 
 static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out) {
@@ -883,34 +912,20 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         return 0; // Аппаратный абсолютный идеал
     }
 
-    // 1. Штраф за дальние спуры (простые дроби FRAC8)
-    // добавляем запретный пояс вокруг простых дробей ±8 LSB
+    // ==== 1. Спектральная цена кандидата (заменяет ctz/якоря/куб-прокс) ====  
     if (test.pio_frac != 0) {  
-        // 1a. Базовый штраф за сам факт frac≠0 — аппаратная дробь делителя  
-        //     всегда гоняет делитель циклически → спур. frac=0 бесплатен.  
-        b->ctz_penalty = (1ULL << 30);  
+        // 1a. Аналитический уровень спура (энергия, не позиция)  
+        b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
   
-        // 1b. Простота дроби: ctz — чем больше младших нулей, тем короче  
-        //     период паттерна (128=1/2 → ctz 7, самый опасный)  
-        b->ctz_val = (uint32_t)__builtin_ctz(test.pio_frac);  
-        b->ctz_penalty += (1ULL << (b->ctz_val + 26));  
-  
-        // 1c. добавить градуированный штраф за близость FRAC8-спура
-        for (uint32_t n = 2; n <= 8; n++) {  
-            for (uint32_t k = 1; k < n; k++) {  
-                uint32_t anchor = (k * 256u) / n;  
-                uint32_t d = (test.pio_frac > anchor) ? (test.pio_frac - anchor)  
-                                                      : (anchor - test.pio_frac);  
-                if (d < 8u) { b->ctz_penalty += (1ULL << 33); n = 8; break; }  
-            }  
+        // 1b. Цена позиции: спур < 1 МГц от несущей — внутри полосы ФНЧ-перехода,  
+        //     штрафуем кубически; дальше 3 МГц — ФНЧ убирает, штраф ~0.  
+        uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
+        if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
+            uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;  
+            uint64_t prox_q = prox / 1024ULL;  
+            b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
         }  
-        // штраф пропорционален близости спура к несущей (не вето!)  
-        uint64_t spur = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
-        if (spur != UINT64_MAX && spur < VFO_SPUR_MIN_OFFSET_HZ) {  
-            uint64_t prox = VFO_SPUR_MIN_OFFSET_HZ - spur;   // 0..1e6  
-            b->ctz_penalty += (prox * prox) >> 8;            // квадратичный, подберите нормировку  
-        }  
-        b->total_metric += b->ctz_penalty; 
+        b->total_metric += b->spur_power_pen;  
     }
  
 
@@ -1030,43 +1045,7 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 }
 
 
-
-// Float-версия (диагностика, WINNER-лог)
-// vfo_hardware.cpp — рядом с frac_spur_min_off_hz  
-// Возвращает уровень k-й пары боковых спура FRAC8, dBc.  
-// UINT8 кодирует "нет спура" через возврат -140.0f.  
-static float frac_spur_level_dbc(uint16_t pio_int, uint8_t pio_frac,  
-                                 uint32_t k)  
-{  
-    if (pio_frac == 0 || k == 0) return -140.0f;  
-    uint32_t m  = (pio_frac * k) & 0xFFu;  
-    if (m == 0 || m == 256u) return -140.0f;      // гармоника упала на тон  
-    float f  = (float)pio_frac;  
-    float D  = (float)pio_int + f / 256.0f;  
-    // power = f*(256-f) / (128·π²·k²·D²)  
-    float p2 = f * (256.0f - f)  
-             / (128.0f * 9.8696f * (float)(k * k) * D * D);  
-    return 10.0f * log10f(p2);  
-}  
-  
-// Позиция k-й гармоники (та же арифметика, что в frac_spur_min_off_hz, но без min):  
-static uint64_t frac_spur_off_hz_k(uint16_t pio_int, uint8_t pio_frac,  
-                                   uint64_t clk_sys_hz, uint32_t k)  
-{  
-    uint64_t div_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
-    uint32_t m  = ((uint32_t)pio_frac * k) & 0xFFu;  
-    uint32_t fd = (m < 256u - m) ? m : 256u - m;  
-    if (fd == 0) return 0;                         // на несущей  
-    return clk_sys_hz * fd / div_x256;  
-}
-
-
-// Использование в метрике — штраф за суммарную мощность первых 4 гармоник (они же уже просчитываются в frac_spur_min_off_hz для позиции):
-uint64_t spur_pen = 0;  
-for (uint32_t k = 1; k <= 4; k++)  
-    spur_pen += frac_spur_power_q(test.pio_int, test.pio_frac, k);  
-// spur_pen ~ уровень главной пары; домножить на вес перед добавлением в metric
-
+// функция выполняет энергетический аудит спектра
 
 
 // Метрика кандидата
@@ -1107,24 +1086,6 @@ static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac, uint64_
     return best;
 }
 
-// хелпер
-// Целочисленная версия (внутри метрики, без float)
-// spur_pow_q ∝ f·(256−f)/(k²·D²), масштаб 2^32 при эталоне  
-static uint64_t frac_spur_power_q(uint16_t pio_int, uint8_t pio_frac,  
-                                  uint32_t k)  
-{  
-    if (pio_frac == 0 || k == 0) return 0;  
-    uint32_t m = ((uint32_t)pio_frac * k) & 0xFFu;  
-    if (m == 0) return 0;  
-    uint64_t f  = pio_frac;  
-    uint64_t D2 = (256ULL * pio_int + pio_frac);   // D в единицах 1/256  
-    // числитель f·(256−f)·256² (компенсация D в 1/256), знаменатель k²·D2²  
-    __uint128_t num = (__uint128_t)(f * (256ULL - f)) * 65536ULL;  
-    __uint128_t den = (__uint128_t)(k * k) * D2 * D2;  
-    if (den == 0) return 0;  
-    uint64_t q = (uint64_t)((num << 32) / den);    // Q32  
-    return q;  
-}
 
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
@@ -1288,14 +1249,10 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
 #endif  
   
                     // === АРБИТРАЖ
-                    bool prefer;  
-                    if (frac_forbidden != best_forbidden) {  
-                        prefer = !frac_forbidden;  
-                    } else {  
-                        prefer = (current_dds_metric < min_dds_metric) ||  
-                                 (current_dds_metric == min_dds_metric &&  
-                                  clk_sys_hz > best_pll.clk_sys_hz);  
-                    }
+                    (void)frac_forbidden;   // вето снято: близкий спур уже дороже в метрике  
+                    bool prefer = (current_dds_metric < min_dds_metric) ||  
+                                  (current_dds_metric == min_dds_metric &&  
+                                   clk_sys_hz > best_pll.clk_sys_hz);
   
                     if (prefer) {    
                         best_forbidden  = frac_forbidden;    

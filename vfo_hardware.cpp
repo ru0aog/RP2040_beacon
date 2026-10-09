@@ -61,14 +61,14 @@
 
 #define VFO_FRACTAL_MODE         1    // 0 - целочисленный режим. 1 - дробный
 
-#define VFO_FRAC_DITHER_NONE     1    // дизер FRAC-байта делителя PIO: размывает  
-#define VFO_FRAC_DITHER_1BIT     0    // спуры простых дробей (1/2, 1/4, 5/8...) 
+#define VFO_FRAC_DITHER_NONE     0    // дизер FRAC-байта делителя PIO: размывает  
+#define VFO_FRAC_DITHER_1BIT     1    // спуры простых дробей (1/2, 1/4, 5/8...) 
 #define VFO_FRAC_DITHER_2BIT     0
 #define VFO_FRAC_DITHER_3BIT     0
 #define VFO_FRAC_DITHER_4BIT     0
 #define VFO_FRAC_DITHER_5BIT     0
 
-#define VFO_STEP_DITHER_NONE     1    // дизер STEP
+#define VFO_STEP_DITHER_NONE     1    // дизер STEP - не нужен?
 #define VFO_STEP_DITHER_1BIT     0
 #define VFO_STEP_DITHER_2BIT     0
 #define VFO_STEP_DITHER_3BIT     0
@@ -107,7 +107,7 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
 
 // Добавлен упреждающий прототип Core 1, теперь vfo_clk_boost_enter сможет его вызвать!
 static void __not_in_flash_func(vfo_core1_entry)();
-
+static float frac_spur_level_db(uint16_t pio_int, uint8_t pio_frac);
 // forward declaration  
 static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,  
                                      uint64_t clk_sys_hz);
@@ -895,27 +895,6 @@ static uint32_t dds_step_min_dist_to_k8(uint32_t step) {
     return best;  
 }
 
-// ==== Аналитический уровень 1-й пары FRAC8-спуров (DDS выключен) ====  
-// Делитель пилит между INT и INT+1 — пилообразная фазовая модуляция.  
-// L1 ≈ 10·log10( f·(256−f) / (128·π²·D²) ),  D = int + frac/256.  
-// Проверено на замерах: формула завышает ~6.5 dB — поправка вынесена.  
-// Возврат: уровень в единицах 0.1 dBc (положительное число = |L|).  
-static uint32_t frac_spur_level_db_x10(uint16_t pio_int, uint8_t pio_frac) {  
-    if (pio_frac == 0) return 0;                       // нет спура  
-    // num/den в Q:  L2 = f·(256−f) / (128·π²·D²)  →  считаем в целых  
-    uint64_t D_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
-    // A = f·(256−f)  (макс ~16384),  B = 128·π² ≈ 1263  
-    // level2 = A·256² / (B·D_x256²)  
-    uint64_t A  = (uint64_t)pio_frac * (256u - pio_frac);  
-    uint64_t num = A * 65536ULL;                        // A·256²  
-    uint64_t den = 1263ULL * D_x256 * D_x256 / 1000ULL; // 128·π²·D²/1e3  
-    if (den == 0 || num >= den * 1000ULL) return 600;   // L ≥ 0 dBc — гарантированно плохо  
-    // 10·log10(num/den) целочисленно: таблица log2→log10, 0.1 dB шаг.  
-    // Проще: считаем отношение к эталону и штраф, не dB.  
-    return 0; // (не используется — уровень идёт через штраф ниже)  
-}
-
-
 
 
 
@@ -927,7 +906,8 @@ static uint64_t frac_spur_power_pen(uint16_t pio_int, uint8_t pio_frac) {
     // (A/16384)·(64/D)²·2^30  =  A·64²·256²·2^30 / (16384·D_x256²)  
     uint64_t num = A * 4096ULL * 65536ULL;                          // A·64²·256²  
     uint64_t den = 16384ULL * D_x256 * D_x256;  
-    uint64_t pen = (num / den) << 30 >> 14;                         // нормировка  
+    // сдвиг подобрать; 46 даёт ~1.6e10 на frac47/int25 и ~3e9 на frac213/int56
+    uint64_t pen = ((uint64_t)A << 46) / (D_x256 * D_x256);
     return pen;  
 }
 
@@ -993,19 +973,36 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     }  
   
     // 1a. Уровень FRAC8-спура: штраф ~ A/D² (аналитический потолок линии)  
-    b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
-    b->total_metric += b->spur_power_pen;  
-  
-    // 1b. Позиция спура: кубический штраф за отстройку < 3 МГц (зона до ФНЧ)  
-    {  
-        uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
-        if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
-            uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;  
-            uint64_t prox_q = prox / 1024ULL;  
+        b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
+        {  
+            uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
+            if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
+                uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;  
+                uint64_t prox_q = prox / 1024ULL;  
+                b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
+            }  
+        }  
+        b->total_metric += b->spur_power_pen;           // ← суммируем ПОСЛЕ обоих вкладов
+
+        uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);    
+        if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {    
+            uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;    
+            uint64_t prox_q = prox / 1024ULL;    
             b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
         }  
-    }  
   
+        // 1c. Цена уровня: спур громче -30 dBc внутри горизонта ФНЧ — штраф  
+        // пропорционален квадрату превышения. За горизонтом (>~3 МГц) ФНЧ  
+        // давит — уровень не штрафуем.  
+        if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
+            float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);  
+            if (lvl_db > -30.0f) {  
+                float over = lvl_db + 30.0f;                       // dB сверх порога  
+                b->spur_power_pen += (uint64_t)(over * over) * (1ULL << 22);  
+                // -20 dBc → over=10 → +4.3e11; -30 dBc → 0; -40 dBc → 0  
+            }  
+        }
+
     // 2. Цена frac=0: вся дробная работа ложится на MASH  
     if (test.pio_frac == 0) {  
         uint64_t act = (test.dds_step <= (0xFFFFFFFFu - test.dds_step))  
@@ -1054,8 +1051,22 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->int_penalty = VFO_INT_PENALTY;  
         b->total_metric += b->int_penalty;  
     }
-    
-  
+/*
+    // Мягкий штраф за работу ГУН у верхнего края диапазона  
+    if (vco_hz > 3400000000ULL) {  
+        b->total_metric += (vco_hz - 3400000000ULL) >> 4;  // ~30e6 за каждые 100 МГц сверх 3.4G  
+    }
+*/
+    // Level-пенальти: спуры хуже -30 dBc дорожают квадратично  
+    if (test.pio_frac != 0 && test.pio_int != 0) {  
+        float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);  
+        if (lvl_db > -30.0f) {  
+            float over = lvl_db + 30.0f;  
+            b->spur_power_pen += (uint64_t)(over * over) << 22;  
+            b->total_metric  += (uint64_t)(over * over) << 22;  
+        }  
+    }
+
     return b->total_metric;  
 #endif  
 }
@@ -1181,8 +1192,6 @@ static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac, uint64_
 // Оценка уровня главной пары FRAC8-спуров, dBc.  
 // Модель: пилообразная ФМ с глубиной Δφ = f·(256−f)/(256·D) такта VCO;  
 // L1 ≈ 10·log10( f·(256−f) / (32·π²·D²) )  — потолок, без sinc-огибающей.  
-// Калибровка по замерам: frac=47/int=55 → −33 dBc (замер −41),  
-// frac=23/int=25 → −30 dBc (замер −34): систематика ~−6.5 dB, вычитаем её.  
 static float frac_spur_level_db(uint16_t pio_int, uint8_t pio_frac) {  
     if (pio_frac == 0 || pio_int == 0) return -999.0f;   // спура нет  
     float D = (float)pio_int + (float)pio_frac / 256.0f;  
@@ -1190,7 +1199,7 @@ static float frac_spur_level_db(uint16_t pio_int, uint8_t pio_frac) {
     float p2 = f * (256.0f - f);                          // огибающая простоты дроби  
     // L1_raw = 10·log10(p2 / (32·π²·D²))  
     float lvl = 10.0f * log10f(p2 / (32.0f * 9.8696f * D * D));  
-    return lvl - 6.5f;   // поправка, откалиброванная на двух измеренных точках  
+    return lvl - 21.0f;   // поправка, откалиброванная на 3-х измеренных точках  
 }
 
 

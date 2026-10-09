@@ -59,7 +59,7 @@
 
 #define VFO_DDS_MODE             1
 
-#define VFO_FRACTAL_MODE         0    // 0 - целочисленный режим. 1 - дробный
+#define VFO_FRACTAL_MODE         1    // 0 - целочисленный режим. 1 - дробный
 
 #define VFO_FRAC_DITHER_NONE     1    // дизер FRAC-байта делителя PIO: размывает  
 #define VFO_FRAC_DITHER_1BIT     0    // спуры простых дробей (1/2, 1/4, 5/8...) 
@@ -68,12 +68,12 @@
 #define VFO_FRAC_DITHER_4BIT     0
 #define VFO_FRAC_DITHER_5BIT     0
 
-#define VFO_STEP_DITHER_NONE     0    // дизер STEP
+#define VFO_STEP_DITHER_NONE     1    // дизер STEP
 #define VFO_STEP_DITHER_1BIT     0
 #define VFO_STEP_DITHER_2BIT     0
 #define VFO_STEP_DITHER_3BIT     0
 #define VFO_STEP_DITHER_4BIT     0
-#define VFO_STEP_DITHER_5BIT     1
+#define VFO_STEP_DITHER_5BIT     0
 
 
 // ============================================================================
@@ -595,50 +595,59 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
  * в регистр `clkdiv` state machine (INT в битах 31..16, FRAC8 в битах 15..8).  
  *  
  */
-static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_int, uint32_t local_frac) {
-    uint32_t step = local_step;
-
-#ifdef VFO_DITHER_RANDOMIZE
-    // Синхронизировано с Core 1: Быстрый беспереходный дизер с мат. ожиданием строго 0.0
-    int32_t r_bits = (int32_t)(vfo_xorshift32() & 0x0Fu);
-    int32_t r_dither = (r_bits << 1) - 15; 
-    step = (uint32_t)((int32_t)step + r_dither);
-#endif
-
-    int32_t total_correction = 0;
-
-#if VFO_USE_MASH2
-    uint32_t old_acc1 = dds_accumulator;
-    dds_accumulator += step;
-    uint32_t carry1 = (dds_accumulator < old_acc1) ? 1 : 0; 
-
-    uint32_t old_acc2 = dds_accum_m2;
-    dds_accum_m2 += dds_accumulator;
-    uint32_t carry2 = (dds_accum_m2 < old_acc2) ? 1 : 0; 
-
-    total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)m2_carry_prev;
-    m2_carry_prev = carry2; 
-#else
-    uint32_t old_acc = dds_accumulator;
-    dds_accumulator += step;
-    if (dds_accumulator < old_acc) {
-        total_correction = 1;
-    }
-#endif
-
-    int32_t current_frac = (int32_t)local_frac + total_correction;
-    int32_t current_int  = (int32_t)local_int;
-
-    while (current_frac > 255) {
-        current_frac -= 256;
-        current_int++;
-    }
-    while (current_frac < 0) {
-        current_frac += 256;
-        current_int--;
-    }
-
-    lo_pio->sm[lo_sm].clkdiv = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
+static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_int, uint32_t local_frac) {  
+    uint32_t step = local_step;  
+  
+#ifdef VFO_DITHER_RANDOMIZE  
+    int32_t r_bits = (int32_t)(vfo_xorshift32() & 0x0Fu);  
+    int32_t r_dither = (r_bits << 1) - 15;   
+    step = (uint32_t)((int32_t)step + r_dither);  
+#endif  
+  
+    int32_t total_correction = 0;  
+  
+#if VFO_USE_MASH2  
+    uint32_t old_acc1 = dds_accumulator;  
+    dds_accumulator += step;  
+    uint32_t carry1 = (dds_accumulator < old_acc1) ? 1 : 0;   
+  
+    uint32_t old_acc2 = dds_accum_m2;  
+    dds_accum_m2 += dds_accumulator;  
+    uint32_t carry2 = (dds_accum_m2 < old_acc2) ? 1 : 0;   
+  
+    total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)m2_carry_prev;  
+    m2_carry_prev = carry2;   
+#else  
+    uint32_t old_acc = dds_accumulator;  
+    dds_accumulator += step;  
+    if (dds_accumulator < old_acc) {  
+        total_correction = 1;  
+    }  
+#endif  
+  
+    int32_t current_frac;  
+    int32_t current_int = (int32_t)local_int;  
+  
+#if !VFO_FRACTAL_MODE  
+    // int-режим + DDS: шаг покрывает весь дробный остаток делителя  
+    // (frac8·2^24 + sub-LSB), поэтому перенос = +1 к ЦЕЛОМУ делителю,  
+    // а не к FRAC-байту. FRAC всегда 0 — делитель пилит int ↔ int+1.  
+    current_int  += total_correction;  
+    current_frac  = 0;  
+#else  
+    // Дробный режим: как было — перенос идёт в FRAC-байт (+1/256 делителя)  
+    current_frac = (int32_t)local_frac + total_correction;  
+    while (current_frac > 255) {  
+        current_frac -= 256;  
+        current_int++;  
+    }  
+    while (current_frac < 0) {  
+        current_frac += 256;  
+        current_int--;  
+    }  
+#endif  
+  
+    lo_pio->sm[lo_sm].clkdiv = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);  
 }
 
 
@@ -787,9 +796,17 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         }
 #endif
 
-        // ЗНАКОВАЯ НОРМАЛИЗАЦИЯ: переменные принудительно приведены к int32_t  
-        int32_t current_frac = l_frac + total_correction;  
+        int32_t current_frac = l_frac;  
         int32_t current_int  = l_int;  
+  
+#if !VFO_FRACTAL_MODE  
+        // int-режим + DDS: перенос аккумулятора = +1 к ЦЕЛОМУ делителю.  
+        // Шаг step покрывает весь дробный остаток (frac8·2^24 + subLSB),  
+        // поэтому correction уходит в INT-поле, FRAC остаётся 0.  
+        current_int += total_correction;  
+        current_frac = 0;  
+#else  
+        current_frac = l_frac + total_correction;
   
         // Декорреляция спектра аппаратной дробной части делителя PIO.
 
@@ -831,7 +848,9 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1  
         current_int += (current_frac >> 8);   
         current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка  
-  
+
+#endif 
+
         // Единственная STR-запись в шину периферии PIO за итерацию  
         *clkdiv_reg = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
 
@@ -1053,64 +1072,68 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
  * а также 32-битный остаток ошибки `dds_step` — приращение для DDS/MASH-2  
  * дизеринга, компенсирующее остаточную дробную часть делителя.  
  */
-static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {  
-    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)  
-    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;  
-    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;  
-  
-    uint64_t clocks_per_period = 2ULL;  
-    uint64_t vfo_denom = mhz_target * clocks_per_period;  
-  
-    // Делитель PIO в формате 16.8: int + frac8/256  
-    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;  
-    uint8_t  frac8 = (uint8_t)(pio_div_fixed8 & 0xFFu);  
-  
-    VfoParameters params;  
-  
-#if VFO_FRACTAL_MODE  
-    // Дробный режим: int=floor, frac=дробные 8 бит делителя  
-    params.pio_int  = pio_div_fixed8 >> 8;  
-    params.pio_frac = frac8;  
-#else  
-    // Целочисленный режим: int=floor — ΔΣ дотягивает только положительный  
-    // остаток (перенос увеличивает делитель), округление вверх недопустимо.  
-    params.pio_int  = pio_div_fixed8 >> 8;  
-    params.pio_frac = 0;  
-#endif  
-  
-    // Для совместимости со структурой сохраняем в chz (сантигерцах)  
-    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL);  
-  
-    if (params.pio_int < 2) {  
-        params.pio_int  = 2;  
-        params.pio_frac = 0;  
-    }  
-  
-    // Суб-LSB остаток: ошибка квантования ниже одного frac8-LSB делителя  
-    uint64_t clk_sys_rem   = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;  
-    uint64_t intermediate  = (clk_sys_rem << 16) / vfo_denom;  
-    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;  
-  
-    params.dds_step = (uint32_t)((intermediate << 16)  
-                               + ((remainder_low << 16) / vfo_denom));  
-  
-#if !VFO_FRACTAL_MODE && VFO_DDS_MODE  
-    // int-режим + DDS: шаг должен покрывать ВЕСЬ дробный остаток делителя:  
-    // целые frac8/256 (которые в pio_frac не записали) + суб-LSB часть.  
-    // Перенос аккумулятора добавляет +1 к FRAC-байту clkdiv, т.е. 1/256 делителя.  
-    params.dds_step += ((uint32_t)frac8 << 24);  
-#endif  
-  
-    // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1,  
-    // период паттерна = 2^32 отсчётов → гребёнка превращается в шумовую полку.  
-    if (params.dds_step != 0) params.dds_step |= 1u;  
-  
-#if !VFO_FRACTAL_MODE && !VFO_DDS_MODE  
-    // Чистый int-режим без DDS: делитель статичный, шаг не нужен  
-    params.dds_step = 0;  
-#endif  
-  
-    return params;  
+static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {    
+    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)    
+    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;    
+    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;    
+    
+    uint64_t clocks_per_period = 2ULL;    
+    uint64_t vfo_denom = mhz_target * clocks_per_period;    
+    
+    // Делитель PIO в формате 16.8: int + frac8/256    
+    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;    
+    uint8_t  frac8 = (uint8_t)(pio_div_fixed8 & 0xFFu);    
+    
+    VfoParameters params;    
+    
+#if VFO_FRACTAL_MODE    
+    // Дробный режим: int=floor, frac=дробные 8 бит делителя    
+    params.pio_int  = pio_div_fixed8 >> 8;    
+    params.pio_frac = frac8;    
+#else    
+    // Целочисленный режим: int=floor — ΔΣ дотягивает только положительный    
+    // остаток (перенос увеличивает делитель), округление вверх недопустимо.    
+    params.pio_int  = pio_div_fixed8 >> 8;    
+    params.pio_frac = 0;    
+#endif    
+    
+    // Для совместимости со структурой сохраняем в chz (сантигерцах)    
+    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL);    
+    
+    if (params.pio_int < 2) {    
+        params.pio_int  = 2;    
+        params.pio_frac = 0;    
+    }    
+    
+    // Суб-LSB остаток: ошибка квантования ниже одного frac8-LSB делителя.    
+    // Шаг в единицах "переносов на итерацию · 2^32".    
+    uint64_t clk_sys_rem   = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;    
+    uint64_t intermediate  = (clk_sys_rem << 16) / vfo_denom;    
+    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;    
+    
+    params.dds_step = (uint32_t)((intermediate << 16)    
+                               + ((remainder_low << 16) / vfo_denom));    
+    
+#if !VFO_FRACTAL_MODE && VFO_DDS_MODE    
+    // int-режим + DDS: шаг покрывает ВЕСЬ дробный остаток делителя.    
+    // КОНТРАКТ С ГОРЯЧИМ ЦИКЛОМ: перенос аккумулятора должен добавлять    
+    // +1 к ЦЕЛОМУ делителю (int -> int+1), а не к FRAC-байту. Тогда:    
+    //   avg div = int + step/2^32 = int + frac8/256 + sub-LSB  — точно.    
+    // Если перенос уйдёт в FRAC, вклад будет step/(2^32·256) — в 256 раз    
+    // меньше, и f_out встанет на ~frac8·f/256 выше цели (случай 3.899 МГц).    
+    params.dds_step += ((uint32_t)frac8 << 24);    
+#endif    
+    
+    // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1,    
+    // период паттерна = 2^32 отсчётов → гребёнка превращается в шумовую полку.    
+    if (params.dds_step != 0) params.dds_step |= 1u;    
+    
+#if !VFO_FRACTAL_MODE && !VFO_DDS_MODE    
+    // Чистый int-режим без DDS: делитель статичный, шаг не нужен    
+    params.dds_step = 0;    
+#endif    
+    
+    return params;    
 }
 
 

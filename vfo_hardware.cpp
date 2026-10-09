@@ -61,8 +61,8 @@
 
 #define VFO_FRACTAL_MODE         1    // 0 - целочисленный режим. 1 - дробный
 
-#define VFO_FRAC_DITHER_NONE     0    // дизер FRAC-байта делителя PIO: размывает  
-#define VFO_FRAC_DITHER_1BIT     1    // спуры простых дробей (1/2, 1/4, 5/8...) 
+#define VFO_FRAC_DITHER_NONE     1    // дизер FRAC-байта делителя PIO: размывает  
+#define VFO_FRAC_DITHER_1BIT     0    // спуры простых дробей (1/2, 1/4, 5/8...) 
 #define VFO_FRAC_DITHER_2BIT     0
 #define VFO_FRAC_DITHER_3BIT     0
 #define VFO_FRAC_DITHER_4BIT     0
@@ -180,6 +180,8 @@ static struct repeating_timer sdr_dither_timer;
 #endif
 
 static uint8_t current_active_tone = VFO_TONE_NONE;
+static volatile bool tone_changed = false;
+
 
 // Межъядерный аппаратный спинлок
 static spin_lock_t* vfo_spin_lock = nullptr;
@@ -188,7 +190,9 @@ static spin_lock_t* vfo_spin_lock = nullptr;
 static volatile uint32_t dds_step = 0;          
 static volatile uint32_t target_pio_int = 8;    
 static volatile uint32_t target_pio_frac8 = 0;  
-static volatile bool tone_changed = false; 
+// Глубина FRAC-дизера как битовая маска ГПСЧ, выбирается по pio_int  
+// при смене тона: 0x03 → ±3, 0x01 → ±1, 0x00 → выключен.  
+static volatile uint32_t vfo_frac_dither_mask = 0x03u;
 
 // Глобальное состояние DDS-накопителей в ОЗУ (используется в С-ориентированных ветках)
 static volatile uint32_t dds_accumulator = 0; 
@@ -671,9 +675,10 @@ static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) 
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
     // Регистро-резидентные копии статических параметров тона
-    int32_t l_step = 0;
-    int32_t l_int = 8;
-    int32_t l_frac = 0;
+    int32_t  l_step  = 0;
+    int32_t  l_int   = 8;
+    int32_t  l_frac  = 0;
+    uint32_t l_dmask = 0;   // глубина FRAC-дизера, грузится при смене тона
 
     // Регистро-резидентное состояние накопителей (DDS и ГПСЧ)
     uint32_t loc_acc1 = 0;
@@ -699,6 +704,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
                 l_step = (int32_t)dds_step;
                 l_int  = (int32_t)target_pio_int;
                 l_frac = (int32_t)target_pio_frac8;
+                l_dmask = vfo_frac_dither_mask;
                 
                 loc_acc1 = 0;
                 loc_rand_state = xorshift_state;
@@ -807,43 +813,14 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         current_frac = 0;  
 #else  
         current_frac = l_frac + total_correction;
-  
-        // Декорреляция спектра аппаратной дробной части делителя PIO.
 
-        #if VFO_FRAC_DITHER_1BIT
-            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x01u); // 1-bit биты 0    диапазона -1..+1
-        #endif
-        #if VFO_FRAC_DITHER_2BIT
-            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x03u); // 2-bit биты 0..1 диапазона -3..+3
-        #endif
-        #if VFO_FRAC_DITHER_3BIT
-            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
-        #endif
-        #if VFO_FRAC_DITHER_4BIT
-            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
-        #endif
-        #if VFO_FRAC_DITHER_5BIT
-            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & 0x1Fu); // 5-bit  
-        #endif
-
-        #if VFO_FRAC_DITHER_1BIT
-            current_frac += (fr_bits << 1) - 1;             // 1-bit биты 0    диапазона -1..+1
-        #endif
-        #if VFO_FRAC_DITHER_2BIT
-            current_frac += (fr_bits << 1) - 3;             // 2-bit биты 0..3 диапазона -3..+3
-        #endif
-        #if VFO_FRAC_DITHER_3BIT
-           current_frac += (fr_bits << 1) - 7;              // 3-bit биты 0..3 диапазона -7..+7
-        #endif
-        #if VFO_FRAC_DITHER_4BIT
-            current_frac += (fr_bits << 1) - 15;            // 4-bit биты 0..3 диапазона -15..+15
-        #endif
-        #if VFO_FRAC_DITHER_5BIT
-            current_frac += (fr_bits << 1) - 31;            // 5-bit 
-        #endif
-        #if VFO_FRAC_DITHER_NONE 
-            current_frac = l_frac + total_correction;       // декорреляция дробной части отключена
-        #endif
+        // Декорреляция FRAC-байта с рантайм-глубиной: маска выбирается  
+        // по pio_int при смене тона (0x03 → ±3, 0x01 → ±1, 0x00 → off).  
+        // При mask=0 ветка исчезает в 1 тест+бранч — дешевле 5 #if-вариантов.  
+        if (l_dmask != 0u) {  
+            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & l_dmask);  
+            current_frac += (fr_bits << 1) - (int32_t)l_dmask;  
+        }
 
         // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1  
         current_int += (current_frac >> 8);   
@@ -2388,6 +2365,14 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 #endif
 
     current_active_tone = tone_index;
+
+// Глубина FRAC-дизера по величине делителя: ±N единиц FRAC-байта  
+    // — это относительная ФМ-глубина ~mask/(256·int). На малых int  
+    // (ВЧ-диапазоны) даже ±1 поднимает ближнюю юбку — выключаем.  
+    if      (target_pio_int >= 40) vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 45–56)  
+    else if (target_pio_int >= 20) vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–27)  
+    else                           vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤14)
+
 }
 
 

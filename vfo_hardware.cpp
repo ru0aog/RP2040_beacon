@@ -915,15 +915,24 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     b->frac = test.pio_frac;
     b->raw_step = test.dds_step;
 
-#if VFO_FRACTAL_MODE  
-    if (test.pio_frac == 0 && test.dds_step == 0) {  
-        return 0; // Аппаратный абсолютный идеал — только в дробном режиме  
+#if !VFO_FRACTAL_MODE  
+    // Целочисленный режим: dds_step занулён, ошибка квантования —  
+    // единственный значимый критерий. Считаем её в герцах напрямую:  
+    //   f_out = clk_sys / (2·pio_int)  
+    //   err   = |f_out − target|  
+    // Метрика = err·2^20 + clk_penalty (подошва) — ошибка доминирует,  
+    // при равной ошибке побеждает больший clk·int.  
+    {  
+        uint64_t f_out_hz   = clk_sys_hz / (2ULL * test.pio_int);  
+        uint64_t target_hz  = (uint64_t)target_mhz * 10ULL;   // chz → Hz  
+        uint64_t err_hz     = (f_out_hz > target_hz)  
+                            ? (f_out_hz - target_hz)  
+                            : (target_hz - f_out_hz);  
+        return (err_hz << 20) + b->clk_penalty;  
     }  
+#else  
+    if (test.pio_frac == 0 && test.dds_step == 0) return 0;  
 #endif
-
-    if (test.pio_frac == 0 && test.dds_step == 0) {
-        return 0; // Аппаратный абсолютный идеал
-    }
 
     // ==== 1. Спектральная цена кандидата (заменяет ctz/якоря/куб-прокс) ====  
     if (test.pio_frac != 0) {  
@@ -943,7 +952,17 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->spur_power_pen;  
     }
  
+    #if !VFO_FRACTAL_MODE  
+        // f_out = clk/(2·int); ошибка в Гц относительно цели  
+        uint64_t f_out = clk_sys_hz / (2ull * test.pio_int);  
+        uint64_t target_hz = target_mhz / 1000ull;        // mhz_target в мГц → Гц  
+        uint64_t err = (f_out > target_hz) ? (f_out - target_hz) : (target_hz - f_out);  
+        b->total_metric = err * err;      // квадрат ошибки — главный терм  
+        b->total_metric += b->clk_penalty; // подошва как слабый tie-break  
+        return b->total_metric;  
+    #endif
 
+#if VFO_FRACTAL_MODE
     // ==== 1.1 frac=0: вся дробная работа ложится на MASH ====  
     //      Подошва/гребень на frac=0 измеренно хуже любого frac≠0  
     //      на высокой шине — штрафуем жёстко, не ветом, а ценой  
@@ -957,7 +976,6 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
             b->total_metric += frac0_pen;  
         }
 
-
     // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
     //    Штраф за близость dds_step к якорям k/8 (короткий период паттерна  
     //    переносов -> дискретный idle tone вместо шумовой полки)  
@@ -970,6 +988,7 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         }  
         b->total_metric += b->mash_penalty;    
     }
+#endif
 
     // 3. Штраф за подъём шумовой подошвы.    
         //    Замерено линейно в дБ: полка ~ -20·log10(clk_sys·pio_int) + const    
@@ -1023,8 +1042,13 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;
 
     VfoParameters params;
-    params.pio_int  = pio_div_fixed8 >> 8;
-    params.pio_frac = pio_div_fixed8 & 0xFFu;
+    // округление к ближайшему целому в integer-режиме
+    #if VFO_FRACTAL_MODE  
+        params.pio_int  = pio_div_fixed8 >> 8;  
+    #else  
+        params.pio_int  = (pio_div_fixed8 + 128u) >> 8;   // +0.5 LSB округление  
+    #endif  
+    params.pio_frac = VFO_FRACTAL_MODE ? (pio_div_fixed8 & 0xFFu) : 0u;
 
     // Для совместимости со структурой сохраняем в chz (сантигерцах)
     params.target_freq_chz = (uint32_t)(mhz_target / 10ULL); 

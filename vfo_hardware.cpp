@@ -81,10 +81,12 @@
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
 
 
-#define VFO_USE_MASH2            1
-#define VFO_DITHER_FAST          1
-#define VFO_PLL_AUTOTUNE         1
-#define VFO_DITHER_ON_CORE1      1
+#define VFO_USE_MASH2            0
+#define VFO_DITHER_FAST          0
+#define VFO_PLL_AUTOTUNE         0
+#define VFO_DITHER_ON_CORE1      0
+
+#define VFO_FRACTAL_MODE         0    // 0 - целочисленный режим. 1 - дробный
 
 #define VFO_FRAC_DITHER_NONE     1    // дизер FRAC-байта делителя PIO: размывает  
 #define VFO_FRAC_DITHER_1BIT     0    // спуры простых дробей (1/2, 1/4, 5/8...) 
@@ -974,12 +976,14 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
   
         // 1b. Цена позиции: спур < 1 МГц от несущей — внутри полосы ФНЧ-перехода,  
-        //     штрафуем кубически; дальше 3 МГц — ФНЧ убирает, штраф ~0.  
+        //     штрафуем кубически; дальше 3 МГц — ФНЧ убирает, штраф ~0.
+        #if VFO_FRACTAL_MODE
         uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
         if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
             uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;  
             uint64_t prox_q = prox / 1024ULL;  
-            b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
+            b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;
+        #endif 
         }  
         b->total_metric += b->spur_power_pen;  
     }

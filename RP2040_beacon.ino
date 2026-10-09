@@ -452,6 +452,7 @@ void setup() {
   adc_init();
   init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом
   init_file_manager();
+  init_flash_disk();   // инициализировать флэш-диск для Windows
 
   pinMode(PIN_USR_BUTTON, INPUT_PULLUP);          // инициализируем пин кнопки
   delay(20);                                      // Даем Pull-up надежно поднять линию до +3.3 В
@@ -496,8 +497,6 @@ void setup() {
   init_si5351();       // инициализировать си5351
 
   ZERO_LED_init();     // инициализировать WS2812B
-
-  init_flash_disk();   // инициализировать флэш-диск для Windows
 
   vfo_encoder_init();  // энкодер
 

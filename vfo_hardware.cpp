@@ -1060,7 +1060,6 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoPara
 // Минимальная отстройка FRAC8-спура по гармоникам k=1..4, Гц.  
 // frac==0 -> UINT64_MAX (нет спура). Спур k-й гармоники садится на  
 // f_sm * fd/256, где fd = свёртка (frac*k mod 256) в диапазон ±128.
-
 // Функция возвращает финальное значение best
 // точную частоту отстройки (в Гц) самого близкого спура из гармоник (k=1...4)
 // clk_sys_hz - делимая частота системной шины
@@ -1086,6 +1085,25 @@ static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac, uint64_
     }
     return best;
 }
+
+
+// Оценка уровня главной пары FRAC8-спуров, dBc.  
+// Модель: пилообразная ФМ с глубиной Δφ = f·(256−f)/(256·D) такта VCO;  
+// L1 ≈ 10·log10( f·(256−f) / (32·π²·D²) )  — потолок, без sinc-огибающей.  
+// Калибровка по замерам: frac=47/int=55 → −33 dBc (замер −41),  
+// frac=23/int=25 → −30 dBc (замер −34): систематика ~−6.5 dB, вычитаем её.  
+static float frac_spur_level_db(uint16_t pio_int, uint8_t pio_frac) {  
+    if (pio_frac == 0 || pio_int == 0) return -999.0f;   // спура нет  
+    float D = (float)pio_int + (float)pio_frac / 256.0f;  
+    float f = (float)pio_frac;  
+    float p2 = f * (256.0f - f);                          // огибающая простоты дроби  
+    // L1_raw = 10·log10(p2 / (32·π²·D²))  
+    float lvl = 10.0f * log10f(p2 / (32.0f * 9.8696f * D * D));  
+    return lvl - 6.5f;   // поправка, откалиброванная на двух измеренных точках  
+}
+
+
+
 
 
 
@@ -1139,10 +1157,11 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
         uint32_t fbdiv, p1, p2, refdiv, step;  
         uint16_t pio_int;  
         uint8_t  pio_frac;  
-        bool     forbidden, clean;  
+        bool     forbidden, clean;
+        float    spur_lvl;          // оценка уровня главной FRAC8-пары, dBc
     };  
     CandLog top10[20];  
-    for (int i = 0; i < 10; i++) top10[i].metric = UINT64_MAX, top10[i].clk = 0;  
+    for (int i = 0; i < 20; i++) top10[i].metric = UINT64_MAX, top10[i].clk = 0;  
 #endif  
   
     // ---- Матричный скан: refdiv × fbdiv × (p1,p2) ----  
@@ -1230,10 +1249,10 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
 #if VFO_PLL_DEBUG  
                     // TOP-10 без дублей по clk_sys  
                     bool dup = false;  
-                    for (int i = 0; i < 10; i++)  
+                    for (int i = 0; i < 20; i++)  
                         if (top10[i].clk == clk_sys_hz) { dup = true; break; }  
-                    if (!dup && current_dds_metric < top10[9].metric) {  
-                        int pos = 9;  
+                    if (!dup && current_dds_metric < top10[19].metric) {  
+                        int pos = 19;  
                         while (pos > 0 && current_dds_metric < top10[pos-1].metric) pos--;  
                         for (int k = 9; k > pos; k--) top10[k] = top10[k-1];  
                         top10[pos].clk = clk_sys_hz;  top10[pos].vco = vco_hz;  
@@ -1244,6 +1263,8 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                         top10[pos].pio_int = test.pio_int;  
                         top10[pos].pio_frac = test.pio_frac;  
                         top10[pos].spur_off = spur_off_hz;  
+                        top10[pos].spur_lvl = frac_spur_level_db(test.pio_int,  
+                                                                 test.pio_frac);  
                         top10[pos].forbidden = frac_forbidden;  
                         top10[pos].clean = candidate_clean;  
                     }  
@@ -1307,20 +1328,48 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
     }
 
 #if VFO_PLL_DEBUG  
-    for (int i = 0; i < 10; i++) {  
+    // === МОДЕРНИЗИРОВАННЫЙ ВЫРАВНЕННЫЙ ВЫВОД ТАБЛИЦЫ TOP-10 ===
+    // Печатаем строгую шапку таблицы для удобства чтения глаз
+    Serial.println(F("[PLLDBG]  #   |  clk_sys    |    VCO       | R |  F  | P1| P2|    Metric   | Frac | Spur_Off  |  Spur_Lvl  | Статус"));
+    Serial.println(F("[PLLDBG] -----+-------------+--------------+---+-----+---+---+-------------+------+-----------+------------+------------------"));
+
+    for (int i = 0; i < 20; i++) {  
         if (top10[i].clk == 0) break;  
-        Serial.printf("[PLLDBG] top%d: clk=%.3f MHz vco=%.3f MHz refdiv=%lu fbdiv=%lu "  
-                      "p1=%lu p2=%lu metric=%llu frac=%u spur_off=%llu kHz%s%s\n",  
-                i, top10[i].clk / 1e6, top10[i].vco / 1e6,  
-                (unsigned long)top10[i].refdiv, (unsigned long)top10[i].fbdiv,  
-                (unsigned long)top10[i].p1, (unsigned long)top10[i].p2,  
-                (unsigned long long)top10[i].metric, (unsigned)top10[i].pio_frac,  
-                (unsigned long long)(top10[i].spur_off == UINT64_MAX ? 0  
-                                       : top10[i].spur_off / 1000ULL),  
-                top10[i].forbidden ? " [FORB]" : "",  
-                top10[i].clean ? "" : " [DIRTY]");  
+
+        // Вычисляем отстройку в кГц (защита от UINT64_MAX)
+        unsigned long long spur_k_hz = (top10[i].spur_off == UINT64_MAX) ? 0ULL : (top10[i].spur_off / 1000ULL);
+
+        // Формируем строго фиксированные 16-символьные блоки для флагов, чтобы исключить пляску правого края
+        const char* forbidden_str = top10[i].forbidden ? "[FORB]" : "      ";
+        const char* clean_str     = top10[i].clean     ? "       " : " [DIRTY]";
+
+        // Прецизионная разметка ширины:
+        // %2d     - индекс занимает ровно 2 знака (выравнивание по правому краю)
+        // %7.3f   - clk_sys (например, 382.011)
+        // %8.3f   - vco (например, 2292.067)
+        // %1u, %3lu, %1lu, %1lu - односимвольные и трехсимвольные делители
+        // %11llu  - метрика (строго 11 позиций)
+        // %4u     - pio_frac (строго 4 позиции)
+        // %5llu   - отстройка спура (строго 5 позиций)
+        Serial.printf("[PLLDBG] [%2d] | %7.3f MHz | %8.3f MHz | %1u | %3lu | %1lu | %1lu | %11llu | %4u | %5llu kHz | %5.1f dBc | %s%s\n",
+                i, 
+                top10[i].clk / 1000000.0, 
+                top10[i].vco / 1000000.0,  
+                (unsigned)top10[i].refdiv, 
+                (unsigned long)top10[i].fbdiv,  
+                (unsigned long)top10[i].p1, 
+                (unsigned long)top10[i].p2,  
+                (unsigned long long)top10[i].metric, 
+                (unsigned)top10[i].pio_frac,  
+                spur_k_hz,
+                (double)top10[i].spur_lvl,
+                forbidden_str,  
+                clean_str);  
     }  
-  
+    Serial.println(F("[PLLDBG] -----+-------------+--------------+---+-----+---+---+-------------+------+-----------+------------+------------------"));
+
+
+
     // Победитель: пересчёт параметров для печати  
     VfoParameters wp;  
     vfo_pll_metric(best_pll.clk_sys_hz, target_mhz, &wp);  

@@ -50,6 +50,8 @@ struct VfoParameters {
     uint32_t target_freq_chz; 
 };
 
+#define VFO_PLL_DEBUG_SCAN
+
 #define VFO_USE_MASH2            
 #define VFO_DITHER_RANDOMIZE     
 #define VFO_DITHER_FAST          

@@ -57,6 +57,8 @@
 #define VFO_PLL_AUTOTUNE         0
 #define VFO_DITHER_ON_CORE1      1
 
+#define VFO_DDS_MODE             1
+
 #define VFO_FRACTAL_MODE         0    // 0 - целочисленный режим. 1 - дробный
 
 #define VFO_FRAC_DITHER_NONE     1    // дизер FRAC-байта делителя PIO: размывает  
@@ -924,28 +926,37 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
   
 #if !VFO_FRACTAL_MODE  
     {  
-        // target_mhz — МИЛЛИГЕРЦЫ: Hz = target_mhz / 1000  
-        uint64_t target_hz = target_mhz / 1000ULL;  
+        // Диагностическая ошибка квантования (в метрику не входит — ДМ закрывает её)  
+        uint64_t target_hz = target_mhz / 1000ULL;          // target_mhz — миллигерцы  
         uint64_t f_out_hz  = clk_sys_hz / (2ULL * test.pio_int);  
         uint64_t err_hz    = (f_out_hz > target_hz)  
                            ? (f_out_hz - target_hz)  
                            : (target_hz - f_out_hz);  
+        (void)err_hz;   // оставить для печати при отладке  
   
-        const uint64_t DEN_REF = 400000000ULL * 55ULL;    
-        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;    
-        b->clk_penalty = (dens < DEN_REF)    
-            ? ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF : 0;    
-    
-        b->total_metric = (err_hz << 20) + b->clk_penalty;    
+        // Подошва: плотность clk·int к эталону 400M·55  
+        const uint64_t DEN_REF = 400000000ULL * 55ULL;  
+        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;  
+        b->clk_penalty = (dens < DEN_REF)  
+            ? ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF : 0;  
+        b->total_metric += b->clk_penalty;  
   
-        // Штраф за тир VSEL=1.30V (clk > ~250 МГц): умеренный, ~2e9.  
-        // Он проигрывает разнице в err (err<<20: 1 кГц ≈ 1e9),  
-        // но побеждает близкие по ошибке кандидаты — предпочитаем  
-        // узел 1.15 В, только если ошибка у него не сильно хуже.   
-        if (clk_sys_hz >= VFO_CLK_SYS_PREF_MIN_HZ) {    
-            b->total_metric += (1ULL << 31);   // мягкий тир-штраф
-        }
-
+        // Дискретность ДМ: штраф за близость шага к якорям k/8 (idle-тоны)  
+        if (test.dds_step != 0) {  
+            uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
+            b->center_dist = dist_k8;  
+            if (dist_k8 < VFO_K8_BELT) {  
+                uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);  
+                b->mash_penalty = (deficit * deficit) >> 14;  
+            }  
+            b->total_metric += b->mash_penalty;  
+        }  
+  
+        // Мягкий тир-штраф 1.30 В (clk > ~250 МГц), ~2 кГц эквивалента  
+        if (clk_sys_hz >= VFO_CLK_SYS_PREF_MIN_HZ) {  
+            b->total_metric += (1ULL << 31);  
+        }  
+  
         if (test.pio_int < 4) {  
             b->int_penalty = VFO_INT_PENALTY;  
             b->total_metric += b->int_penalty;  
@@ -1042,51 +1053,68 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
  * а также 32-битный остаток ошибки `dds_step` — приращение для DDS/MASH-2  
  * дизеринга, компенсирующее остаточную дробную часть делителя.  
  */
-static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {
-    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)
-    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;
-    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;
-
-    uint64_t clocks_per_period = 2ULL; 
-    uint64_t vfo_denom = mhz_target * clocks_per_period; 
-    
-    // Масштабирующий коэффициент 1000ULL переводит миллигерцы в базовые Герцы
-    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;
-
-    VfoParameters params;
-    // округление к ближайшему целому в integer-режиме
-    #if VFO_FRACTAL_MODE  
-        params.pio_int  = pio_div_fixed8 >> 8;  
-    #else  
-        params.pio_int  = (pio_div_fixed8 + 128u) >> 8;   // +0.5 LSB округление  
-    #endif  
-    params.pio_frac = VFO_FRACTAL_MODE ? (pio_div_fixed8 & 0xFFu) : 0u;
-
-    // Для совместимости со структурой сохраняем в chz (сантигерцах)
-    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL); 
-
-    if (params.pio_int < 2) { params.pio_int = 2; params.pio_frac = 0; }
-
-    // Расчет 32-битного остатка ошибки DDS
-    uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;
-    uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
-    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
-
+static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target) {  
+    // Границы КВ-диапазона в миллигерцах (1.0 .. 40.0 МГц)  
+    if (mhz_target < 100000000ULL)   mhz_target = 100000000ULL;  
+    if (mhz_target > 40000000000ULL) mhz_target = 40000000000ULL;  
+  
+    uint64_t clocks_per_period = 2ULL;  
+    uint64_t vfo_denom = mhz_target * clocks_per_period;  
+  
+    // Масштабирующий коэффициент 1000ULL переводит миллигерцы в базовые Герцы  
+    uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;  
+  
+    VfoParameters params;  
+  
+#if VFO_FRACTAL_MODE  
+    // Дробный режим: int=floor, frac = дробные 8 бит делителя  
+    params.pio_int  = pio_div_fixed8 >> 8;  
+    params.pio_frac = pio_div_fixed8 & 0xFFu;  
+#elif VFO_DDS_MODE  
+    // Int + DDS: int=floor, весь дробный остаток уходит в dds_step  
+    // (frac-байт CLKDIV нулевой — FRAC8-спуров нет, дизерит только INT).  
+    // floor обязателен: ДМ-коррекция только положительная (+1/256 на перенос),  
+    // округление вверх дало бы отрицательный остаток, который не отработать.  
+    params.pio_int  = pio_div_fixed8 >> 8;  
+    params.pio_frac = 0u;  
+#else  
+    // Чистый целочисленный: округление к ближайшему int, DDS выключен  
+    params.pio_int  = (pio_div_fixed8 + 128u) >> 8;  
+    params.pio_frac = 0u;  
+#endif  
+  
+    // Для совместимости со структурой сохраняем в chz (сантигерцах)  
+    params.target_freq_chz = (uint32_t)(mhz_target / 10ULL);  
+  
+    if (params.pio_int < 2) { params.pio_int = 2; params.pio_frac = 0; }  
+  
+    // Расчет 32-битного остатка ошибки DDS  
+    uint64_t clk_sys_rem   = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;  
+    uint64_t intermediate  = (clk_sys_rem << 16) / vfo_denom;  
+    uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;  
+  
     params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));  
+  
+#if VFO_FRACTAL_MODE  
+    // frac-байт уже учтён аппаратно — DDS доносит только суб-LSB остаток  
+#elif VFO_DDS_MODE  
+    // int-режим + DDS: остаток clk_sys_rem покрывает только суб-LSB часть  
+    // (остаток от деления fixed8). Целые frac8/256 делителя добавляем в шаг:  
+    //   step_total = frac8/256·2^32 + суб-LSB остаток  
+    params.dds_step += (uint32_t)(pio_div_fixed8 & 0xFFu) << 24;  
+#endif  
+  
     // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1, период паттерна  
     // переносов = 2^32 отсчётов -> дискретная гребёнка превращается в шумовую полку.  
-    // Ошибка 1 LSB остатка (~F_s/2^32 Гц) пренебрежима.  
-    if (params.dds_step != 0) params.dds_step |= 1u;
-
-#if !VFO_FRACTAL_MODE    
-    // Целочисленный режим: делитель чистый int, DDS-коррекция выключена.  
-    // Частота смещается на ошибку квантования — это осознанно, для отладки метрики.  
-    params.pio_frac = 0;    
+    if (params.dds_step != 0) params.dds_step |= 1u;  
+  
+#if !VFO_DDS_MODE  
     params.dds_step = 0;  
-    (void)clk_sys_rem; (void)intermediate; (void)remainder_low;  
 #endif  
-
-    return params;
+  
+    (void)clk_sys_rem; (void)intermediate; (void)remainder_low;  
+  
+    return params;  
 }
 
 

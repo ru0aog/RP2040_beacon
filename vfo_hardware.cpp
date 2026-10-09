@@ -1298,12 +1298,20 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
   
                     if (test.pio_int < 2) continue;
 
-                    // Жёсткий гейт подошвы по плотности коррекции clk·int:  
-                    // замеры: int·clk ≈ 2e9 → −45 dBc, 4e9 → −50, 8e9 → −55.  
-                    // Гейт по произведению, не по int: иначе на f_out>6 МГц  
-                    // даже clk=400M даёт int<32 и скан пустеет (7.0386 МГц).  
                     #if VFO_FRACTAL_MODE  
-                        if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;  
+                        // Гейт плотности коррекции clk·int. Потолок продукта физически ограничен:  
+                        //   max(clk·int) ≈ clk_max² / (2·f_out).  
+                        // Выше ~18 МГц фиксированный порог 4e9 недостижим и опустошает скан.  
+                        // Берём min(4e9, 90% от достижимого максимума) — качество сохраняется,  
+                        // но скан не пустеет никогда.  
+                        {  
+                            uint64_t f_out_hz = target_mhz / 1000ULL;                 // target_mhz — миллигерцы  
+                            uint64_t prod_max = (max_allowed_clk * max_allowed_clk) / (2ULL * f_out_hz);  
+                            uint64_t gate     = 4000000000ULL;  
+                            uint64_t cap      = (prod_max * 9ULL) / 10ULL;            // 90% потолка  
+                            if (gate > cap) gate = cap;  
+                            if (clk_sys_hz * (uint64_t)test.pio_int < gate) continue;  
+                        }  
                     #else  
                         if (test.pio_int < 4) continue;  
                         if (clk_sys_hz * (uint64_t)test.pio_int < 6000000000ULL) continue;  

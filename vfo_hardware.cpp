@@ -915,6 +915,12 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     b->frac = test.pio_frac;
     b->raw_step = test.dds_step;
 
+#if VFO_FRACTAL_MODE  
+    if (test.pio_frac == 0 && test.dds_step == 0) {  
+        return 0; // Аппаратный абсолютный идеал — только в дробном режиме  
+    }  
+#endif
+
     if (test.pio_frac == 0 && test.dds_step == 0) {
         return 0; // Аппаратный абсолютный идеал
     }
@@ -1030,17 +1036,19 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
     uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
 
-    #if !VFO_FRACTAL_MODE  
-        params.pio_frac = 0;  
-        params.dds_step = 0;   // квантование на int — freq уйдёт на величину ошибки, это нормально для отладки  
-        (void)clk_sys_rem;   
-    #endif
-
     params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));  
     // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1, период паттерна  
     // переносов = 2^32 отсчётов -> дискретная гребёнка превращается в шумовую полку.  
     // Ошибка 1 LSB остатка (~F_s/2^32 Гц) пренебрежима.  
     if (params.dds_step != 0) params.dds_step |= 1u;
+
+#if !VFO_FRACTAL_MODE    
+    // Целочисленный режим: делитель чистый int, DDS-коррекция выключена.  
+    // Частота смещается на ошибку квантования — это осознанно, для отладки метрики.  
+    params.pio_frac = 0;    
+    params.dds_step = 0;  
+    (void)clk_sys_rem; (void)intermediate; (void)remainder_low;  
+#endif  
 
     return params;
 }

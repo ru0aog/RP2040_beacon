@@ -931,12 +931,20 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
                            ? (f_out_hz - target_hz)  
                            : (target_hz - f_out_hz);  
   
-        const uint64_t DEN_REF = 400000000ULL * 55ULL;  
-        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;  
-        b->clk_penalty = (dens < DEN_REF)  
-            ? ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF : 0;  
+        const uint64_t DEN_REF = 400000000ULL * 55ULL;    
+        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;    
+        b->clk_penalty = (dens < DEN_REF)    
+            ? ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF : 0;    
+    
+        b->total_metric = (err_hz << 20) + b->clk_penalty;    
   
-        b->total_metric = (err_hz << 20) + b->clk_penalty;  
+        // Тир-штраф VSEL: clk ≥ 250 МГц → vsel_for() даёт 1.30 В, на этом    
+        // напряжении замерен гребёнок ~90 кГц / −57 dBc (7.0386 МГц, 366M).    
+        // Вес 2^33 ≈ ошибке 8 кГц: узел на 1.15–1.25 В побеждает, пока его    
+        // err_hz не хуже более чем на ~8 кГц; дальше — честно проигрывает.    
+        if (clk_sys_hz >= VFO_CLK_SYS_PREF_MIN_HZ) {    
+            b->total_metric += (1ULL << 33);    
+        } 
   
         if (test.pio_int < 4) {  
             b->int_penalty = VFO_INT_PENALTY;  

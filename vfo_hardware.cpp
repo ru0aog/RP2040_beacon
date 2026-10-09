@@ -1016,16 +1016,10 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     // Масштабирующий коэффициент 1000ULL переводит миллигерцы в базовые Герцы
     uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;
 
-    #if !VFO_FRACTAL_MODE  
-        params.pio_frac = 0;  
-        params.dds_step = 0;   // квантование на int — freq уйдёт на величину ошибки, это нормально для отладки  
-        (void)clk_sys_rem;   
-    #endif
-
     VfoParameters params;
     params.pio_int  = pio_div_fixed8 >> 8;
     params.pio_frac = pio_div_fixed8 & 0xFFu;
-    
+
     // Для совместимости со структурой сохраняем в chz (сантигерцах)
     params.target_freq_chz = (uint32_t)(mhz_target / 10ULL); 
 
@@ -1035,7 +1029,13 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     uint64_t clk_sys_rem = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;
     uint64_t intermediate = (clk_sys_rem << 16) / vfo_denom;
     uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;
-    
+
+    #if !VFO_FRACTAL_MODE  
+        params.pio_frac = 0;  
+        params.dds_step = 0;   // квантование на int — freq уйдёт на величину ошибки, это нормально для отладки  
+        (void)clk_sys_rem;   
+    #endif
+
     params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));  
     // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1, период паттерна  
     // переносов = 2^32 отсчётов -> дискретная гребёнка превращается в шумовую полку.  

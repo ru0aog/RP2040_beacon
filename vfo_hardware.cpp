@@ -52,9 +52,9 @@
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
 
 
-#define VFO_USE_MASH2            0
-#define VFO_DITHER_FAST          0
-#define VFO_PLL_AUTOTUNE         0
+#define VFO_USE_MASH2            1
+#define VFO_DITHER_FAST          1
+#define VFO_PLL_AUTOTUNE         1
 #define VFO_DITHER_ON_CORE1      1
 
 #define VFO_DDS_MODE             1
@@ -68,12 +68,12 @@
 #define VFO_FRAC_DITHER_4BIT     0
 #define VFO_FRAC_DITHER_5BIT     0
 
-#define VFO_STEP_DITHER_NONE     1    // дизер STEP
+#define VFO_STEP_DITHER_NONE     0    // дизер STEP
 #define VFO_STEP_DITHER_1BIT     0
 #define VFO_STEP_DITHER_2BIT     0
 #define VFO_STEP_DITHER_3BIT     0
 #define VFO_STEP_DITHER_4BIT     0
-#define VFO_STEP_DITHER_5BIT     0
+#define VFO_STEP_DITHER_5BIT     1
 
 
 // ============================================================================
@@ -1061,64 +1061,59 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     uint64_t clocks_per_period = 2ULL;  
     uint64_t vfo_denom = mhz_target * clocks_per_period;  
   
-    // Масштабирующий коэффициент 1000ULL переводит миллигерцы в базовые Герцы  
+    // Делитель PIO в формате 16.8: int + frac8/256  
     uint64_t pio_div_fixed8 = ((clk_sys_hz * 256ULL) * 1000ULL) / vfo_denom;  
+    uint8_t  frac8 = (uint8_t)(pio_div_fixed8 & 0xFFu);  
   
     VfoParameters params;  
   
 #if VFO_FRACTAL_MODE  
-    // Дробный режим: int=floor, frac = дробные 8 бит делителя  
+    // Дробный режим: int=floor, frac=дробные 8 бит делителя  
     params.pio_int  = pio_div_fixed8 >> 8;  
-    params.pio_frac = pio_div_fixed8 & 0xFFu;  
-#elif VFO_DDS_MODE  
-    // Int + DDS: int=floor, весь дробный остаток уходит в dds_step  
-    // (frac-байт CLKDIV нулевой — FRAC8-спуров нет, дизерит только INT).  
-    // floor обязателен: ДМ-коррекция только положительная (+1/256 на перенос),  
-    // округление вверх дало бы отрицательный остаток, который не отработать.  
-    params.pio_int  = pio_div_fixed8 >> 8;  
-    params.pio_frac = 0u;  
+    params.pio_frac = frac8;  
 #else  
-    // Чистый целочисленный: округление к ближайшему int, DDS выключен  
-    params.pio_int  = (pio_div_fixed8 + 128u) >> 8;  
-    params.pio_frac = 0u;  
+    // Целочисленный режим: int=floor — ΔΣ дотягивает только положительный  
+    // остаток (перенос увеличивает делитель), округление вверх недопустимо.  
+    params.pio_int  = pio_div_fixed8 >> 8;  
+    params.pio_frac = 0;  
 #endif  
   
     // Для совместимости со структурой сохраняем в chz (сантигерцах)  
     params.target_freq_chz = (uint32_t)(mhz_target / 10ULL);  
   
-    if (params.pio_int < 2) { params.pio_int = 2; params.pio_frac = 0; }  
+    if (params.pio_int < 2) {  
+        params.pio_int  = 2;  
+        params.pio_frac = 0;  
+    }  
   
-    // Расчет 32-битного остатка ошибки DDS  
+    // Суб-LSB остаток: ошибка квантования ниже одного frac8-LSB делителя  
     uint64_t clk_sys_rem   = ((clk_sys_hz * 256ULL) * 1000ULL) % vfo_denom;  
     uint64_t intermediate  = (clk_sys_rem << 16) / vfo_denom;  
     uint64_t remainder_low = (clk_sys_rem << 16) % vfo_denom;  
   
-    params.dds_step = (uint32_t)((intermediate << 16) + ((remainder_low << 16) / vfo_denom));  
+    params.dds_step = (uint32_t)((intermediate << 16)  
+                               + ((remainder_low << 16) / vfo_denom));  
   
-#if VFO_FRACTAL_MODE  
-    // frac-байт уже учтён аппаратно — DDS доносит только суб-LSB остаток  
-#elif VFO_DDS_MODE  
-    // int-режим + DDS: остаток clk_sys_rem покрывает только суб-LSB часть  
-    // (остаток от деления fixed8). Целые frac8/256 делителя добавляем в шаг:  
-    //   step_total = frac8/256·2^32 + суб-LSB остаток  
-    params.dds_step += (uint32_t)(pio_div_fixed8 & 0xFFu) << 24;  
+#if !VFO_FRACTAL_MODE && VFO_DDS_MODE  
+    // int-режим + DDS: шаг должен покрывать ВЕСЬ дробный остаток делителя:  
+    // целые frac8/256 (которые в pio_frac не записали) + суб-LSB часть.  
+    // Перенос аккумулятора добавляет +1 к FRAC-байту clkdiv, т.е. 1/256 делителя.  
+    params.dds_step += ((uint32_t)frac8 << 24);  
 #endif  
   
-    // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1, период паттерна  
-    // переносов = 2^32 отсчётов -> дискретная гребёнка превращается в шумовую полку.  
+    // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1,  
+    // период паттерна = 2^32 отсчётов → гребёнка превращается в шумовую полку.  
     if (params.dds_step != 0) params.dds_step |= 1u;  
   
-#if !VFO_DDS_MODE  
+#if !VFO_FRACTAL_MODE && !VFO_DDS_MODE  
+    // Чистый int-режим без DDS: делитель статичный, шаг не нужен  
     params.dds_step = 0;  
 #endif  
-  
-    (void)clk_sys_rem; (void)intermediate; (void)remainder_low;  
   
     return params;  
 }
 
 
-// функция выполняет энергетический аудит спектра
 
 
 // Метрика кандидата

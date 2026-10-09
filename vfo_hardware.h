@@ -50,13 +50,9 @@ struct VfoParameters {
     uint32_t target_freq_chz; 
 };
 
-#define VFO_PLL_DEBUG_SCAN
 
-#define VFO_USE_MASH2            
-#define VFO_DITHER_RANDOMIZE     
-#define VFO_DITHER_FAST          
-#define VFO_PLL_AUTOTUNE         
-#define VFO_DITHER_ON_CORE1      
+
+
 #define VFO_IFKP_TONES_COUNT 33            
 #define VFO_TONE_NONE        255           
 //#define VFO_CALIBRATED_XOSC_HZ 12000350ULL

@@ -86,16 +86,17 @@
 #define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
 
 // Структура детальной калькуляции штрафов
-struct MetricBreakdown {
-    uint32_t raw_step;
-    uint32_t frac;
-    uint32_t ctz_val;
-    uint64_t ctz_penalty;
-    uint64_t center_dist;
-    uint64_t mash_penalty;
-    uint64_t clk_penalty;
-    uint64_t int_penalty;
-    uint64_t total_metric;
+struct MetricBreakdown {  
+    uint32_t raw_step;  
+    uint32_t frac;  
+    uint32_t ctz_val;  
+    uint64_t ctz_penalty;  
+    uint64_t center_dist;  
+    uint64_t mash_penalty;  
+    uint64_t clk_penalty;  
+    uint64_t int_penalty;  
+    uint64_t spur_power_pen;   // аналитическая цена уровня FRAC8-спура (∝ A/D² + prox³)  
+    uint64_t total_metric;  
 };
 
 // ============================================================================

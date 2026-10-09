@@ -938,14 +938,14 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     
         b->total_metric = (err_hz << 20) + b->clk_penalty;    
   
-        // Тир-штраф VSEL: clk ≥ 250 МГц → vsel_for() даёт 1.30 В, на этом    
-        // напряжении замерен гребёнок ~90 кГц / −57 dBc (7.0386 МГц, 366M).    
-        // Вес 2^33 ≈ ошибке 8 кГц: узел на 1.15–1.25 В побеждает, пока его    
-        // err_hz не хуже более чем на ~8 кГц; дальше — честно проигрывает.    
+        // Штраф за тир VSEL=1.30V (clk > ~250 МГц): умеренный, ~2e9.  
+        // Он проигрывает разнице в err (err<<20: 1 кГц ≈ 1e9),  
+        // но побеждает близкие по ошибке кандидаты — предпочитаем  
+        // узел 1.15 В, только если ошибка у него не сильно хуже.   
         if (clk_sys_hz >= VFO_CLK_SYS_PREF_MIN_HZ) {    
-            b->total_metric += (1ULL << 33);    
-        } 
-  
+            b->total_metric += (1ULL << 31);   // мягкий тир-штраф
+        }
+
         if (test.pio_int < 4) {  
             b->int_penalty = VFO_INT_PENALTY;  
             b->total_metric += b->int_penalty;  
@@ -1250,7 +1250,7 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                         if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;  
                     #else  
                         if (test.pio_int < 4) continue;  
-                        if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;  
+                        if (clk_sys_hz * (uint64_t)test.pio_int < 6000000000ULL) continue;  
                     #endif
   
                     // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===

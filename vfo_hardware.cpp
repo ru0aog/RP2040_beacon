@@ -1053,7 +1053,8 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     if (test.pio_int < 4) {  
         b->int_penalty = VFO_INT_PENALTY;  
         b->total_metric += b->int_penalty;  
-    }  
+    }
+    
   
     return b->total_metric;  
 #endif  
@@ -1365,18 +1366,25 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                     }  
 #endif  
   
-                    // === АРБИТРАЖ
-                    (void)frac_forbidden;   // вето снято: близкий спур уже дороже в метрике  
-                    bool prefer = (current_dds_metric < min_dds_metric) ||  
-                                  (current_dds_metric == min_dds_metric &&  
+                    // === АРБИТРАЖ ===  
+                    // Вето по запретному поясу FRAC8: кандидат с simple_frac  
+                    // или спуром < VFO_SPUR_MIN_OFFSET_HZ не может выиграть,  
+                    // если существует хотя бы один незапретный кандидат.  
+                    // Реализуем как доминирующий штраф — заодно сохраняется  
+                    // fallback, если ВСЕ кандидаты запретные.  
+                    uint64_t arb_metric = current_dds_metric;  
+                    if (frac_forbidden) arb_metric += (1ULL << 40);  
+  
+                    bool prefer = (arb_metric < min_dds_metric) ||  
+                                  (arb_metric == min_dds_metric &&  
                                    clk_sys_hz > best_pll.clk_sys_hz);
   
                     if (prefer) {    
                         best_forbidden  = frac_forbidden;    
                         best_clean      = candidate_clean;    
-                        best_frac_zero  = cand_frac_zero;            // НОВОЕ  
-                        best_d8         = cand_d8;                   // НОВОЕ  
-                        min_dds_metric  = current_dds_metric;    
+                        best_frac_zero  = cand_frac_zero;
+                        best_d8         = cand_d8;
+                        min_dds_metric  = arb_metric;    
   
                         best_pll.fbdiv      = fbdiv;  
                         best_pll.p1         = p1;  

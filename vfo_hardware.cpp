@@ -894,6 +894,10 @@ static uint32_t frac_spur_level_db_x10(uint16_t pio_int, uint8_t pio_frac) {
     return 0; // (не используется — уровень идёт через штраф ниже)  
 }
 
+
+
+
+
 // штраф за мощность спура: pen = 2^30 · (A/16384) · (64/D)²  
 static uint64_t frac_spur_power_pen(uint16_t pio_int, uint8_t pio_frac) {  
     if (pio_frac == 0) return 0;  
@@ -907,114 +911,129 @@ static uint64_t frac_spur_power_pen(uint16_t pio_int, uint8_t pio_frac) {
 }
 
 
-static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz, MetricBreakdown *b, VfoParameters *out) {
-    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);
-    if (out) *out = test;
 
-    memset(b, 0, sizeof(MetricBreakdown));
-    b->frac = test.pio_frac;
-    b->raw_step = test.dds_step;
 
-#if !VFO_FRACTAL_MODE  
-    // Целочисленный режим: dds_step занулён, ошибка квантования —  
-    // единственный значимый критерий. Считаем её в герцах напрямую:  
-    //   f_out = clk_sys / (2·pio_int)  
-    //   err   = |f_out − target|  
-    // Метрика = err·2^20 + clk_penalty (подошва) — ошибка доминирует,  
-    // при равной ошибке побеждает больший clk·int.  
-    {  
-        uint64_t f_out_hz   = clk_sys_hz / (2ULL * test.pio_int);  
-        uint64_t target_hz  = (uint64_t)target_mhz * 10ULL;   // chz → Hz  
-        uint64_t err_hz     = (f_out_hz > target_hz)  
-                            ? (f_out_hz - target_hz)  
-                            : (target_hz - f_out_hz);  
-        return (err_hz << 20) + b->clk_penalty;  
-    }  
-#else  
-    if (test.pio_frac == 0 && test.dds_step == 0) return 0;  
-#endif
-
-    // ==== 1. Спектральная цена кандидата (заменяет ctz/якоря/куб-прокс) ====  
-    if (test.pio_frac != 0) {  
-        // 1a. Аналитический уровень спура (энергия, не позиция)  
-        b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
+static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,  
+                                       MetricBreakdown *b, VfoParameters *out) {  
+    VfoParameters test = calculate_raw_params_mhz(clk_sys_hz, target_mhz);  
+    if (out) *out = test;  
   
-        // 1b. Цена позиции: спур < 1 МГц от несущей — внутри полосы ФНЧ-перехода,  
-        //     штрафуем кубически; дальше 3 МГц — ФНЧ убирает, штраф ~0.
-        #if VFO_FRACTAL_MODE
+    memset(b, 0, sizeof(MetricBreakdown));  
+    b->frac = test.pio_frac;  
+    b->raw_step = test.dds_step;  
+  
+#if !VFO_FRACTAL_MODE  
+    // ================================================================  
+    // ЦЕЛОЧИСЛЕННЫЙ РЕЖИМ: frac=0, DDS отключён.  
+    // Единственные критерии: ошибка частоты (доминирует) + подошва clk·int.  
+    //   f_out = clk_sys / (2·pio_int)  
+    //   err   = |f_out − target|, в Гц  
+    // Метрика = (err << 20) + clk_penalty:  
+    //   ошибка 1 Гц → 2^20, ошибка 1 кГц → ~1e9 — всегда перекрывает подошву;  
+    //   при равной ошибке ранжирует clk_penalty (чем меньше — тем выше clk·int).  
+    // ================================================================  
+    {  
+        // target_mhz по факту передаётся в Гц (см. calculate_raw_params_mhz:  
+        // target_freq_chz = mhz_target / 10)  
+        uint64_t f_out_hz = clk_sys_hz / (2ULL * test.pio_int);  
+        uint64_t err_hz   = (f_out_hz > target_mhz)  
+                          ? (f_out_hz - target_mhz)  
+                          : (target_mhz - f_out_hz);  
+  
+        // Подошва: clk·int к эталону 400M·55 (линейный штраф, макс. 2^30)  
+        const uint64_t DEN_REF = 400000000ULL * 55ULL;  
+        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;  
+        if (dens < DEN_REF) {  
+            b->clk_penalty = ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF;  
+        } else {  
+            b->clk_penalty = 0;  
+        }  
+  
+        b->total_metric = (err_hz << 20) + b->clk_penalty;  
+  
+        // Жёсткий отсев непригодных делителей — на всякий случай и здесь  
+        if (test.pio_int < 4) {  
+            b->int_penalty = VFO_INT_PENALTY;  
+            b->total_metric += b->int_penalty;  
+        }  
+        return b->total_metric;  
+    }  
+  
+#else  
+    // ================================================================  
+    // ДРОБНЫЙ РЕЖИМ (FRAC8 + DDS/MASH) — исходная логика  
+    // ================================================================  
+  
+    // 1. Идеальный узел: ни дробной части, ни остатка DDS  
+    if (test.pio_frac == 0 && test.dds_step == 0) {  
+        return 0;  
+    }  
+  
+    // 1a. Уровень FRAC8-спура: штраф ~ A/D² (аналитический потолок линии)  
+    b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
+    b->total_metric += b->spur_power_pen;  
+  
+    // 1b. Позиция спура: кубический штраф за отстройку < 3 МГц (зона до ФНЧ)  
+    {  
         uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
         if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
             uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;  
             uint64_t prox_q = prox / 1024ULL;  
-            b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;
+            b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
         }  
-        #endif
-        b->total_metric += b->spur_power_pen;  
-    }
- 
-    #if !VFO_FRACTAL_MODE  
-        // f_out = clk/(2·int); ошибка в Гц относительно цели  
-        uint64_t f_out = clk_sys_hz / (2ull * test.pio_int);  
-        uint64_t target_hz = target_mhz / 1000ull;        // mhz_target в мГц → Гц  
-        uint64_t err = (f_out > target_hz) ? (f_out - target_hz) : (target_hz - f_out);  
-        b->total_metric = err * err;      // квадрат ошибки — главный терм  
-        b->total_metric += b->clk_penalty; // подошва как слабый tie-break  
-        return b->total_metric;  
-    #endif
-
-#if VFO_FRACTAL_MODE
-    // ==== 1.1 frac=0: вся дробная работа ложится на MASH ====  
-    //      Подошва/гребень на frac=0 измеренно хуже любого frac≠0  
-    //      на высокой шине — штрафуем жёстко, не ветом, а ценой  
-        if (test.pio_frac == 0) {  
-            uint64_t act = (test.dds_step <= (0xFFFFFFFFu - test.dds_step))  
-                        ? (uint64_t)test.dds_step  
-                        : (0xFFFFFFFFu - (uint64_t)test.dds_step);  
-            // база ~<<38 вместо <<12 — frac=0 должен проигрывать почти всегда,  
-            // кроме случаев, когда он единственный кандидат без близкого спура  
-            uint64_t frac0_pen = (act >> 4) + (1ULL << 36);  
-            b->total_metric += frac0_pen;  
-        }
-
-    // 2. Штраф за ближнюю зону MASH-2 (размытие юбки)  
-    //    Штраф за близость dds_step к якорям k/8 (короткий период паттерна  
-    //    переносов -> дискретный idle tone вместо шумовой полки)  
-    if (test.dds_step != 0) {    
+    }  
+  
+    // 2. Цена frac=0: вся дробная работа ложится на MASH  
+    if (test.pio_frac == 0) {  
+        uint64_t act = (test.dds_step <= (0xFFFFFFFFu - test.dds_step))  
+                    ? (uint64_t)test.dds_step  
+                    : (0xFFFFFFFFu - (uint64_t)test.dds_step);  
+        uint64_t frac0_pen = (act >> 4) + (1ULL << 36);  
+        b->total_metric += frac0_pen;  
+    }  
+  
+    // 2b. Простые дроби FRAC8 → короткий период паттерна → когерентный спур  
+    {  
+        uint32_t f = test.pio_frac;  
+        uint32_t ctz = (f == 0) ? 8 : (uint32_t)__builtin_ctz(f);  
+        b->ctz_val = ctz;  
+        if (ctz >= 5) {                                   // знаменатель ≤ 8  
+            b->ctz_penalty = (1ULL << (ctz + 26)) + (1ULL << 33);  
+        }  
+        b->total_metric += b->ctz_penalty;  
+    }  
+  
+    // 3. Подошва: clk·int к эталону 400M·55  
+    {  
+        const uint64_t DEN_REF = 400000000ULL * 55ULL;  
+        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;  
+        if (dens < DEN_REF) {  
+            b->clk_penalty = ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF;  
+        } else {  
+            b->clk_penalty = 0;  
+        }  
+        b->total_metric += b->clk_penalty;  
+    }  
+  
+    // 3b. Близость dds_step к якорям k/8 → idle-тоны MASH  
+    if (test.dds_step != 0) {  
         uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
-        b->center_dist = dist_k8;   // для диагностики: теперь это dist_k8  
-        if (dist_k8 < VFO_K8_BELT) {      
-            uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);      
-            b->mash_penalty = (deficit * deficit) >> 14;      // нормировка под 2^26  
+        b->center_dist = dist_k8;  
+        if (dist_k8 < VFO_K8_BELT) {  
+            uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);  
+            b->mash_penalty = (deficit * deficit) >> 14;  
         }  
-        b->total_metric += b->mash_penalty;    
-    }
-#endif
-
-    // 3. Штраф за подъём шумовой подошвы.    
-        //    Замерено линейно в дБ: полка ~ -20·log10(clk_sys·pio_int) + const    
-        //    (int=17→-45 dBc, int=55→-60 dBc). Поэтому штрафуем произведение    
-        //    clk·int, а не clk_sys одно. Нормировка: эталон 400M·int55 → 0.    
-        {    
-            // dens_t = clk_sys·pio_int / (400M·55) — относительная плотность    
-            // коррекции к эталону. pen = (1 - dens_t)·SCALE при dens_t<1.    
-            const uint64_t DEN_REF = 400000000ULL * 55ULL;   // эталон clk·int    
-            uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;    
-            if (dens < DEN_REF) {    
-                // линейно в (1 - dens/DEN_REF), максимум 1<<30    
-                b->clk_penalty = ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF;    
-            } else {    
-                b->clk_penalty = 0;    
-            }    
-        }    
-        b->total_metric += b->clk_penalty;
-
-    // 4. Запрет малых INT
-    if (test.pio_int < 4) {
-        b->int_penalty = VFO_INT_PENALTY;
-        b->total_metric += b->int_penalty;
-    }
-
-    return b->total_metric;
+        b->total_metric += b->mash_penalty;  
+    }  
+  
+    // 4. Запрет малых INT  
+    if (test.pio_int < 4) {  
+        b->int_penalty = VFO_INT_PENALTY;  
+        b->total_metric += b->int_penalty;  
+    }  
+  
+    return b->total_metric;  
+#endif  
 }
 
 

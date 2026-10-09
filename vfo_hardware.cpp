@@ -1031,6 +1031,43 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
 
 
 
+// Float-версия (диагностика, WINNER-лог)
+// vfo_hardware.cpp — рядом с frac_spur_min_off_hz  
+// Возвращает уровень k-й пары боковых спура FRAC8, dBc.  
+// UINT8 кодирует "нет спура" через возврат -140.0f.  
+static float frac_spur_level_dbc(uint16_t pio_int, uint8_t pio_frac,  
+                                 uint32_t k)  
+{  
+    if (pio_frac == 0 || k == 0) return -140.0f;  
+    uint32_t m  = (pio_frac * k) & 0xFFu;  
+    if (m == 0 || m == 256u) return -140.0f;      // гармоника упала на тон  
+    float f  = (float)pio_frac;  
+    float D  = (float)pio_int + f / 256.0f;  
+    // power = f*(256-f) / (128·π²·k²·D²)  
+    float p2 = f * (256.0f - f)  
+             / (128.0f * 9.8696f * (float)(k * k) * D * D);  
+    return 10.0f * log10f(p2);  
+}  
+  
+// Позиция k-й гармоники (та же арифметика, что в frac_spur_min_off_hz, но без min):  
+static uint64_t frac_spur_off_hz_k(uint16_t pio_int, uint8_t pio_frac,  
+                                   uint64_t clk_sys_hz, uint32_t k)  
+{  
+    uint64_t div_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
+    uint32_t m  = ((uint32_t)pio_frac * k) & 0xFFu;  
+    uint32_t fd = (m < 256u - m) ? m : 256u - m;  
+    if (fd == 0) return 0;                         // на несущей  
+    return clk_sys_hz * fd / div_x256;  
+}
+
+
+// Использование в метрике — штраф за суммарную мощность первых 4 гармоник (они же уже просчитываются в frac_spur_min_off_hz для позиции):
+uint64_t spur_pen = 0;  
+for (uint32_t k = 1; k <= 4; k++)  
+    spur_pen += frac_spur_power_q(test.pio_int, test.pio_frac, k);  
+// spur_pen ~ уровень главной пары; домножить на вес перед добавлением в metric
+
+
 
 // Метрика кандидата
 static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoParameters *out) {  
@@ -1042,24 +1079,52 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoPara
 // хелпер
 // Минимальная отстройка FRAC8-спура по гармоникам k=1..4, Гц.  
 // frac==0 -> UINT64_MAX (нет спура). Спур k-й гармоники садится на  
-// f_sm * fd/256, где fd = свёртка (frac*k mod 256) в диапазон ±128.  
-static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,  
-                                     uint64_t clk_sys_hz) {  
-    if (pio_frac == 0) return UINT64_MAX;  
+// f_sm * fd/256, где fd = свёртка (frac*k mod 256) в диапазон ±128.
+
+// Функция возвращает финальное значение best
+// точную частоту отстройки (в Гц) самого близкого спура из гармоник (k=1...4)
+// clk_sys_hz - делимая частота системной шины
+// pio_int    - целая часть делителя
+// pio_frac   - дробная часть делителя
+static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac, uint64_t clk_sys_hz) {
+    // если деление целочисленное, то спуров нет
+    if (pio_frac == 0) return UINT64_MAX;
+    // базовый делитель PIO в масштабе fixed-point Q8.8
     uint64_t div_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
-    if (div_x256 == 0) return UINT64_MAX;  
-    uint64_t best = UINT64_MAX;  
-    for (uint32_t k = 1; k <= 4; k++) {  
+    // если пришёл ноль - выходим
+    if (div_x256 == 0) return UINT64_MAX;
+    // накопитель рекорда
+    uint64_t best = UINT64_MAX;
+    // Цикл перебор гармоник переполнения k = 1...4
+    for (uint32_t k = 1; k <= 4; k++) {
+        // Расчет фазовой периодичности (свёртка по модулю)
         uint32_t m  = ((uint32_t)pio_frac * k) & 0xFFu;  
-        uint32_t fd = (m < 256u - m) ? m : 256u - m;   // 0..128  
-        if (fd == 0) continue;                          // гармоника на тон  
-        uint64_t off = clk_sys_hz * fd / div_x256;      // Гц  
-        if (off < best) best = off;  
-    }  
-    return best;  
+        uint32_t fd = (m < 256u - m) ? m : 256u - m;    // результат в диапазоне 0..128  
+        if (fd == 0) continue;                          // если гармоника попала на тон (нулевые биения) - пропускаем
+        uint64_t off = clk_sys_hz * fd / div_x256;      // Отстройка гармоники, Гц
+        if (off < best) best = off;                     // фиксация худшго рекорда
+    }
+    return best;
 }
 
-
+// хелпер
+// Целочисленная версия (внутри метрики, без float)
+// spur_pow_q ∝ f·(256−f)/(k²·D²), масштаб 2^32 при эталоне  
+static uint64_t frac_spur_power_q(uint16_t pio_int, uint8_t pio_frac,  
+                                  uint32_t k)  
+{  
+    if (pio_frac == 0 || k == 0) return 0;  
+    uint32_t m = ((uint32_t)pio_frac * k) & 0xFFu;  
+    if (m == 0) return 0;  
+    uint64_t f  = pio_frac;  
+    uint64_t D2 = (256ULL * pio_int + pio_frac);   // D в единицах 1/256  
+    // числитель f·(256−f)·256² (компенсация D в 1/256), знаменатель k²·D2²  
+    __uint128_t num = (__uint128_t)(f * (256ULL - f)) * 65536ULL;  
+    __uint128_t den = (__uint128_t)(k * k) * D2 * D2;  
+    if (den == 0) return 0;  
+    uint64_t q = (uint64_t)((num << 32) / den);    // Q32  
+    return q;  
+}
 
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  

@@ -975,20 +975,6 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         }    
         b->total_metric += b->clk_penalty;
 
-    // 3b. Уровень FRAC8-спура: чем ближе спур к несущей и чем короче  
-        //     период паттерна, тем он выше. spur_off уже считается в арбитраже,  
-        //     здесь — его градуированный штраф (линейный, до горизонта).  
-        if (test.pio_frac != 0) {  
-            uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac,  
-                                                clk_sys_hz);  
-            if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
-                uint64_t prox = VFO_SPUR_HORIZON_HZ - off;          // 0..3M  
-                // знаменатель меньше → штраф растёт круче при приближении к 0
-                uint64_t prox_q = prox / 1024ULL;          // кГц-масштаб, избегаем переполнения  
-                b->mash_penalty += (prox_q * prox_q * prox_q) << 4; // кубический рост: близкий спур дороже подошвы
-            }  
-        }
-
     // 4. Запрет малых INT
     if (test.pio_int < 4) {
         b->int_penalty = VFO_INT_PENALTY;
@@ -1254,7 +1240,7 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                     if (!dup && current_dds_metric < top10[19].metric) {  
                         int pos = 19;  
                         while (pos > 0 && current_dds_metric < top10[pos-1].metric) pos--;  
-                        for (int k = 9; k > pos; k--) top10[k] = top10[k-1];  
+                        for (int k = 19; k > pos; k--) top10[k] = top10[k-1];  
                         top10[pos].clk = clk_sys_hz;  top10[pos].vco = vco_hz;  
                         top10[pos].metric = current_dds_metric;  
                         top10[pos].fbdiv = fbdiv; top10[pos].p1 = p1;  

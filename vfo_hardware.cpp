@@ -923,42 +923,27 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     b->raw_step = test.dds_step;  
   
 #if !VFO_FRACTAL_MODE  
-    // ================================================================  
-    // ЦЕЛОЧИСЛЕННЫЙ РЕЖИМ: frac=0, DDS отключён.  
-    // Единственные критерии: ошибка частоты (доминирует) + подошва clk·int.  
-    //   f_out = clk_sys / (2·pio_int)  
-    //   err   = |f_out − target|, в Гц  
-    // Метрика = (err << 20) + clk_penalty:  
-    //   ошибка 1 Гц → 2^20, ошибка 1 кГц → ~1e9 — всегда перекрывает подошву;  
-    //   при равной ошибке ранжирует clk_penalty (чем меньше — тем выше clk·int).  
-    // ================================================================  
     {  
-        // target_mhz по факту передаётся в Гц (см. calculate_raw_params_mhz:  
-        // target_freq_chz = mhz_target / 10)  
-        uint64_t f_out_hz = clk_sys_hz / (2ULL * test.pio_int);  
-        uint64_t err_hz   = (f_out_hz > target_mhz)  
-                          ? (f_out_hz - target_mhz)  
-                          : (target_mhz - f_out_hz);  
+        // target_mhz — МИЛЛИГЕРЦЫ: Hz = target_mhz / 1000  
+        uint64_t target_hz = target_mhz / 1000ULL;  
+        uint64_t f_out_hz  = clk_sys_hz / (2ULL * test.pio_int);  
+        uint64_t err_hz    = (f_out_hz > target_hz)  
+                           ? (f_out_hz - target_hz)  
+                           : (target_hz - f_out_hz);  
   
-        // Подошва: clk·int к эталону 400M·55 (линейный штраф, макс. 2^30)  
         const uint64_t DEN_REF = 400000000ULL * 55ULL;  
         uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;  
-        if (dens < DEN_REF) {  
-            b->clk_penalty = ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF;  
-        } else {  
-            b->clk_penalty = 0;  
-        }  
+        b->clk_penalty = (dens < DEN_REF)  
+            ? ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF : 0;  
   
         b->total_metric = (err_hz << 20) + b->clk_penalty;  
   
-        // Жёсткий отсев непригодных делителей — на всякий случай и здесь  
         if (test.pio_int < 4) {  
             b->int_penalty = VFO_INT_PENALTY;  
             b->total_metric += b->int_penalty;  
         }  
         return b->total_metric;  
-    }  
-  
+    }
 #else  
     // ================================================================  
     // ДРОБНЫЙ РЕЖИМ (FRAC8 + DDS/MASH) — исходная логика  
@@ -1253,7 +1238,12 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                     // замеры: int·clk ≈ 2e9 → −45 dBc, 4e9 → −50, 8e9 → −55.  
                     // Гейт по произведению, не по int: иначе на f_out>6 МГц  
                     // даже clk=400M даёт int<32 и скан пустеет (7.0386 МГц).  
-                    if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;
+                    #if VFO_FRACTAL_MODE  
+                        if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;  
+                    #else  
+                        if (test.pio_int < 4) continue;  
+                        if (clk_sys_hz * (uint64_t)test.pio_int < 4000000000ULL) continue;  
+                    #endif
   
                     // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===
                     uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,

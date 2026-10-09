@@ -1351,7 +1351,7 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
         // %11llu  - метрика (строго 11 позиций)
         // %4u     - pio_frac (строго 4 позиции)
         // %5llu   - отстройка спура (строго 5 позиций)
-        Serial.printf("[PLLDBG] [%2d] | %7.3f MHz | %8.3f MHz | %1u | %3lu | %1lu | %1lu | %11llu | %4u | %5llu kHz | %5.1f dBc | %s%s\n",
+        Serial.printf("[PLLDBG] [%2d] | %7.3f MHz | %8.3f MHz | %1u | %3lu | %1lu | %1lu | %11llu | %4u | %5llu kHz | %6.1f dBc | %s%s\n",
                 i, 
                 top10[i].clk / 1000000.0, 
                 top10[i].vco / 1000000.0,  
@@ -1375,8 +1375,10 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
     vfo_pll_metric(best_pll.clk_sys_hz, target_mhz, &wp);  
     uint64_t w_spur = frac_spur_min_off_hz(wp.pio_int, wp.pio_frac,  
                                          best_pll.clk_sys_hz);  
+    float w_lvl = frac_spur_level_db(wp.pio_int, wp.pio_frac);  
     Serial.printf("[PLLDBG] WINNER: clk=%.3f MHz refdiv=%lu fbdiv=%lu p1=%lu p2=%lu "  
-                  "metric=%llu  int=%u frac=%u step=0x%08lX  spur_off=%llu kHz%s\n",  
+                  "metric=%llu  int=%u frac=%u step=0x%08lX  spur_off=%llu kHz "  
+                  "spur_lvl=%.1f dBc%s\n",  
                 best_pll.clk_sys_hz / 1e6,  
                 (unsigned long)best_pll.refdiv,  
                 (unsigned long)best_pll.fbdiv,  
@@ -1386,7 +1388,8 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                 (unsigned)wp.pio_int, (unsigned)wp.pio_frac,  
                 (unsigned long)wp.dds_step,  
                 (unsigned long long)(w_spur == UINT64_MAX ? 0 : w_spur / 1000ULL),  
-                best_forbidden ? " [FORBIDDEN]" : "");  
+                (double)w_lvl,  
+                best_forbidden ? " [FORBIDDEN]" : "");
 #endif  
     return best_pll;  
 }

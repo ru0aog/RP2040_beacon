@@ -7,9 +7,12 @@
  *  64-битный вектор Уолша-Адамара (6 бит -> номер строки, 7-й бит -> инверсия).  
  *  На выходе — 64 тона на блок, по 32 мс каждый (31.25 бод, шаг 31.25 Гц).  
  *  
- *  ВНИМАНИЕ: точная бит-в-бит совместимость с fldigi не гарантирована —  
- *  скремблер/перемежитель здесь самосогласованы, но могут отличаться от  
- *  эталонного алгоритма Jalocha. Проверять на реальном декодере.  
+ *  Логика кодирования соответствует fldigi MFSK_Encoder (Olivia 8/250):  
+ *  маска скремблера 0xE257E6D0291574EC, nShift=13, перемежитель (FreqBit+t)%3,  
+ *  знак Walsh parity(i)^parity(i&j), forward Gray-код номера тона.  
+ *  Единственное физическое отличие — прямоугольная манипуляция 32 мс через  
+ *  vfo_set_tone_instant() вместо перекрывающихся оконных символов fldigi  
+ *  (свойство прямого синтеза на Si5351/PIO). Проверять на реальном декодере.
  * ============================================================================  
  */  
   
@@ -139,10 +142,10 @@ static bool olivia_flush_block() {
 // Добавление символа в текущий блок; при заполнении — передача  
 void olivia_send_char(char c) {  
     if (pc_file_written || soft_restart_flag) return;  
-    if (c != '\r' && c != '\n') Serial.print(c);  
+    if (c != '\r' && c != '\n' && c != 0) Serial.print(c);  
     block_chars[block_count++] = c;  
     if (block_count >= OLIVIA_BITS) olivia_flush_block();  
-}  
+}
   
 // Передача строки по протоколу Olivia 8/250  
 void olivia_send_string(const char* str) {  
@@ -159,19 +162,25 @@ void olivia_send_string(const char* str) {
         VFO_TX_ON();  
     }  
   
-    // Преамбула — синхросимволы (пробелы)  
-    for (int i = 0; i < OLIVIA_BITS; i++) olivia_send_char(' ');  
+    // Преамбула — idle-символы NUL (0x00): fldigi интегрирует синхронизацию  
+    // по SyncIntegLen блокам (по умолчанию 4), поэтому шлём ~6 блоков.  
+    for (int i = 0; i < OLIVIA_BITS * 6; i++) olivia_send_char((char)0);
   
     // Полезная нагрузка  
     while (*str && !pc_file_written && !soft_restart_flag) {  
         olivia_send_char(*str++);  
     }  
   
-    // Добиваем неполный последний блок  
+// Добиваем неполный последний блок  
+    if (block_count > 0) olivia_flush_block();  
+  
+    // Постамбула — 2 блока NUL, чтобы "вымыть" конвейер декодера fldigi  
+    for (int i = 0; i < OLIVIA_BITS * 2 && !pc_file_written && !soft_restart_flag; i++)  
+        olivia_send_char((char)0);  
     if (block_count > 0) olivia_flush_block();  
   
     // Закрываем сессию  
-    if (device_SI[0]) VFO_TX_OFF();  
+    if (device_SI[0]) VFO_TX_OFF(); 
     else              vfo_operation_set(false);  
     ZERO_LED_OFF();  
     Serial.println("");  

@@ -1,7 +1,7 @@
 ﻿/**
  * ============================================================================
  *  RP2040_beacon.ino — Главный диспетчер и инициализация радиомаяка
- *  Версия 2.19 от 2026-10-08, автор RU0AOG
+ *  Версия 2.20 от 2026-10-10, автор RU0AOG
  * ============================================================================
  *  
  *  НАЗНАЧЕНИЕ
@@ -62,10 +62,11 @@
 
 #include "file_manager.h"
 #include "si5351_driver.h"
-#include "ifkp_modem.h"
-#include "rtty_modem.h"  
 #include "scheduler.h"
 #include "cw_modem.h"
+#include "rtty_modem.h"
+#include "ifkp_modem.h"
+#include "olivia_modem.h"
 #include "bme280.h"
 #include "lcd.h"
 #include "led_blink.h"
@@ -75,8 +76,8 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-String BCN_VER = "2.17";
-String BCN_DAT = "2026-10-07";
+String BCN_VER = "2.20";
+String BCN_DAT = "2026-10-10";
 
 bool dev_TX_state  = false;
 

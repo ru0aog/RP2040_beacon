@@ -999,9 +999,11 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
 
 
                         bool simple_frac = false;  
-                        if (test.pio_frac != 0u) {  
-                            // На ВЧ (малые INT) расширяем зону запрета вокруг простых дробей с 8 до 16 единиц!
-                            uint32_t danger_zone = (test.pio_int <= 14) ? 16u : 8u; 
+                        // Вето простых дробей действует только на ВЧ/СЧ (малые/средние int).  
+                        // На НЧ (большой int → большое D) гармоники простых дробей падают как ~1/D²,  
+                        // спур уходит далеко и на железе не виден — вето отключаем.  
+                        if (test.pio_frac != 0u && test.pio_int <= VFO_SIMPLE_FRAC_INT_MAX) {    
+                            uint32_t danger_zone = (test.pio_int <= 14) ? 16u : 8u;
 
                             for (uint32_t n = 2; n <= 4 && !simple_frac; n++) {     
                                 for (uint32_t k = 1; k < n; k++) {  
@@ -2370,9 +2372,9 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     // Глубина FRAC-дизера по величине делителя: ±N единиц FRAC-байта  
     // — это относительная ФМ-глубина ~mask/(256·int). На малых int  
     // (ВЧ-диапазоны) даже ±1 поднимает ближнюю юбку — выключаем.  
-    if      (target_pio_int >= 40) vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 45–56)  
-    else if (target_pio_int >= 20) vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–27)  
-    else                           vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤14)
+    if      (target_pio_int >= 38) vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 38–56)  
+    else if (target_pio_int >= 19) vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–37)  
+    else                           vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤18)
 
     // Все накопители сбрасываем
     dds_accum_m2    = 0;  

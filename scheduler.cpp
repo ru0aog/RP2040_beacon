@@ -911,9 +911,9 @@ bool is_time_to_transmit(uint8_t mode) {
                                        // флаг "передача запускается" — выставляется  
                                        // вызывающим кодом СРАЗУ при получении true  
   uint32_t cur = rtc_hour * 60UL + rtc_min;  
-  static uint32_t last_min[4] = {9999, 9999, 9999, 9999};  
+  static uint32_t last_min[5] = {9999, 9999, 9999, 9999, 9999};
   
-  if (mode > 4) return false;  
+  if (mode > 5) return false;  
   if (cur == last_min[mode]) return false;   // один запуск (или пропуск) на минуту  
   
   // Проверка занятости ДО перебора задач — закрывает окно гонки  

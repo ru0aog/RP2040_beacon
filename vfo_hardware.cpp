@@ -635,7 +635,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
     int32_t  l_step  = 0;
     int32_t  l_int   = 8;
     int32_t  l_frac  = 0;
-    uint32_t l_dmask = 0;   // глубина FRAC-дизера, грузится при смене тона
+    uint32_t l_dmask = 0;   // глубина FRAC-дизера и MASH, грузится при смене тона
 
     // Регистро-резидентное состояние накопителей (DDS и ГПСЧ)
     uint32_t loc_acc1 = 0;
@@ -681,7 +681,6 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ СИ-КОНВЕЙЕР (Без ОЗУ-структур и NOP) ===
         int32_t step = l_step;
 
-
         // Декорреляция спектра (Быстрый регистровый Xorshift32 Дизер)
         // в аккумуляторы подмешивается хаос
         loc_rand_state ^= loc_rand_state << 13;
@@ -689,29 +688,27 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         loc_rand_state ^= loc_rand_state << 5;
         // Этот легкий 4-битный регистровый шум непрерывно «потряхивает» младшие биты входного шага, 
         // полностью размывая дискретные спектральные палки модуляции в гладкую, незаметную шумовую полку эфира.
-
         // Линейный беспереходный расчет дизера под фиксированные 4 бита (VFO_DITHER_RAND_BITS)
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
-
-            step = l_step;                   // декорреляция целой части отключена
+        int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
+        step += ((r_bits << 1) - 15); // 4-bit
 
         int32_t total_correction = 0;
-
-        uint32_t carry1, carry2;
-        // 1. Первая ступень (Интегратор ошибки базового шага)
-        // Извлекаем аппаратные переносы напрямую из статусного регистра ALU процессора.
-        // Инструкция ADDS взводит флаг, ADC вытягивает его без ветвлений и условных операторов.
-        carry1 = __builtin_add_overflow(loc_acc1, (uint32_t)step, &loc_acc1) ? 1 : 0;
-        // 2. Вторая ступень (Интегратор остатка первой ступени)
-        carry2 = __builtin_add_overflow(loc_acc2, loc_acc1, &loc_acc2) ? 1 : 0;
-        // Цифровая шумоформирующая комбинация (Сжатие юбки)
-        // передаточная функция шума 2-го порядка (NTF — Noise Transfer Function)
-        // Эта формула реализует дифференцирование переноса второй ступени по времени
-        // Коррекция может принимать отрицательные значения (-1), это штатное поведение MASH-2
-        total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
-        loc_m2_carry_prev = carry2;  // Запоминаем перенос для следующего такта
-        // Такой знакопеременный двухступенчатый процесс заставляет ошибку квантования 
-        // флуктуировать с высокой крутизной. Шум выталкивается вверх по спектру со скоростью 40 дБ на декаду
+  
+        if (l_dmask == 0u) {
+            // === ВЧ-РЕЖИМ: однокаскадный MASH-1 (noise shaping 1-го порядка) ===  
+            // На малых int (14/21/28 МГц) вторая ступень задирает ближнюю юбку —  
+            // одной ступени достаточно, decorrelation делает |=1 нечётность шага.  
+            uint32_t old_acc = loc_acc1;
+            loc_acc1 += (uint32_t)step;
+            if (loc_acc1 < old_acc) total_correction = 1;
+        } else {
+            // === НЧ-РЕЖИМ: каскадный MASH-1-1 (noise shaping 2-го порядка) ===  
+            uint32_t carry1 = __builtin_add_overflow(loc_acc1, (uint32_t)step, &loc_acc1) ? 1 : 0;
+            uint32_t carry2 = __builtin_add_overflow(loc_acc2, loc_acc1, &loc_acc2) ? 1 : 0;
+            total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
+            loc_m2_carry_prev = carry2;
+        }
 
 
         int32_t current_frac = l_frac;  
@@ -805,28 +802,9 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
                 b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
             }  
         }  
-        b->total_metric += b->spur_power_pen;           // ← суммируем ПОСЛЕ обоих вкладов
-
-        uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);    
-        if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {    
-            uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;    
-            uint64_t prox_q = prox / 1024ULL;    
-            b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
-        }  
+    b->total_metric += b->spur_power_pen;           // позиция спура учтена  
   
-        // 1c. Цена уровня: спур громче -30 dBc внутри горизонта ФНЧ — штраф  
-        // пропорционален квадрату превышения. За горизонтом (>~3 МГц) ФНЧ  
-        // давит — уровень не штрафуем.  
-        if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
-            float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);  
-            if (lvl_db > -30.0f) {  
-                float over = lvl_db + 30.0f;                       // dB сверх порога  
-                b->spur_power_pen += (uint64_t)(over * over) * (1ULL << 22);  
-                // -20 dBc → over=10 → +4.3e11; -30 dBc → 0; -40 dBc → 0  
-            }  
-        }
-
-    // 2. Цена frac=0: вся дробная работа ложится на MASH  
+    // 2. Цена frac=0: вся дробная работа ложится на MASH
     if (test.pio_frac == 0) {  
         uint64_t act = (test.dds_step <= (0xFFFFFFFFu - test.dds_step))  
                     ? (uint64_t)test.dds_step  

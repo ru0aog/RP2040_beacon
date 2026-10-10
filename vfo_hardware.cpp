@@ -149,8 +149,6 @@ static unsigned int lo_sm = 0;
 static unsigned int lo_offset = 0;
 static bool pio_program_loaded = false;
 
-static bool timer_already_running = false;
-static struct repeating_timer sdr_dither_timer; 
 
 static uint8_t current_active_tone = VFO_TONE_NONE;
 static volatile bool tone_changed = false;
@@ -564,115 +562,94 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
  * @brief Точка входа второго ядра (Core 1): бесконечный горячий цикл дизеринга.  
  */
 static void __not_in_flash_func(vfo_core1_entry)() {
-    // Регистро-резидентные копии статических параметров тона
+    // Локальные резидентные копии параметров тона
     int32_t  l_step  = 0;
     int32_t  l_int   = 8;
     int32_t  l_frac  = 0;
-    uint32_t l_dmask = 0;   // глубина FRAC-дизера и MASH, грузится при смене тона
+    uint32_t l_dmask = 0;
 
-    // Регистро-резидентное состояние накопителей (DDS и ГПСЧ)
+    // Состояние накопителей
     uint32_t loc_acc1 = 0;
-    uint32_t loc_rand_state = VFO_RAND_SEED_INIT;
     uint32_t loc_acc2 = 0;
     uint32_t loc_m2_carry_prev = 0;
+    uint32_t loc_rand_state = xorshift_state;
 
-
-    // Прямой кэшированный указатель на регистр SM PIO
+    // Прямой указатель на регистр SM PIO
     volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
 
-    // Счётчик опроса флага смены тона: читаем ОЗУ-флаг раз в VFO_TONE_POLL_N итераций  
-    // (проигрыш задержки применения тона: < 64 итераций × ~20 тактов ≈ 4 мкс на 321 МГц)  
-    const uint32_t poll_mask = (1u << 6) - 1u;   // N = 64; степень двойки!  
+    const uint32_t poll_mask = (1u << 6) - 1u;
     uint32_t poll_cnt = 0; 
 
     while (true) {
-        // Разряженный опрос флага: проверка (poll_cnt & mask) — регистр + битовый AND  
+        // Разряженный опрос флага обмена данными (внутри лога)
         if ((poll_cnt & poll_mask) == 0u) {  
             if (__builtin_expect(tone_changed, 0)) {  
                 uint32_t save = spin_lock_blocking(vfo_spin_lock);
-                l_step = (int32_t)dds_step;
-                l_int  = (int32_t)target_pio_int;
-                l_frac = (int32_t)target_pio_frac8;
+                l_step  = (int32_t)dds_step;
+                l_int   = (int32_t)target_pio_int;
+                l_frac  = (int32_t)target_pio_frac8;
                 l_dmask = vfo_frac_dither_mask;
                 
                 loc_acc1 = 0;
+                loc_acc2 = 0;
+                loc_m2_carry_prev = 0;
                 loc_rand_state = xorshift_state;
-            loc_acc2 = 0;
-            loc_m2_carry_prev = 0;
-            tone_changed = false; 
-            spin_unlock(vfo_spin_lock, save);
+                tone_changed = false; 
+                spin_unlock(vfo_spin_lock, save);
             }  
         }  
         poll_cnt++;
 
-#ifdef VFO_DITHER_PROFILE
-        // Мгновенный аппаратный тоггл отладочного пина 13 через шину SIO (1 такт)
-        sio_hw->gpio_togl = profile_pin_mask;
-#endif
-
-
-        // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ СИ-КОНВЕЙЕР (Без ОЗУ-структур и NOP) ===
-        int32_t step = l_step;
-
-        // Декорреляция спектра (Быстрый регистровый Xorshift32 Дизер)
-        // в аккумуляторы подмешивается хаос
+        // === 1. ГПСЧ XORSHIFT32 (Чистый Си, компилируется в 6 инструкций) ===
         loc_rand_state ^= loc_rand_state << 13;
         loc_rand_state ^= loc_rand_state >> 17;
         loc_rand_state ^= loc_rand_state << 5;
-        // Этот легкий 4-битный регистровый шум непрерывно «потряхивает» младшие биты входного шага, 
-        // полностью размывая дискретные спектральные палки модуляции в гладкую, незаметную шумовую полку эфира.
-        // Линейный беспереходный расчет дизера под фиксированные 4 бита (VFO_DITHER_RAND_BITS)
-        // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
-        int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
-        step += ((r_bits << 1) - 15); // 4-bit
-        // Дизеринг целой части (шага) в DDS — это математический инструмент, который нужен только для того, 
-        // чтобы в аккумуляторе не возникало длинных повторяющихся циклов (борьба со статическими idle-тонами Брезенхема). 
-        // Для этой задачи 3–4 бит случайного шума хватает с огромным избытком.
+
+        // === 2. ДИЗЕРИНГ ЦЕЛОЙ ЧАСТИ ШАГА (4 бита RPDF) ===
+        int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu);
+        int32_t step = l_step + ((r_bits << 1) - 15);
 
         int32_t total_correction = 0;
-  
+
+        // === 3. АВТОНОМНОЕ ПЕРЕКЛЮЧЕНИЕ ПОРЯДКА MASH ===
         if (l_dmask == 0u) {
-            // === ВЧ-РЕЖИМ: однокаскадный MASH-1 (noise shaping 1-го порядка) ===  
-            // На малых int (14/21/28 МГц) вторая ступень задирает ближнюю юбку —  
-            // одной ступени достаточно, decorrelation делает |=1 нечётность шага.  
+            // ВЧ-РЕЖИМ: Однокаскадный жесткий MASH-1 (0 или +1)
             uint32_t old_acc = loc_acc1;
             loc_acc1 += (uint32_t)step;
-            if (loc_acc1 < old_acc) total_correction = 1;
+            // Беззнаковое сравнение компилятор гарантированно соберет в команду извлечения Carry
+            total_correction = (loc_acc1 < old_acc); 
         } else {
-            // === НЧ-РЕЖИМ: каскадный MASH-1-1 (noise shaping 2-го порядка) ===  
-            uint32_t carry1 = __builtin_add_overflow(loc_acc1, (uint32_t)step, &loc_acc1) ? 1 : 0;
-            uint32_t carry2 = __builtin_add_overflow(loc_acc2, loc_acc1, &loc_acc2) ? 1 : 0;
+            // НЧ-РЕЖИМ: Каскадный прецизионный MASH-1-1
+            // Используем встроенные функции GCC для извлечения аппаратного переполнения процессора
+            uint32_t carry1 = __builtin_add_overflow(loc_acc1, (uint32_t)step, &loc_acc1) ? 1u : 0u;
+            uint32_t carry2 = __builtin_add_overflow(loc_acc2, loc_acc1, &loc_acc2) ? 1u : 0u;
+            
             total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)loc_m2_carry_prev;
             loc_m2_carry_prev = carry2;
         }
 
+        // === 4. СБОРКА ТЕКУЩЕЙ ФРАКЦИИ ===
+        int32_t current_frac = l_frac + total_correction;
+        int32_t current_int  = l_int;
 
-        int32_t current_frac = l_frac;  
-        int32_t current_int  = l_int;  
-  
-        current_frac = l_frac + total_correction;
-
-        // Декорреляция FRAC-байта с рантайм-глубиной: маска выбирается  
-        // по pio_int при смене тона (0x03 → ±3, 0x01 → ±1, 0x00 → off).  
+        // === 5. МАТЕМАТИЧЕСКИЙ ТРЕУГОЛЬНЫЙ TPDF ФРАК-ДИЗЕР ===
         if (l_dmask != 0u) {    
-            // Сумма двух независимых равномерных → треугольное распределение.  
-            // Берём два разнесённых битовых поля того же xorshift-слова (биты 8.. и 16..):  
-            // они достаточно декоррелированы, второй прогон Xorshift не нужен.  
             uint32_t r1 = (loc_rand_state >> 8)  & l_dmask;    
             uint32_t r2 = (loc_rand_state >> 16) & l_dmask;    
-            current_frac += (int32_t)(r1 + r2) - (int32_t)l_dmask;  // мат. ожидание = 0  
+            current_frac += (int32_t)(r1 + r2) - (int32_t)l_dmask;
         }
 
-        // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1  
-        current_int += (current_frac >> 8);   
-        current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка  
+        // Выравнивание знака и переноса фракции (current_frac >> 8)
+        // Для Cortex-M0+ знаковые сдвиги Си-компилятор переводит в нативную команду ASRS
+        current_int  += (current_frac >> 8);   
+        current_frac &= 0xFF; 
 
-
-        // Единственная STR-запись в шину периферии PIO за итерацию  
+        // Финальная запись конфигурационного слова в регистр clkdiv PIO
         *clkdiv_reg = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
-
     }
 }
+
+
 
 
 
@@ -728,17 +705,17 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         return 0;  
     }  
   
-    // 1a. Уровень FRAC8-спура: штраф ~ A/D² (аналитический потолок линии)  
-        b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);  
-        {  
-            uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
-            if (off != UINT64_MAX && off < VFO_SPUR_HORIZON_HZ) {  
-                uint64_t prox   = VFO_SPUR_HORIZON_HZ - off;  
-                uint64_t prox_q = prox / 1024ULL;  
-                b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;  
-            }  
-        }  
-    b->total_metric += b->spur_power_pen;           // позиция спура учтена  
+    // 1a. Уровень FRAC8-спура: штраф ~ A/D² (аналитический потолок линии)    
+    // Отстройку спура считаем ОДИН раз и переиспользуем в level-пенальти ниже.    
+    uint64_t spur_off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);    
+  
+    b->spur_power_pen = frac_spur_power_pen(test.pio_int, test.pio_frac);    
+    if (spur_off != UINT64_MAX && spur_off < VFO_SPUR_HORIZON_HZ) {    
+        uint64_t prox   = VFO_SPUR_HORIZON_HZ - spur_off;    
+        uint64_t prox_q = prox / 1024ULL;    
+        b->spur_power_pen += (prox_q * prox_q * prox_q) << 4;    
+    }    
+    b->total_metric += b->spur_power_pen;           // позиция спура учтена
   
     // 2. Цена frac=0: вся дробная работа ложится на MASH
     if (test.pio_frac == 0) {  
@@ -792,23 +769,23 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     // Level-пенальти: спуры хуже -30 dBc дорожают квадратично,  
     // но с коэффициентом дальности kdist: у несущей штраф полный,  
     // за горизонтом ФНЧ — остаточный (спур давит фильтр).  
-    if (test.pio_frac != 0 && test.pio_int != 0) {  
-        float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);  
-        if (lvl_db > -30.0f) {  
-            float over = lvl_db + 30.0f;  
-            uint64_t base = (uint64_t)(over * over) << 22;  
+    if (test.pio_frac != 0 && test.pio_int != 0) {    
+        float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);    
+        if (lvl_db > -30.0f) {    
+            float over = lvl_db + 30.0f;    
+            uint64_t base = (uint64_t)(over * over) << 22;    
   
-            // Коэффициент дальности спура: 1.0 → 0.1 линейно к горизонту  
-            uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
-            float kdist;  
-            if      (off == UINT64_MAX)            kdist = 1.0f;   // спура нет/на несущей  
-            else if (off >= VFO_SPUR_HORIZON_HZ)   kdist = 0.1f;   // за горизонтом — остаточный  
-            else kdist = 1.0f - 0.9f * ((float)off / (float)VFO_SPUR_HORIZON_HZ);  
+            // Коэффициент дальности спура: переиспользуем spur_off из блока 1a    
+            // (1.0 у несущей → 0.1 за горизонтом ФНЧ)    
+            float kdist;    
+            if      (spur_off == UINT64_MAX)          kdist = 1.0f;   // спура нет/на несущей    
+            else if (spur_off >= VFO_SPUR_HORIZON_HZ) kdist = 0.1f;   // за горизонтом — остаточный    
+            else kdist = 1.0f - 0.9f * ((float)spur_off / (float)VFO_SPUR_HORIZON_HZ);    
   
-            uint64_t pen = (uint64_t)(base * kdist);  
-            b->spur_power_pen += pen;  
-            b->total_metric   += pen;  
-        }  
+            uint64_t pen = (uint64_t)((double)base * kdist);    
+            b->spur_power_pen += pen;    
+            b->total_metric   += pen;    
+        }    
     }
 
     return b->total_metric;  
@@ -884,11 +861,8 @@ static uint64_t vfo_pll_metric(uint64_t clk_sys_hz, uint64_t target_mhz, VfoPara
 
 
 // хелпер
-// Минимальная отстройка FRAC8-спура по гармоникам k=1..4, Гц.  
-// frac==0 -> UINT64_MAX (нет спура). Спур k-й гармоники садится на  
-// f_sm * fd/256, где fd = свёртка (frac*k mod 256) в диапазон ±128.
-// Функция возвращает финальное значение best
-// точную частоту отстройки (в Гц) самого близкого спура из гармоник (k=1...4)
+// функция ищет ближайший к несущей FRAC8-спур среди первых 4 гармоник периода переполнения дробного байта
+// для дробного делителя D = pio_int + pio_frac/256 
 // clk_sys_hz - делимая частота системной шины
 // pio_int    - целая часть делителя
 // pio_frac   - дробная часть делителя
@@ -962,10 +936,6 @@ PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_cl
     // ---- Классификаторы и состояние арбитража ----  
     uint64_t min_dds_metric    = UINT64_MAX;  // метрика победителя (не номинала!)  
     bool     best_forbidden    = true;        // класс победителя: frac в поясе  
-    bool     best_clean        = false;       // класс победителя: грязный dmin
-    bool     best_frac_zero    = false;       // класс победителя: frac==0  
-    uint32_t best_d8           = 0;           // dist_to_k8 победителя (тай-брейк)
-  //  uint64_t best_pll_vco_hz   = 0;           // VCO победителя (тай-брейк при =metric)  
     uint32_t n_arbit           = 0;           // сколько кандидатов дошло до арбитража  
 
     // --- отдельный трекер лучшего frac=0-кандидата ---  
@@ -1122,9 +1092,6 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
   
                     if (prefer) {    
                         best_forbidden  = frac_forbidden;    
-                        best_clean      = candidate_clean;    
-                        best_frac_zero  = cand_frac_zero;
-                        best_d8         = cand_d8;
                         min_dds_metric  = arb_metric;    
   
                         best_pll.fbdiv      = fbdiv;  
@@ -1951,9 +1918,6 @@ void vfo_encoder_poll(void) {
 
                 uint32_t clkdiv_now = lo_pio->sm[lo_sm].clkdiv;  
                 uint32_t meas_clk   = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
-                uint32_t meas_xosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC) * 1000u;  
-                uint32_t meas_rosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC) * 1000u;  
-                uint32_t sys_ctrl   = clocks_hw->clk[clk_sys].ctrl;  
                 
                 Serial.printf("[DBG] CLKDIV=0x%08lX (int=%lu frac=%lu)  tone[0].int=%lu frac=%lu  "  
                             "active=%d changed=%d  clk_meas=%lu kHz  CS=0x%08lX FB=%lu PRIM=0x%08lX\n",  
@@ -2029,8 +1993,6 @@ void vfo_encoder_poll(void) {
         // Измеренная частота шины + фактические регистры PLL и делителя SM  
         uint32_t clkdiv_now = lo_pio->sm[lo_sm].clkdiv;  
         uint32_t meas_clk   = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
-        uint32_t meas_xosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_XOSC_CLKSRC) * 1000u;  
-        uint32_t meas_rosc  = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC) * 1000u;  
         uint32_t sys_ctrl   = clocks_hw->clk[clk_sys].ctrl;  
         
         Serial.printf("[DBG] CLKDIV=0x%08lX (int=%lu frac=%lu)  tone[0].int=%lu frac=%lu  "  

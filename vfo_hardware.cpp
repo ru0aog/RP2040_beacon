@@ -1,13 +1,8 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Дизеринг-движок программного DDS VFO на автоматах PIO  
- *  Версия 2.19 (Профилирование и ASM-оптимизация Core 1), 2026-10-09  
+ *  Версия 2.20 (Профилирование и ASM-оптимизация Core 1), 2026-10-10  
  * ============================================================================ 
- * программная реализация MASH-2 (Multi-Stage Noise Shaping 2-го порядка
- * выполнен по схеме MASH 1-1 (каскад из двух последовательных дельта-сигма модуляторов 1-го порядка).
- * Конвейер полностью развернут внутри регистров процессора ARM Cortex-M0+ на изолированном ядре Core 1 
- * и работает без обращения к ОЗУ. Благодаря этому частота расчета дизеринга 
- * достигает своего физического потолка — нескольких мегагерц.
  *  
  *  МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL И ДВУХЪЯДЕРНЫЙ ДИЗЕРИНГ  
  *
@@ -57,30 +52,6 @@
 #define VFO_SHELF_REF_CLK_HZ   400000000ULL // опора нормировки подошвы: 400M = нулевой штраф  
 #define VFO_SPUR_HORIZON_HZ    3000000ULL   // спур ближе 3 МГц — штраф за уровень
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
-
-
-#define VFO_USE_MASH2            1
-#define VFO_DITHER_FAST          1
-#define VFO_PLL_AUTOTUNE         1
-#define VFO_DITHER_ON_CORE1      1
-
-#define VFO_DDS_MODE             1
-
-#define VFO_FRACTAL_MODE         1    // 0 - целочисленный режим. 1 - дробный
-
-#define VFO_FRAC_DITHER_NONE     1    // дизер FRAC-байта делителя PIO: размывает  
-#define VFO_FRAC_DITHER_1BIT     0    // спуры простых дробей (1/2, 1/4, 5/8...) 
-#define VFO_FRAC_DITHER_2BIT     0
-#define VFO_FRAC_DITHER_3BIT     0
-#define VFO_FRAC_DITHER_4BIT     0
-#define VFO_FRAC_DITHER_5BIT     0
-
-#define VFO_STEP_DITHER_NONE     1    // дизер STEP - не нужен?
-#define VFO_STEP_DITHER_1BIT     0
-#define VFO_STEP_DITHER_2BIT     0
-#define VFO_STEP_DITHER_3BIT     0
-#define VFO_STEP_DITHER_4BIT     0
-#define VFO_STEP_DITHER_5BIT     0
 
 
 // ============================================================================
@@ -181,10 +152,8 @@ static unsigned int lo_sm = 0;
 static unsigned int lo_offset = 0;
 static bool pio_program_loaded = false;
 
-#if VFO_DITHER_ON_CORE1
 static bool timer_already_running = false;
 static struct repeating_timer sdr_dither_timer; 
-#endif
 
 static uint8_t current_active_tone = VFO_TONE_NONE;
 static volatile bool tone_changed = false;
@@ -203,10 +172,8 @@ static volatile uint32_t vfo_frac_dither_mask = 0x03u;
 
 // Глобальное состояние DDS-накопителей в ОЗУ (используется в С-ориентированных ветках)
 static volatile uint32_t dds_accumulator = 0; 
-#if VFO_USE_MASH2
 static volatile uint32_t dds_accum_m2 = 0;    
 static volatile uint32_t m2_carry_prev = 0;   
-#endif
 
 // Состояние встроенного ГПСЧ Xorshift32
 #define VFO_RAND_SEED_INIT 0xACE1u
@@ -617,7 +584,7 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
   
     int32_t total_correction = 0;  
   
-#if VFO_USE_MASH2  
+
     uint32_t old_acc1 = dds_accumulator;  
     dds_accumulator += step;  
     uint32_t carry1 = (dds_accumulator < old_acc1) ? 1 : 0;   
@@ -628,24 +595,10 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
   
     total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)m2_carry_prev;  
     m2_carry_prev = carry2;   
-#else  
-    uint32_t old_acc = dds_accumulator;  
-    dds_accumulator += step;  
-    if (dds_accumulator < old_acc) {  
-        total_correction = 1;  
-    }  
-#endif  
   
     int32_t current_frac;  
     int32_t current_int = (int32_t)local_int;  
   
-#if !VFO_FRACTAL_MODE  
-    // int-режим + DDS: шаг покрывает весь дробный остаток делителя  
-    // (frac8·2^24 + sub-LSB), поэтому перенос = +1 к ЦЕЛОМУ делителю,  
-    // а не к FRAC-байту. FRAC всегда 0 — делитель пилит int ↔ int+1.  
-    current_int  += total_correction;  
-    current_frac  = 0;  
-#else  
     // Дробный режим: как было — перенос идёт в FRAC-байт (+1/256 делителя)  
     current_frac = (int32_t)local_frac + total_correction;  
     while (current_frac > 255) {  
@@ -656,7 +609,6 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
         current_frac += 256;  
         current_int--;  
     }  
-#endif  
   
     lo_pio->sm[lo_sm].clkdiv = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);  
 }
@@ -667,13 +619,11 @@ static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uin
 /**  
  * @brief Таймерный колбэк дизеринга для режима Core 0.  
  */
-#if VFO_DITHER_ON_CORE1
 static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) {
     (void)t; 
     vfo_dither_step(dds_step, target_pio_int, target_pio_frac8);
     return true; 
 }
-#endif
 
 
 
@@ -690,10 +640,9 @@ static void __not_in_flash_func(vfo_core1_entry)() {
     // Регистро-резидентное состояние накопителей (DDS и ГПСЧ)
     uint32_t loc_acc1 = 0;
     uint32_t loc_rand_state = VFO_RAND_SEED_INIT;
-#if VFO_USE_MASH2
     uint32_t loc_acc2 = 0;
     uint32_t loc_m2_carry_prev = 0;
-#endif
+
 
     // Прямой кэшированный указатель на регистр SM PIO
     volatile uint32_t *clkdiv_reg = &lo_pio->sm[lo_sm].clkdiv;
@@ -715,10 +664,8 @@ static void __not_in_flash_func(vfo_core1_entry)() {
                 
                 loc_acc1 = 0;
                 loc_rand_state = xorshift_state;
-#if VFO_USE_MASH2
             loc_acc2 = 0;
             loc_m2_carry_prev = 0;
-#endif
             tone_changed = false; 
             spin_unlock(vfo_spin_lock, save);
             }  
@@ -730,7 +677,7 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         sio_hw->gpio_togl = profile_pin_mask;
 #endif
 
-#if VFO_DITHER_FAST
+
         // === ВЫСОКОСКОРОСТНОЙ РЕГИСТРОВЫЙ СИ-КОНВЕЙЕР (Без ОЗУ-структур и NOP) ===
         int32_t step = l_step;
 
@@ -745,47 +692,11 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
         // Линейный беспереходный расчет дизера под фиксированные 4 бита (VFO_DITHER_RAND_BITS)
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
-        #if VFO_STEP_DITHER_1BIT
-            int32_t r_bits = (int32_t)(loc_rand_state & 0x01u); // 1-bit бит  0    диапазона -1..+1
-        #endif
-        #if VFO_STEP_DITHER_2BIT
-            int32_t r_bits = (int32_t)(loc_rand_state & 0x03u); // 2-bit биты 0..1 диапазона -3..+3
-        #endif
-        #if VFO_STEP_DITHER_3BIT
-            int32_t r_bits = (int32_t)(loc_rand_state & 0x07u); // 3-bit биты 0..2 диапазона -7..+7
-        #endif
-        #if VFO_STEP_DITHER_4BIT
-            int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
-        #endif
-        #if VFO_STEP_DITHER_5BIT
-            int32_t r_bits = (int32_t)(loc_rand_state & 0x1Fu); // 5-bit
-        #endif
 
-        // Умножаем на 2 и вычитаем 15. Получаем симметричный ряд нечетных чисел от -15 до +15.
-        // Математическое ожидание строго равно 0.0
-        #if VFO_STEP_DITHER_1BIT
-            step += ((r_bits << 1) - 1);  // 1-bit
-        #endif
-        #if VFO_STEP_DITHER_2BIT
-            step += ((r_bits << 1) - 3);  // 2-bit
-        #endif
-        #if VFO_STEP_DITHER_3BIT
-            step += ((r_bits << 1) - 7);  // 3-bit
-        #endif
-        #if VFO_STEP_DITHER_4BIT
-            step += ((r_bits << 1) - 15); // 4-bit
-        #endif
-        #if VFO_STEP_DITHER_5BIT
-            step += ((r_bits << 1) - 31); // 5-bit
-        #endif
-        #if VFO_STEP_DITHER_NONE
             step = l_step;                   // декорреляция целой части отключена
-        #endif
-
 
         int32_t total_correction = 0;
 
-#if VFO_USE_MASH2
         uint32_t carry1, carry2;
         // 1. Первая ступень (Интегратор ошибки базового шага)
         // Извлекаем аппаратные переносы напрямую из статусного регистра ALU процессора.
@@ -801,24 +712,11 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         loc_m2_carry_prev = carry2;  // Запоминаем перенос для следующего такта
         // Такой знакопеременный двухступенчатый процесс заставляет ошибку квантования 
         // флуктуировать с высокой крутизной. Шум выталкивается вверх по спектру со скоростью 40 дБ на декаду
-#else
-        uint32_t old_acc = loc_acc1;
-        loc_acc1 += (uint32_t)step;
-        if (loc_acc1 < old_acc) {
-            total_correction = 1;
-        }
-#endif
+
 
         int32_t current_frac = l_frac;  
         int32_t current_int  = l_int;  
   
-#if !VFO_FRACTAL_MODE  
-        // int-режим + DDS: перенос аккумулятора = +1 к ЦЕЛОМУ делителю.  
-        // Шаг step покрывает весь дробный остаток (frac8·2^24 + subLSB),  
-        // поэтому correction уходит в INT-поле, FRAC остаётся 0.  
-        current_int += total_correction;  
-        current_frac = 0;  
-#else  
         current_frac = l_frac + total_correction;
 
         // Декорреляция FRAC-байта с рантайм-глубиной: маска выбирается  
@@ -833,29 +731,10 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         current_int += (current_frac >> 8);   
         current_frac &= 0xFF; // Маска восстановит легальное значение FRAC из отрицательного остатка  
 
-#endif 
 
         // Единственная STR-запись в шину периферии PIO за итерацию  
         *clkdiv_reg = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);
 
-#else
-        // === ЭТАЛОННАЯ МЕДЛЕННАЯ СИ-ВЕРСИЯ (С прогонкой через глобальное ОЗУ) ===
-        dds_accumulator = loc_acc1;
-        xorshift_state = loc_rand_state;
-#if VFO_USE_MASH2
-        dds_accum_m2 = loc_acc2;
-        m2_carry_prev = loc_m2_carry_prev;
-#endif
-
-        vfo_dither_step((uint32_t)l_step, (uint32_t)l_int, (uint32_t)l_frac);
-
-        loc_acc1 = dds_accumulator;
-        loc_rand_state = xorshift_state;
-#if VFO_USE_MASH2
-        loc_acc2 = dds_accum_m2;
-        loc_m2_carry_prev = m2_carry_prev;
-#endif
-#endif
     }
 }
 
@@ -907,46 +786,6 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     b->frac = test.pio_frac;  
     b->raw_step = test.dds_step;  
   
-#if !VFO_FRACTAL_MODE  
-    {  
-        // Диагностическая ошибка квантования (в метрику не входит — ДМ закрывает её)  
-        uint64_t target_hz = target_mhz / 1000ULL;          // target_mhz — миллигерцы  
-        uint64_t f_out_hz  = clk_sys_hz / (2ULL * test.pio_int);  
-        uint64_t err_hz    = (f_out_hz > target_hz)  
-                           ? (f_out_hz - target_hz)  
-                           : (target_hz - f_out_hz);  
-        (void)err_hz;   // оставить для печати при отладке  
-  
-        // Подошва: плотность clk·int к эталону 400M·55  
-        const uint64_t DEN_REF = 400000000ULL * 55ULL;  
-        uint64_t dens = clk_sys_hz * (uint64_t)test.pio_int;  
-        b->clk_penalty = (dens < DEN_REF)  
-            ? ((DEN_REF - dens) * (1ULL << 30)) / DEN_REF : 0;  
-        b->total_metric += b->clk_penalty;  
-  
-        // Дискретность ДМ: штраф за близость шага к якорям k/8 (idle-тоны)  
-        if (test.dds_step != 0) {  
-            uint32_t dist_k8 = dds_step_min_dist_to_k8(test.dds_step);  
-            b->center_dist = dist_k8;  
-            if (dist_k8 < VFO_K8_BELT) {  
-                uint64_t deficit = (uint64_t)(VFO_K8_BELT - dist_k8);  
-                b->mash_penalty = (deficit * deficit) >> 14;  
-            }  
-            b->total_metric += b->mash_penalty;  
-        }  
-  
-        // Мягкий тир-штраф 1.30 В (clk > ~250 МГц), ~2 кГц эквивалента  
-        if (clk_sys_hz >= VFO_CLK_SYS_PREF_MIN_HZ) {  
-            b->total_metric += (1ULL << 31);  
-        }  
-  
-        if (test.pio_int < 4) {  
-            b->int_penalty = VFO_INT_PENALTY;  
-            b->total_metric += b->int_penalty;  
-        }  
-        return b->total_metric;  
-    }
-#else  
     // ================================================================  
     // ДРОБНЫЙ РЕЖИМ (FRAC8 + DDS/MASH) — исходная логика  
     // ================================================================  
@@ -1052,7 +891,6 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
     }
 
     return b->total_metric;  
-#endif  
 }
 
 
@@ -1082,16 +920,11 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     
     VfoParameters params;    
     
-#if VFO_FRACTAL_MODE    
+
     // Дробный режим: int=floor, frac=дробные 8 бит делителя    
     params.pio_int  = pio_div_fixed8 >> 8;    
     params.pio_frac = frac8;    
-#else    
-    // Целочисленный режим: int=floor — ΔΣ дотягивает только положительный    
-    // остаток (перенос увеличивает делитель), округление вверх недопустимо.    
-    params.pio_int  = pio_div_fixed8 >> 8;    
-    params.pio_frac = 0;    
-#endif    
+  
     
     // Для совместимости со структурой сохраняем в chz (сантигерцах)    
     params.target_freq_chz = (uint32_t)(mhz_target / 10ULL);    
@@ -1110,25 +943,12 @@ static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_
     params.dds_step = (uint32_t)((intermediate << 16)    
                                + ((remainder_low << 16) / vfo_denom));    
     
-#if !VFO_FRACTAL_MODE && VFO_DDS_MODE    
-    // int-режим + DDS: шаг покрывает ВЕСЬ дробный остаток делителя.    
-    // КОНТРАКТ С ГОРЯЧИМ ЦИКЛОМ: перенос аккумулятора должен добавлять    
-    // +1 к ЦЕЛОМУ делителю (int -> int+1), а не к FRAC-байту. Тогда:    
-    //   avg div = int + step/2^32 = int + frac8/256 + sub-LSB  — точно.    
-    // Если перенос уйдёт в FRAC, вклад будет step/(2^32·256) — в 256 раз    
-    // меньше, и f_out встанет на ~frac8·f/256 выше цели (случай 3.899 МГц).    
-    params.dds_step += ((uint32_t)frac8 << 24);    
-#endif    
     
     // Принудительная нечётность шага: gcd(dds_step, 2^32) = 1,    
     // период паттерна = 2^32 отсчётов → гребёнка превращается в шумовую полку.    
     if (params.dds_step != 0) params.dds_step |= 1u;    
     
-#if !VFO_FRACTAL_MODE && !VFO_DDS_MODE    
-    // Чистый int-режим без DDS: делитель статичный, шаг не нужен    
-    params.dds_step = 0;    
-#endif    
-    
+   
     return params;    
 }
 
@@ -1282,7 +1102,6 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
   
                     if (test.pio_int < 2) continue;
 
-                    #if VFO_FRACTAL_MODE  
                         // Гейт плотности коррекции clk·int. Потолок продукта физически ограничен:  
                         //   max(clk·int) ≈ clk_max² / (2·f_out).  
                         // Выше ~18 МГц фиксированный порог 4e9 недостижим и опустошает скан.  
@@ -1296,10 +1115,6 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                             if (gate > cap) gate = cap;  
                             if (clk_sys_hz * (uint64_t)test.pio_int < gate) continue;  
                         }  
-                    #else  
-                        if (test.pio_int < 4) continue;  
-                        if (clk_sys_hz * (uint64_t)test.pio_int < 6000000000ULL) continue;  
-                    #endif
   
                     // === КЛАСС 1: запретный пояс FRAC8 (многогармонический, k=1..4) ===
                     uint64_t spur_off_hz = frac_spur_min_off_hz(test.pio_int,
@@ -1523,15 +1338,8 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
  * PIO и 32-битного DDS-остатка строго на базе высокой стабильной оверклокерской частоты.  
  */
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
-#if VFO_DITHER_ON_CORE1
     // Жесткий перезапуск изолированного ядра перед изменением параметров таблиц тонов
     multicore_reset_core1(); 
-#else
-    if (timer_already_running) { 
-        cancel_repeating_timer(&sdr_dither_timer); 
-        timer_already_running = false; 
-    }
-#endif
 
     current_active_tone = VFO_TONE_NONE; 
     xorshift_state = VFO_RAND_SEED_INIT + time_us_32(); 
@@ -1558,11 +1366,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     } 
     else {
         // Если буст спит — производим штатный автотюнинг в пределах номинальных 133 МГц
-        #if (VFO_PLL_AUTOTUNE)
             target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_NOMINAL_HZ);
-        #else
-            target_pll = pll_nominal;
-        #endif
     }
 
     // Подбираем безопасное рантайм-напряжение ядра процессора (VREG)
@@ -1651,14 +1455,9 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         Serial.printf("-------------------------------\n");  
     #endif
 
-#if VFO_DITHER_ON_CORE1
     // Безопасный атомарный пуск высокоскоростного регистрового dither-конвейера на Core 1
     tone_changed = true; 
     multicore_launch_core1(vfo_core1_entry); 
-#else
-    add_repeating_timer_us(-(int64_t)VFO_DITHER_INTERVAL_US, vfo_dither_callback, NULL, &sdr_dither_timer); 
-    timer_already_running = true;
-#endif
 }
 
 
@@ -2351,25 +2150,16 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     if (tone_index >= VFO_IFKP_TONES_COUNT) return; 
     if (tone_index == current_active_tone) return;
 
-#if VFO_DITHER_ON_CORE1
     uint32_t save = spin_lock_blocking(vfo_spin_lock);
     target_pio_int   = ifkp_tones[tone_index].pio_int;
     target_pio_frac8 = ifkp_tones[tone_index].pio_frac;
     dds_step         = ifkp_tones[tone_index].dds_step; 
     tone_changed     = true; 
     spin_unlock(vfo_spin_lock, save);
-#else
-    uint32_t ints_status = save_and_disable_interrupts();
-    target_pio_int   = ifkp_tones[tone_index].pio_int;
-    target_pio_frac8 = ifkp_tones[tone_index].pio_frac;
-    dds_step         = ifkp_tones[tone_index].dds_step; 
-#if VFO_USE_MASH2
     dds_accum_m2 = 0;
     m2_carry_prev = 0;
-#endif
     dds_accumulator = 0;
     restore_interrupts(ints_status);
-#endif
 
     current_active_tone = tone_index;
 

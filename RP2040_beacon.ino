@@ -271,6 +271,14 @@ void check_serial_commands() {
               force_ifkp_transmission = true;
             }
           }
+          else if (command.equalsIgnoreCase("START OLIVIA")) {
+            if (is_transmitting) {
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
+            } else {
+              Serial.println(F("[Система] Заявка принята. Выходим в эфир CW..."));
+              force_olivia_transmission = true;
+            }
+          }
           // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---
           else if (command.equalsIgnoreCase("clear log")) {
             if (is_transmitting) {

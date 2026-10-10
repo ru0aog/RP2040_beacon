@@ -52,13 +52,6 @@ static void olivia_build_walsh() {
     walsh_ready = true;  
 }  
   
-// --- Скремблер (M-последовательность, полином x^9 + x^5 + 1) ---  
-static uint32_t olivia_scrambler_state = 0x1FFu;  
-static inline uint8_t get_scrambler_bit() {  
-    uint32_t bit = ((olivia_scrambler_state >> 0) ^ (olivia_scrambler_state >> 4)) & 1u;  
-    olivia_scrambler_state = (olivia_scrambler_state >> 1) | (bit << 8);  
-    return (uint8_t)bit;  
-}  
   
 // --- Грей-код (убирает многократные ошибки при соседних тонах) ---  
 static inline uint8_t to_gray(uint8_t v) { return v ^ (v >> 1); }  
@@ -71,7 +64,6 @@ static uint8_t block_count = 0;
 void prepare_olivia_frequencies(uint32_t base_hz) {  
     OLIVIA_Base_freq = base_hz;  
     if (!walsh_ready) olivia_build_walsh();  
-    olivia_scrambler_state = 0x1FFu;  
     block_count = 0;  
   
     if (!device_SI[0]) {  
@@ -99,35 +91,48 @@ static inline bool olivia_emit_tone(uint8_t tone) {
 }  
   
 // Передача одного блока из 3 символов (64 тона)  
-static void olivia_flush_block() {  
-    if (block_count == 0) return;  
-    if (!walsh_ready) olivia_build_walsh();  
+static bool olivia_flush_block() {  
+    if (block_count == 0) return true;  
   
-    // Выравниваем недобор символов пробелами  
-    for (uint8_t p = block_count; p < OLIVIA_BITS; p++) block_chars[p] = ' ';  
+    // fldigi добивает блок НУЛЁМ (idle), а не пробелом  
+    for (uint8_t p = block_count; p < OLIVIA_BITS; p++) block_chars[p] = 0;  
   
-    // Предрасчёт 64-битных векторов для каждой бит-плоскости  
-    uint64_t vec[OLIVIA_BITS];  
-    for (uint8_t p = 0; p < OLIVIA_BITS; p++) {  
-        uint8_t c   = (uint8_t)block_chars[p] & 0x7Fu; // 7-битный ASCII  
-        uint8_t idx = c & 0x3Fu;                       // 6 бит -> строка Уолша  
-        uint8_t inv = (c >> 6) & 1u;                   // 7-й бит -> инверсия  
-        vec[p] = inv ? ~walsh_table[idx] : walsh_table[idx];  
+    const uint64_t SCRAMBLE = 0xE257E6D0291574ECULL; // ScramblingCodeOlivia  
+    const uint8_t  NSHIFT   = 13;                     // шаг для Olivia  
+  
+    uint8_t out[64];  
+    for (int t = 0; t < 64; t++) out[t] = 0;  
+  
+    // Для каждого из 3 символов (FreqBit) раскладываем строку Адамара,  
+    // скремблируем и «размазываем» по бит-плоскостям (FreqBit + t) % 3  
+    for (uint8_t freqBit = 0; freqBit < OLIVIA_BITS; freqBit++) {  
+        uint8_t  c   = (uint8_t)block_chars[freqBit] & 0x7Fu;  
+        uint8_t  idx = c & 0x3Fu;                 // 6 бит -> строка (позиция импульса)  
+        uint8_t  inv = (c >> 6) & 1u;             // 7-й бит -> знак импульса (-1)  
+        uint64_t row = inv ? ~walsh_table[idx] : walsh_table[idx]; // 1 = отрицательный отсчёт  
+  
+        // Скремблер: бит маски с индексом (freqBit*13 + t) & 63  
+        uint8_t codeBit = (uint8_t)((freqBit * NSHIFT) & 63u);  
+        for (int t = 0; t < 64; t++) {  
+            uint8_t neg = (uint8_t)((row >> (63 - t)) & 1ULL);     // знак отсчёта FHT  
+            neg ^= (uint8_t)((SCRAMBLE >> codeBit) & 1ULL);        // ScrambleFHT  
+            if (neg) {                                             // FHT_Buffer[t] < 0  
+                uint8_t bit = freqBit + (uint8_t)(t % OLIVIA_BITS);// (FreqBit + Rotate)  
+                if (bit >= OLIVIA_BITS) bit -= OLIVIA_BITS;  
+                out[t] |= (uint8_t)(1u << bit);  
+            }  
+            codeBit = (uint8_t)((codeBit + 1) & 63u);  
+        }  
     }  
   
-    // 64 символьных позиции -> 64 тона  
-    for (int s = 0; s < 64; s++) {  
-        uint8_t tone = 0;  
-        for (uint8_t p = 0; p < OLIVIA_BITS; p++) {  
-            uint8_t wbit = (uint8_t)((vec[p] >> (63 - s)) & 1ULL);  
-            wbit ^= get_scrambler_bit();     // скремблирование каждой плоскости  
-            tone |= (wbit << p);  
-        }  
-        tone = to_gray(tone) & 0x07u;        // Грей-мэппинг в номер тона 0..7  
-        if (!olivia_emit_tone(tone)) { block_count = 0; return; }  
+    // Выдаём 64 тона; модулятор fldigi применяет Грей-код к номеру тона  
+    for (int t = 0; t < 64; t++) {  
+        uint8_t tone = to_gray(out[t]) & (OLIVIA_TONES - 1);  
+        if (!olivia_emit_tone(tone)) { block_count = 0; return false; }  
     }  
     block_count = 0;  
-}  
+    return true;  
+}
   
 // Добавление символа в текущий блок; при заполнении — передача  
 void olivia_send_char(char c) {  

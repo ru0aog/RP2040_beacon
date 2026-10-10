@@ -38,6 +38,7 @@ extern String my_text_variable;
 extern String my_rtty_variable;
 extern String my_ifkp_variable;
 extern String my_freq_ifkp_var;
+extern String my_freq_olivia_var;
 extern String my_rtty_mark_var;    // Базовая частота MARK
 extern String my_rtty_shift_var;   // Расстояние между частотами (Гц)
 extern String my_rtty_invert_var;  // Флаг инверсии частот RTTY (0 или 1)

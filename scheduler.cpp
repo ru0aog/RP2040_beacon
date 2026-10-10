@@ -72,8 +72,8 @@ RtcType activeRtc = RTC_NONE;
 
 datetime_t currentTime;
 
-// Имена режимов — соответствуют enum BeaconMode: 0=IFKP, 1=RTTY, 2=CW, 3=SEQ  
-static const char* MODE_NAMES[] = {"IFKP", "RTTY", "CW", "SEQ"};  
+// Имена режимов — соответствуют enum BeaconMode: 0=IFKP, 1=RTTY, 2=CW, 3=OLIVIA, 4=SEQ  
+static const char* MODE_NAMES[] = {"IFKP", "RTTY", "CW", "OLIVIA", "SEQ"};  
   
 // Безопасный доступ: защита от мусора в mode (например MODE_NONE=255)  
 static const char* mode_name(uint8_t mode) {  
@@ -887,8 +887,8 @@ String fmt_next_start(int32_t abs_min) {
  * @ref scheduled_freq_hz и выводит диагностику в Serial. Если в момент  
  * срабатывания установлен флаг @c is_transmitting, сеанс пропускается.  
  *  
- * @param[in] mode  Режим передачи: MODE_IFKP (0), MODE_RTTY (1), MODE_CW (2),  
- *                  MODE_SEQ (3). Значения > 3 отклоняются.  
+ * @param[in] mode  Режим передачи: MODE_IFKP (0), MODE_RTTY (1), MODE_CW (2), MODE_OLIVIA (3),
+ *                  MODE_SEQ (4). Значения > 4 отклоняются.  
  *  
  * @return @c true  — задача совпала, передачу нужно запустить  
  *                   (вызывающий код обязан выставить @c is_transmitting);  
@@ -913,7 +913,7 @@ bool is_time_to_transmit(uint8_t mode) {
   uint32_t cur = rtc_hour * 60UL + rtc_min;  
   static uint32_t last_min[4] = {9999, 9999, 9999, 9999};  
   
-  if (mode > 3) return false;  
+  if (mode > 4) return false;  
   if (cur == last_min[mode]) return false;   // один запуск (или пропуск) на минуту  
   
   // Проверка занятости ДО перебора задач — закрывает окно гонки  

@@ -105,6 +105,7 @@ String device_DL_name = "дисплей LCD1602/1604";
 bool force_cw_transmission   = false; // Флаг ручного запуска CW
 bool force_rtty_transmission = false; // Флаг ручного запуска RTTY
 bool force_ifkp_transmission = false; // Флаг ручного запуска IFKP
+bool force_olivia_transmission = false; // Флаг ручного запуска OLIVIA
 volatile bool system_ready = false;   // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 extern volatile bool tx_launching; 
@@ -1043,11 +1044,98 @@ void loop() {
     } 
   }
 
+
+// =========================================================================  
+  // РЕЖИМ 3. СЕАНС СВЯЗИ OLIVIA 8/250  
+  // =========================================================================  
+  if (( (is_time_to_transmit(3) && !is_transmitting) || force_olivia_transmission) && !pc_file_written && !soft_restart_flag) {  
+    force_olivia_transmission = false;  
+    is_transmitting = true;  
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting  
+  
+    if (debug_flag) {  
+      char time_buf[128];  
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса OLIVIA! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);  
+      Serial.println(time_buf);  
+    }  
+  
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {  
+  
+      uint32_t olivia_session_start_ms = millis();  
+      dev_TX_state = true;  
+      update_scheduler();  
+      SI_POWER_ON();  
+  
+      if (!pc_file_written && !soft_restart_flag) {  
+        uint32_t olivia_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz           // приоритет частоте из расписания  
+                   : strtoul(my_freq_olivia_var.c_str(), NULL, 10);  
+        if (olivia_hz == 0) olivia_hz = 3601307;  
+  
+        prepare_olivia_frequencies(olivia_hz);  
+  
+        // OLIVIA: позывной и локатор  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_OLIVIA] Вызов: "));  
+          olivia_send_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");  
+        }  
+  
+        // OLIVIA: основной текст  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_OLIVIA] Текст: "));  
+          olivia_send_string(my_text_variable + "\r\n");  
+        }  
+  
+        // OLIVIA: первая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();  
+          Serial.print(F("[ЭФИР_OLIVIA] Телем: "));  
+          olivia_send_string(telemetry);  
+        }  
+  
+        // OLIVIA: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            String telemetry = get_climate_telemetry();  
+            Serial.print(F("[ЭФИР_OLIVIA] Телем: "));  
+            olivia_send_string(telemetry);  
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+  
+        // OLIVIA: завершение  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_OLIVIA] Конец: "));  
+          olivia_send_string("OVER.\r\n\r\n");  
+        }  
+  
+        if (!pc_file_written && !soft_restart_flag) {  
+          uint32_t olivia_session_duration_sec = (millis() - olivia_session_start_ms) / 1000;  
+          update_scheduler();  
+          char end_buf[128];  
+          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс OLIVIA завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, olivia_session_duration_sec);  
+          Serial.println(end_buf);  
+          if (debug_flag) {  
+            log_file_write_line("Сеанс OLIVIA завершен. Длительность: " + String(olivia_session_duration_sec) + " сек.");  
+          }  
+        }  
+      }  
+  
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА  
+      is_transmitting = false;  
+      scheduled_freq_hz = 0;  
+      SI_POWER_OFF();  
+      dev_TX_state = false;  
+      update_scheduler();  
+    }  
+  }
+
+
   // =========================================================================
-  // РЕЖИМ 3. ЦЕПОЧКА
+  // РЕЖИМ 4. ЦЕПОЧКА
   // =========================================================================
   // Проверка запуска трехмодовой цепочки из расписания
-  if ((is_time_to_transmit(3) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
+  if ((is_time_to_transmit(4) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
        Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
        is_transmitting = true;
        tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting

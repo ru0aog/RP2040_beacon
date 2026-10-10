@@ -12,6 +12,7 @@
 #define VFO_FLASH_SCK_MAX_HZ     50000000ULL
 #define VFO_THROTTLE_HI_C   80.0f   
 #define VFO_THROTTLE_LO_C   60.0f
+#define VFO_SIMPLE_FRAC_INT_MAX 50   // выше этого int вето простых дробей не применяется (НЧ: 1/2 на железе чисто)
 
 // рабочий лимит как переменные — min(дефайн, flash-значение)
 extern uint32_t vfo_max_clk_sys_hz;   // из Flash, паспорт=133 МГц  
@@ -49,7 +50,6 @@ struct VfoParameters {
     uint32_t dds_step;
     uint32_t target_freq_chz; 
 };
-
 
 
 

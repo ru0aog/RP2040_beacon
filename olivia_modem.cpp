@@ -1,128 +1,176 @@
-#include <Arduino.h>
-#include "vfo_hardware.h"
+/**  
+ * ============================================================================  
+ *  olivia_modem.cpp — Модулятор Olivia 8/250 (8 тонов, полоса 250 Гц)  
+ * ============================================================================  
+ *  Структура блока: 3 ASCII-символа (по 7 бит) кодируются ПАРАЛЛЕЛЬНО, каждый  
+ *  в свою бит-плоскость 3-битного MFSK-символа. Каждый символ раскладывается на  
+ *  64-битный вектор Уолша-Адамара (6 бит -> номер строки, 7-й бит -> инверсия).  
+ *  На выходе — 64 тона на блок, по 32 мс каждый (31.25 бод, шаг 31.25 Гц).  
+ *  
+ *  ВНИМАНИЕ: точная бит-в-бит совместимость с fldigi не гарантирована —  
+ *  скремблер/перемежитель здесь самосогласованы, но могут отличаться от  
+ *  эталонного алгоритма Jalocha. Проверять на реальном декодере.  
+ * ============================================================================  
+ */  
+  
+#include <Arduino.h>  
 #include "olivia_modem.h"
-
-// Константы Olivia 8/250
-#define OLIVIA_TONES        8
-#define OLIVIA_BAUD         31.25f
-#define OLIVIA_SYMBOL_MS    32       // 1000 / 31.25 = 32 мс на один тон
-#define INTERLEAVER_LEN     4        // Длина задержки перемежителя для полосы 250 Гц
-
-// Матрица Уолша-Адамара (64 вектора по 64 бита) для кодирования 6 бит данных
-// Вектор определяет последовательность из 64 символов (0 или 1)
-static const uint64_t walsh_table[64] = {
-    0x0000000000000000ULL, 0xFFFFFFFFFFFFFFFFULL, 0x00000000FFFFFFFFULL, 0xFFFFFFFF00000000ULL,
-    0x0000FFFF0000FFFFULL, 0xFFFF0000FFFF0000ULL, 0x0000FFFFFFFF0000ULL, 0xFFFF00000000FFFFULL,
-    0x00FF00FF00FF00FFULL, 0xFF00FF00FF00FF00ULL, 0x00FF00FFFF00FF00ULL, 0xFF00FF0000FF00FFULL,
-    0x00FFFF0000FFFF00ULL, 0xFFFF0000FFFF0000ULL, 0x00FFFF00FFFF00BBULL, 0xFFFF00000000FFFFULL,
-    0x0F0F0F0F0F0F0F0FULL, 0xF0F0F0F0F0F0F0F0ULL, 0x0F0F0F0FF0F0F0F0ULL, 0xF0F0F0F00F0F0F0FULL,
-    0x0F0FF0F00F0FF0F0ULL, 0xF0F00F0FF0F00F0FULL, 0x0F0FF0F0F0F00F0FULL, 0xF0F00F0F0F0F0F0FULL,
-    0x0FFFF00F0FFFF00FULL, 0xF0000FF0F0000FF0ULL, 0x0FFFF00FF0000FF0ULL, 0xF0000FF00FFFF00FULL,
-    0x0FF00FF00FF00FF0ULL, 0xF00FF00FF00FF00FULL, 0x0FF00FF0F00FF00FULL, 0xF00FF00F00FF00FFULL,
-    0x3333333333333333ULL, 0xCCCCCCCCCCCCCCCCULL, 0x33333333CCCCCCCCULL, 0xCCCCCCCC33333333ULL,
-    0x3333CCCC3333CCCCULL, 0xCCCC3333CCCC3333ULL, 0x3333CCCCCCCC3333ULL, 0xCCCC33333333CCCCULL,
-    0x33CC33CC33CC33CCULL, 0xCC33CC33CC33CC33ULL, 0x33CC33CCCC33CC33ULL, 0xCC33CC3333CC33CCULL,
-    0x33CCCC3333CCCC33ULL, 0xCCCC3333CCCC3333ULL, 0x33CCCC33CCCC3333ULL, 0xCCCC33333333CCCCULL,
-    0x3C3C3C3C3C3C3C3CULL, 0xC3C3C3C3C3C3C3C3ULL, 0x3C3C3C3CC3C3C3C3ULL, 0xC3C3C3C33C3C3C3CULL,
-    0x3C3CC3C33C3CC3C3ULL, 0xC3C33C3CC3C33C3CULL, 0x3C3CC3C3C3C33C3CULL, 0xC3C33C3C3C3C3C3CULL,
-    0x3CC33CC33CC33CC3ULL, 0xC33CC33CC33CC33CULL, 0x3CC33CC3C33CC33CULL, 0xC33CC33C3CC33CC3ULL,
-    0x3CC3C33C3CC33CC3ULL, 0xC33CC33CC33CC33CULL, 0x3CC3C33CC33CC33CULL, 0xC33CC33C3C3C3C3CULL
-};
-
-// Буфер циклического перемежителя (Interleaver) для Olivia 8 тонов
-// Нам нужно 3 бита (так как тонов 8 = 2^3) задерживать в массиве разной длины
-static uint8_t interleaver_buffer[OLIVIA_TONES][INTERLEAVER_LEN];
-static uint32_t interleaver_ptr = 0;
-
-// Скремблер-генератор (M-последовательность) для защиты от белых пятен в спектре
-static uint32_t olivia_scrambler_state = 0x1FFu;
-static inline uint8_t get_scrambler_bit() {
-    uint32_t bit = ((olivia_scrambler_state >> 0) ^ (uint32_t)(olivia_scrambler_state >> 4)) & 1u;
-    olivia_scrambler_state = (olivia_scrambler_state >> 1) | (bit << 8);
-    return (uint8_t)bit;
-}
-
-/**
- * @brief Передает один готовый 64-битный вектор Olivia в эфир
- * Разламывает вектор на 3-битные куски, прогоняет через перемежитель и шлет в Core 1.
- */
-static void __not_in_flash_func(olivia_send_vector)(uint64_t walsh_vector) {
-    // 64 бита вектора выдают 64 последовательных СВЧ-тона
-    for (int i = 0; i < 64; i++) {
-        uint32_t start_ms = millis();
-        
-        // Извлекаем текущий бит из вектора Уолша
-        uint8_t walsh_bit = (walsh_vector >> (63 - i)) & 1ULL;
-        
-        // Накапливаем 3 бита из последовательных отсчетов для формирования индекса тона (0..7)
-        // Для Olivia 8/250 берется 3 последовательных бита скремблированного потока
-        uint8_t raw_tone_bit = walsh_bit ^ get_scrambler_bit();
-        
-        // Простейший циклический сдвиг перемежителя по каноническому алгоритму Olivia
-        // Каждый из 3-х битов тона задерживается на разное число символов
-        uint8_t bit_index = i % 3; 
-        interleaver_buffer[bit_index][interleaver_ptr] = raw_tone_bit;
-        
-        // Считываем задержанный бит со смещением (компенсация замираний в эфире)
-        uint32_t delay_idx = (interleaver_ptr + bit_index + 1) % INTERLEAVER_LEN;
-        uint8_t delayed_bit = interleaver_buffer[bit_index][delay_idx];
-        
-        // Собираем финальный 3-битный индекс тона (0..7) для текущей итерации
-        static uint8_t tone_accumulator = 0;
-        tone_accumulator = (tone_accumulator << 1) | delayed_bit;
-        
-        if (bit_index == 2) {
-            uint8_t final_tone = tone_accumulator & 0x07u;
-            
-            // МГНОВЕННАЯ ОТПРАВКА ТОНА В ГОРЯЧЕЕ ЯДРО CORE 1 БЕЗ РАЗРЫВА ФАЗЫ!
-            vfo_set_tone_instant(final_tone);
-            
-            tone_accumulator = 0;
-            
-            // Жесткий рантайм-тайминг: удерживаем тон ровно 32 миллисекунды (31.25 Бод)
-            while ((millis() - start_ms) < OLIVIA_SYMBOL_MS) {
-                watchdog_update(); // Пинаем общую собаку
-            }
-        }
-    }
-    interleaver_ptr = (interleaver_ptr + 1) % INTERLEAVER_LEN;
-}
-
-/**
- * @brief Кодирует одиночный символ ASCII (7 бит) в формат Olivia
- */
-void olivia_send_char(char c) {
-    // В протоколе Olivia ASCII символ раскладывается на 6-битный индекс вектора Уолша
-    // (Младшие 6 бит символа кодируют основной вектор, старший 7-й бит управляет инверсией)
-    uint8_t walsh_idx = c & 0x3Fu;
-    uint8_t invert = (c >> 6) & 1u;
-    
-    uint64_t vector = walsh_table[walsh_idx];
-    if (invert) {
-        vector = ~vector; // Инвертируем маску для расширения алфавита
-    }
-    
-    // Выталкиваем 64-символьный блок в эфир
-    olivia_send_vector(vector);
-}
-
-/**
- * @brief Передача текстовой строки по протоколу Olivia 8/250
- */
-void olivia_send_string(const char* str) {
-    // Включаем ключ трансивера (нажатие несущей)
-    vfo_operation_set(true);
-    
-    // Передаем несколько символов синхронизации (символ 'П' или пробелы по спецификации)
-    for(int i = 0; i < 4; i++) {
-        olivia_send_char(' '); 
-    }
-    
-    // Посимвольный асинхронный поток передачи
-    while (*str) {
-        olivia_send_char(*str++);
-    }
-    
-    // Выключаем передатчик
-    vfo_operation_set(false);
+#include "vfo_hardware.h"
+#include "si5351_driver.h"
+#include "led_blink.h"
+#include <hardware/watchdog.h>  
+  
+// --- Внешние зависимости проекта (как в ifkp_modem.cpp) ---  
+extern volatile bool pc_file_written;  
+extern bool soft_restart_flag;  
+extern void check_serial_commands();  
+extern bool debug_flag;  
+extern uint8_t device_SI[5];  
+  
+// --- Константы Olivia 8/250 ---  
+#define OLIVIA_TONES      8  
+#define OLIVIA_BITS       3        // log2(8) — бит на символ = число символов в блоке  
+#define OLIVIA_SYMBOL_MS  32       // 1000 / 31.25 = 32 мс на тон  
+static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорость = 250/8  
+  
+uint32_t OLIVIA_Base_freq = 3601307; // базовая частота по умолчанию  
+  
+// --- Матрица Уолша-Адамара 64x64, строится рекурсивно (без хардкода/опечаток) ---  
+static uint64_t walsh_table[64];  
+static bool     walsh_ready = false;  
+  
+static void olivia_build_walsh() {  
+    // H[i][j] = (-1)^popcount(i & j); бит 1 ставим при нечётной чётности  
+    for (int i = 0; i < 64; i++) {  
+        uint64_t row = 0;  
+        for (int j = 0; j < 64; j++) {  
+            if (__builtin_parity((unsigned)(i & j)))  
+                row |= (1ULL << (63 - j));  
+        }  
+        walsh_table[i] = row;  
+    }  
+    walsh_ready = true;  
+}  
+  
+// --- Скремблер (M-последовательность, полином x^9 + x^5 + 1) ---  
+static uint32_t olivia_scrambler_state = 0x1FFu;  
+static inline uint8_t get_scrambler_bit() {  
+    uint32_t bit = ((olivia_scrambler_state >> 0) ^ (olivia_scrambler_state >> 4)) & 1u;  
+    olivia_scrambler_state = (olivia_scrambler_state >> 1) | (bit << 8);  
+    return (uint8_t)bit;  
+}  
+  
+// --- Грей-код (убирает многократные ошибки при соседних тонах) ---  
+static inline uint8_t to_gray(uint8_t v) { return v ^ (v >> 1); }  
+  
+// --- Накопитель блока: 3 символа ---  
+static char    block_chars[OLIVIA_BITS];  
+static uint8_t block_count = 0;  
+  
+// Подготовка сетки из 8 тонов (PIO-VFO или Si5351)  
+void prepare_olivia_frequencies(uint32_t base_hz) {  
+    OLIVIA_Base_freq = base_hz;  
+    if (!walsh_ready) olivia_build_walsh();  
+    olivia_scrambler_state = 0x1FFu;  
+    block_count = 0;  
+  
+    if (!device_SI[0]) {  
+        vfo_hardware_init(base_hz, OLIVIA_STEP_HZ);  
+        vfo_set_tone_instant(0);  
+        if (debug_flag) {  
+            Serial.print(F("[OLIVIA] PIO готов, база "));  
+            Serial.print(base_hz); Serial.print(F(" Гц, шаг "));  
+            Serial.print(OLIVIA_STEP_HZ, 3); Serial.println(F(" Гц"));  
+        }  
+    }  
+}  
+  
+// Удержание одного тона 32 мс с кормлением собаки и опросом CLI  
+static inline bool olivia_emit_tone(uint8_t tone) {  
+    vfo_set_tone_instant(tone);          // фазонепрерывный прыжок частоты  
+    uint32_t start_ms = millis();  
+    while ((millis() - start_ms) < OLIVIA_SYMBOL_MS) {  
+        if (pc_file_written || soft_restart_flag) return false; // прерывание  
+        check_serial_commands();  
+        watchdog_update();  
+        yield();  
+    }  
+    return true;  
+}  
+  
+// Передача одного блока из 3 символов (64 тона)  
+static void olivia_flush_block() {  
+    if (block_count == 0) return;  
+    if (!walsh_ready) olivia_build_walsh();  
+  
+    // Выравниваем недобор символов пробелами  
+    for (uint8_t p = block_count; p < OLIVIA_BITS; p++) block_chars[p] = ' ';  
+  
+    // Предрасчёт 64-битных векторов для каждой бит-плоскости  
+    uint64_t vec[OLIVIA_BITS];  
+    for (uint8_t p = 0; p < OLIVIA_BITS; p++) {  
+        uint8_t c   = (uint8_t)block_chars[p] & 0x7Fu; // 7-битный ASCII  
+        uint8_t idx = c & 0x3Fu;                       // 6 бит -> строка Уолша  
+        uint8_t inv = (c >> 6) & 1u;                   // 7-й бит -> инверсия  
+        vec[p] = inv ? ~walsh_table[idx] : walsh_table[idx];  
+    }  
+  
+    // 64 символьных позиции -> 64 тона  
+    for (int s = 0; s < 64; s++) {  
+        uint8_t tone = 0;  
+        for (uint8_t p = 0; p < OLIVIA_BITS; p++) {  
+            uint8_t wbit = (uint8_t)((vec[p] >> (63 - s)) & 1ULL);  
+            wbit ^= get_scrambler_bit();     // скремблирование каждой плоскости  
+            tone |= (wbit << p);  
+        }  
+        tone = to_gray(tone) & 0x07u;        // Грей-мэппинг в номер тона 0..7  
+        if (!olivia_emit_tone(tone)) { block_count = 0; return; }  
+    }  
+    block_count = 0;  
+}  
+  
+// Добавление символа в текущий блок; при заполнении — передача  
+void olivia_send_char(char c) {  
+    if (pc_file_written || soft_restart_flag) return;  
+    if (c != '\r' && c != '\n') Serial.print(c);  
+    block_chars[block_count++] = c;  
+    if (block_count >= OLIVIA_BITS) olivia_flush_block();  
+}  
+  
+// Передача строки по протоколу Olivia 8/250  
+void olivia_send_string(const char* str) {  
+    if (str == nullptr) return;  
+    if (!walsh_ready) olivia_build_walsh();  
+    olivia_scrambler_state = 0x1FFu;  
+    block_count = 0;  
+  
+    // Поднимаем выход (PIO плавно, либо Si5351)  
+    if (!device_SI[0]) {  
+        vfo_operation_set(false);  
+        vfo_set_tone_instant(0);  
+        vfo_operation_set(true);  
+    } else {  
+        VFO_TX_ON();  
+    }  
+  
+    // Преамбула — синхросимволы (пробелы)  
+    for (int i = 0; i < OLIVIA_BITS; i++) olivia_send_char(' ');  
+  
+    // Полезная нагрузка  
+    while (*str && !pc_file_written && !soft_restart_flag) {  
+        olivia_send_char(*str++);  
+    }  
+  
+    // Добиваем неполный последний блок  
+    if (block_count > 0) olivia_flush_block();  
+  
+    // Закрываем сессию  
+    if (device_SI[0]) VFO_TX_OFF();  
+    else              vfo_operation_set(false);  
+    ZERO_LED_OFF();  
+    Serial.println("");  
+}  
+  
+void olivia_send_string(String str) {  
+    olivia_send_string(str.c_str());  
 }

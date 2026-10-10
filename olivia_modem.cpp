@@ -40,17 +40,19 @@ static uint64_t walsh_table[64];
 static bool     walsh_ready = false;  
   
 static void olivia_build_walsh() {  
-    // H[i][j] = (-1)^popcount(i & j); бит 1 ставим при нечётной чётности  
+    // IFHT(δ_i)[j] = (-1)^popcount(i) * (-1)^popcount(i & j)  
+    // => бит выхода (sample<0) = parity(i) XOR parity(i & j)  
     for (int i = 0; i < 64; i++) {  
         uint64_t row = 0;  
+        uint8_t pi = __builtin_parity((unsigned)i);   // глобальный знак строки  
         for (int j = 0; j < 64; j++) {  
-            if (__builtin_parity((unsigned)(i & j)))  
+            if (__builtin_parity((unsigned)(i & j)) ^ pi)  
                 row |= (1ULL << (63 - j));  
         }  
         walsh_table[i] = row;  
     }  
     walsh_ready = true;  
-}  
+}
   
   
 // --- Грей-код (убирает многократные ошибки при соседних тонах) ---  

@@ -874,13 +874,8 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->int_penalty = VFO_INT_PENALTY;  
         b->total_metric += b->int_penalty;  
     }
-/*
-    // Мягкий штраф за работу ГУН у верхнего края диапазона  
-    if (vco_hz > 3400000000ULL) {  
-        b->total_metric += (vco_hz - 3400000000ULL) >> 4;  // ~30e6 за каждые 100 МГц сверх 3.4G  
-    }
-*/
-    // Level-пенальти: спуры хуже -30 dBc дорожают квадратично  
+
+    // повторный штраф за сильные спуры хуже -30 dBc - квадратично
     if (test.pio_frac != 0 && test.pio_int != 0) {  
         float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);  
         if (lvl_db > -30.0f) {  
@@ -2159,7 +2154,6 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     dds_accum_m2 = 0;
     m2_carry_prev = 0;
     dds_accumulator = 0;
-    restore_interrupts(ints_status);
 
     current_active_tone = tone_index;
 

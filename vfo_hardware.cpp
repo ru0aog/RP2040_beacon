@@ -40,8 +40,6 @@
 #define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов
 #define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать
 
-#define VFO_DITHER_LOOP_CYCLES   18ULL     // тактов на итерацию Core 1  
-
 #define VFO_INT_PENALTY   500000000ULL     // жёсткий запрет pio_int < 4
 
 #define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
@@ -52,7 +50,6 @@
 #define VFO_SHELF_REF_CLK_HZ   400000000ULL // опора нормировки подошвы: 400M = нулевой штраф  
 #define VFO_SPUR_HORIZON_HZ    3000000ULL   // спур ближе 3 МГц — штраф за уровень
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
-
 
 // ============================================================================
 // МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
@@ -563,70 +560,6 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
 
 
 
-
-/**  
- * @brief Единичный атомарный шаг расчёта дизеринга (эталонная Си-версия).  
- *  
- * Выполняет одну итерацию Delta-Sigma модуляции: накапливает 32-битный шаг  
- * частоты @p local_step в аккумуляторе фазы и по битам переноса формирует  
- * коррекцию делителя частоты автомата PIO. Результат атомарно записывается  
- * в регистр `clkdiv` state machine (INT в битах 31..16, FRAC8 в битах 15..8).  
- *  
- */
-static inline void __not_in_flash_func(vfo_dither_step)(uint32_t local_step, uint32_t local_int, uint32_t local_frac) {  
-    uint32_t step = local_step;  
-  
-#ifdef VFO_DITHER_RANDOMIZE  
-    int32_t r_bits = (int32_t)(vfo_xorshift32() & 0x0Fu);  
-    int32_t r_dither = (r_bits << 1) - 15;   
-    step = (uint32_t)((int32_t)step + r_dither);  
-#endif  
-  
-    int32_t total_correction = 0;  
-  
-
-    uint32_t old_acc1 = dds_accumulator;  
-    dds_accumulator += step;  
-    uint32_t carry1 = (dds_accumulator < old_acc1) ? 1 : 0;   
-  
-    uint32_t old_acc2 = dds_accum_m2;  
-    dds_accum_m2 += dds_accumulator;  
-    uint32_t carry2 = (dds_accum_m2 < old_acc2) ? 1 : 0;   
-  
-    total_correction = (int32_t)carry1 + (int32_t)carry2 - (int32_t)m2_carry_prev;  
-    m2_carry_prev = carry2;   
-  
-    int32_t current_frac;  
-    int32_t current_int = (int32_t)local_int;  
-  
-    // Дробный режим: как было — перенос идёт в FRAC-байт (+1/256 делителя)  
-    current_frac = (int32_t)local_frac + total_correction;  
-    while (current_frac > 255) {  
-        current_frac -= 256;  
-        current_int++;  
-    }  
-    while (current_frac < 0) {  
-        current_frac += 256;  
-        current_int--;  
-    }  
-  
-    lo_pio->sm[lo_sm].clkdiv = ((uint32_t)current_int << 16) | ((uint32_t)current_frac << 8);  
-}
-
-
-
-
-/**  
- * @brief Таймерный колбэк дизеринга для режима Core 0.  
- */
-static bool __not_in_flash_func(vfo_dither_callback)(struct repeating_timer *t) {
-    (void)t; 
-    vfo_dither_step(dds_step, target_pio_int, target_pio_frac8);
-    return true; 
-}
-
-
-
 /**  
  * @brief Точка входа второго ядра (Core 1): бесконечный горячий цикл дизеринга.  
  */
@@ -769,9 +702,6 @@ static uint64_t frac_spur_power_pen(uint16_t pio_int, uint8_t pio_frac) {
     if (pio_frac == 0) return 0;  
     uint64_t D_x256 = (uint64_t)pio_int * 256ULL + pio_frac;  
     uint64_t A      = (uint64_t)pio_frac * (256u - pio_frac);       // ≤16384  
-    // (A/16384)·(64/D)²·2^30  =  A·64²·256²·2^30 / (16384·D_x256²)  
-    uint64_t num = A * 4096ULL * 65536ULL;                          // A·64²·256²  
-    uint64_t den = 16384ULL * D_x256 * D_x256;  
     // сдвиг подобрать; 46 даёт ~1.6e10 на frac47/int25 и ~3e9 на frac213/int56
     uint64_t pen = ((uint64_t)A << 46) / (D_x256 * D_x256);
     return pen;  
@@ -859,13 +789,25 @@ static uint64_t vfo_pll_metric_verbose(uint64_t clk_sys_hz, uint64_t target_mhz,
         b->total_metric += b->int_penalty;  
     }
 
-    // повторный штраф за сильные спуры хуже -30 dBc - квадратично
+    // Level-пенальти: спуры хуже -30 dBc дорожают квадратично,  
+    // но с коэффициентом дальности kdist: у несущей штраф полный,  
+    // за горизонтом ФНЧ — остаточный (спур давит фильтр).  
     if (test.pio_frac != 0 && test.pio_int != 0) {  
         float lvl_db = frac_spur_level_db(test.pio_int, test.pio_frac);  
         if (lvl_db > -30.0f) {  
             float over = lvl_db + 30.0f;  
-            b->spur_power_pen += (uint64_t)(over * over) << 22;  
-            b->total_metric  += (uint64_t)(over * over) << 22;  
+            uint64_t base = (uint64_t)(over * over) << 22;  
+  
+            // Коэффициент дальности спура: 1.0 → 0.1 линейно к горизонту  
+            uint64_t off = frac_spur_min_off_hz(test.pio_int, test.pio_frac, clk_sys_hz);  
+            float kdist;  
+            if      (off == UINT64_MAX)            kdist = 1.0f;   // спура нет/на несущей  
+            else if (off >= VFO_SPUR_HORIZON_HZ)   kdist = 0.1f;   // за горизонтом — остаточный  
+            else kdist = 1.0f - 0.9f * ((float)off / (float)VFO_SPUR_HORIZON_HZ);  
+  
+            uint64_t pen = (uint64_t)(base * kdist);  
+            b->spur_power_pen += pen;  
+            b->total_metric   += pen;  
         }  
     }
 
@@ -1451,6 +1393,9 @@ static uint16_t vsel_to_mv(uint32_t vsel) {
     // vreg_voltage: VREG_VOLTAGE_0_80 == 5, шаг 50 мВ, максимум VREG_VOLTAGE_1_30 == 1300 мВ  
     return (uint16_t)(900 + (vsel - VREG_VOLTAGE_0_90) * 50);  
 }
+
+
+
 
 // === ТЕМПЕРАТУРА ЯДРА RP2040 (ADC канал 4, встроенный датчик) ===  
 // Формула из даташита RP2040: T = 27 - (V_bead - 0.706) / 0.001721  

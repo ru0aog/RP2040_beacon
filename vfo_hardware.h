@@ -6,9 +6,9 @@
 // Лимиты частотного плана
 // vfo_hardware.h  
 #define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // электрический номинал без вольтмода  
-#define VFO_CLK_SYS_MIN_HZ      100000000ULL  // нижняя граница поиска оптимума  
-#define VFO_CLK_SYS_MAX_HZ      400000000ULL  // 410 - дефайн остаётся как АБСОЛЮТНЫЙ аппаратный барьер
-#define PLL_MAX_HZ             3900000000ULL  // 3.9 - дефайн остаётся как АБСОЛЮТНЫЙ аппаратный барьер
+#define VFO_CLK_SYS_MIN_HZ       48000000ULL  // нижняя граница поиска оптимума  
+#define VFO_CLK_SYS_MAX_HZ      420000000ULL  // 420 - дефайн остаётся как АБСОЛЮТНЫЙ аппаратный барьер
+#define PLL_MAX_HZ             4300000000ULL  // 4.3 - дефайн остаётся как АБСОЛЮТНЫЙ аппаратный барьер
 #define VFO_FLASH_SCK_MAX_HZ     50000000ULL
 #define VFO_THROTTLE_HI_C   80.0f   
 #define VFO_THROTTLE_LO_C   60.0f

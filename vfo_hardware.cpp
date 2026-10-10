@@ -1114,13 +1114,51 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
     }  
 #endif
 
-    // === ЗАЩИТА ОТ ПУСТОГО СКАНА: дефолт выжил только если кандидатов не было ===  
+    // === ЗАЩИТА ОТ ПУСТОГО СКАНА: встаём на макс. доказанный flash-clk ===  
     if (n_arbit == 0) {  
+        // Ищем наивысший clk_sys <= flash-лимита с валидными делителями.  
+        // Границы VCO те же, что в основном скане (750 МГц .. flash-VCO).  
+        uint64_t fb_clk_target = vfo_effective_clk_max();   // доказанный потолок clk  
+        uint64_t best_fb_clk   = 0;  
+        PllConfig fb_pll       = best_pll;                   // стартуем с дефолта 133M  
+  
+        for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {  
+            uint64_t ref_hz = crystal_hz / refdiv;  
+            for (uint32_t p1 = 2; p1 <= 7; p1++) {  
+                for (uint32_t p2 = 1; p2 <= 7; p2++) {  
+                    if (p1 < p2) continue;  
+                    uint32_t pdiv_total = p1 * p2;  
+                    for (uint32_t fbdiv = 16; fbdiv <= 320; fbdiv++) {  
+                        uint64_t vco_hz = ref_hz * fbdiv;  
+                        if (vco_hz < 750000000ULL) continue;  
+                        if (vco_hz > vfo_effective_pll_max()) continue;  
+                        uint64_t clk_sys_hz = vco_hz / (uint64_t)pdiv_total;  
+                        if (clk_sys_hz < min_allowed_clk) continue;  
+                        if (clk_sys_hz > fb_clk_target)   continue;   // не выше доказанного  
+                        if (clk_sys_hz > best_fb_clk) {  
+                            best_fb_clk        = clk_sys_hz;  
+                            fb_pll.fbdiv       = fbdiv;  
+                            fb_pll.p1          = p1;  
+                            fb_pll.p2          = p2;  
+                            fb_pll.refdiv      = refdiv;  
+                            fb_pll.clk_sys_hz  = clk_sys_hz;  
+                            fb_pll.vsel        = (uint32_t)vsel_for(clk_sys_hz);  
+                            fb_pll.is_oc       = (clk_sys_hz > VFO_CLK_SYS_NOMINAL_HZ);  
+                        }  
+                    }  
+                }  
+            }  
+        }  
+  
 #if VFO_PLL_DEBUG  
-        Serial.printf("[PLLDBG] SCAN EMPTY — fallback to nominal 133 MHz\n");  
+        if (best_fb_clk > 0)  
+            Serial.printf("[PLLDBG] SCAN EMPTY — fallback to flash max clk=%.3f MHz\n",  
+                          best_fb_clk / 1e6);  
+        else  
+            Serial.printf("[PLLDBG] SCAN EMPTY — fallback to nominal 133 MHz\n");  
 #endif  
-        return best_pll;   // дефолт 133 МГц — и никак иначе  
-    }  
+        return (best_fb_clk > 0) ? fb_pll : best_pll;  
+    }
 
     // Если лучший найденный кандидат хуже номинала 133M/int≈9  
     // (clk·int ≈ 1.2e9 < гейта) — это означает, что гейт отсёк всё  

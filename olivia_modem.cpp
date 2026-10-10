@@ -146,7 +146,6 @@ void olivia_send_char(char c) {
 void olivia_send_string(const char* str) {  
     if (str == nullptr) return;  
     if (!walsh_ready) olivia_build_walsh();  
-    olivia_scrambler_state = 0x1FFu;  
     block_count = 0;  
   
     // Поднимаем выход (PIO плавно, либо Si5351)  

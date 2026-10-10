@@ -692,6 +692,9 @@ static void __not_in_flash_func(vfo_core1_entry)() {
         // Выделяем 4 младших бита быстрой маской 0x0F (1 такт)
         int32_t r_bits = (int32_t)(loc_rand_state & 0x0Fu); // 4-bit биты 0..3 диапазона -15..+15
         step += ((r_bits << 1) - 15); // 4-bit
+        // Дизеринг целой части (шага) в DDS — это математический инструмент, который нужен только для того, 
+        // чтобы в аккумуляторе не возникало длинных повторяющихся циклов (борьба со статическими idle-тонами Брезенхема). 
+        // Для этой задачи 3–4 бит случайного шума хватает с огромным избытком.
 
         int32_t total_correction = 0;
   
@@ -718,10 +721,13 @@ static void __not_in_flash_func(vfo_core1_entry)() {
 
         // Декорреляция FRAC-байта с рантайм-глубиной: маска выбирается  
         // по pio_int при смене тона (0x03 → ±3, 0x01 → ±1, 0x00 → off).  
-        // При mask=0 ветка исчезает в 1 тест+бранч — дешевле 5 #if-вариантов.  
-        if (l_dmask != 0u) {  
-            int32_t fr_bits = (int32_t)((loc_rand_state >> 8) & l_dmask);  
-            current_frac += (fr_bits << 1) - (int32_t)l_dmask;  
+        if (l_dmask != 0u) {    
+            // Сумма двух независимых равномерных → треугольное распределение.  
+            // Берём два разнесённых битовых поля того же xorshift-слова (биты 8.. и 16..):  
+            // они достаточно декоррелированы, второй прогон Xorshift не нужен.  
+            uint32_t r1 = (loc_rand_state >> 8)  & l_dmask;    
+            uint32_t r2 = (loc_rand_state >> 16) & l_dmask;    
+            current_frac += (int32_t)(r1 + r2) - (int32_t)l_dmask;  // мат. ожидание = 0  
         }
 
         // Компилятор гарантированно применит asrs. Если current_frac < 0 (например, -1), из целой части займется 1  
@@ -1095,17 +1101,21 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
                                                                 clk_sys_hz);
 
 
-                    // запрет и по близости спура, И по низкому знаменателю дроби  
                         bool simple_frac = false;  
                         if (test.pio_frac != 0u) {  
-                            for (uint32_t n = 2; n <= 4 && !simple_frac; n++)      // только N=2,3,4 — самые злые  
+                            // На ВЧ (малые INT) расширяем зону запрета вокруг простых дробей с 8 до 16 единиц!
+                            uint32_t danger_zone = (test.pio_int <= 14) ? 16u : 8u; 
+
+                            for (uint32_t n = 2; n <= 4 && !simple_frac; n++) {     
                                 for (uint32_t k = 1; k < n; k++) {  
                                     uint32_t anchor = (k * 256u) / n;  
                                     uint32_t d = (test.pio_frac > anchor) ? test.pio_frac - anchor  
                                                                         : anchor - test.pio_frac;  
-                                    if (d < 8u) { simple_frac = true; break; }  
+                                    if (d < danger_zone) { simple_frac = true; break; }  
                                 }  
-                        }  
+                            }
+                        }
+
                         bool frac_forbidden = (test.pio_frac != 0u) &&  
                                             ((spur_off_hz < VFO_SPUR_MIN_OFFSET_HZ) || simple_frac);
 
@@ -2123,25 +2133,29 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     if (tone_index >= VFO_IFKP_TONES_COUNT) return; 
     if (tone_index == current_active_tone) return;
 
-    uint32_t save = spin_lock_blocking(vfo_spin_lock);
-    target_pio_int   = ifkp_tones[tone_index].pio_int;
-    target_pio_frac8 = ifkp_tones[tone_index].pio_frac;
-    dds_step         = ifkp_tones[tone_index].dds_step; 
-    tone_changed     = true; 
-    spin_unlock(vfo_spin_lock, save);
-    dds_accum_m2 = 0;
-    m2_carry_prev = 0;
-    dds_accumulator = 0;
-
-    current_active_tone = tone_index;
-
-// Глубина FRAC-дизера по величине делителя: ±N единиц FRAC-байта  
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
+    target_pio_int   = ifkp_tones[tone_index].pio_int;  
+    target_pio_frac8 = ifkp_tones[tone_index].pio_frac;  
+    dds_step         = ifkp_tones[tone_index].dds_step;  
+  
+    // Маску выбираем здесь же, в атомарной сессии — чтобы Core1 прочитал  
+    // консистентный снимок (int/frac/step/mask) в одном захвате лока.  
+    // Глубина FRAC-дизера по величине делителя: ±N единиц FRAC-байта  
     // — это относительная ФМ-глубина ~mask/(256·int). На малых int  
     // (ВЧ-диапазоны) даже ±1 поднимает ближнюю юбку — выключаем.  
     if      (target_pio_int >= 40) vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 45–56)  
     else if (target_pio_int >= 20) vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–27)  
     else                           vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤14)
 
+    // Все накопители сбрасываем
+    dds_accum_m2    = 0;  
+    m2_carry_prev   = 0;  
+    dds_accumulator = 0;  
+  
+    tone_changed    = true;        // ← поднимаем флаг последним  
+    spin_unlock(vfo_spin_lock, save);  
+  
+    current_active_tone = tone_index;
 }
 
 

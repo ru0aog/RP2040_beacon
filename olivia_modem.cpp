@@ -35,7 +35,9 @@ extern uint8_t device_SI[5];
 #define OLIVIA_BITS       3        // log2(8) — бит на символ = число символов в блоке  
 #define OLIVIA_SYMBOL_MS  32       // 1000 / 31.25 = 32 мс на тон  
 static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорость = 250/8  
-  
+// A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона (инверсия БП)  
+#define OLIVIA_INVERT_TONES 0
+
 uint32_t OLIVIA_Base_freq = 3601307; // базовая частота по умолчанию  
   
 // --- Матрица Уолша-Адамара 64x64, строится рекурсивно (без хардкода/опечаток) ---  
@@ -136,11 +138,14 @@ static bool olivia_flush_block() {
         }  
     }  
   
-    // Выдаём 64 тона; модулятор fldigi применяет Грей-код к номеру тона  
+// Выдаём 64 тона; модулятор fldigi применяет Грей-код к номеру тона  
     for (int t = 0; t < 64; t++) {  
         uint8_t tone = to_gray(out[t]) & (OLIVIA_TONES - 1);  
+#if OLIVIA_INVERT_TONES  
+        tone = (uint8_t)((OLIVIA_TONES - 1) - tone);   // зеркалирование под инвертированную боковую  
+#endif  
         if (!olivia_emit_tone(tone)) { block_count = 0; return false; }  
-    }  
+    }
     block_count = 0;  
     return true;  
 }

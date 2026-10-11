@@ -82,18 +82,24 @@ void prepare_olivia_frequencies(uint32_t base_hz) {
     }  
 }  
   
-// Удержание одного тона 32 мс с кормлением собаки и опросом CLI  
+ 
+    // Абсолютный дедлайн следующего символа (мкс). Сеет его olivia_send_string.  
+static uint32_t olivia_next_deadline_us = 0;  
+    // Удержание одного тона 32 мс с кормлением собаки и опросом CLI 
 static inline bool olivia_emit_tone(uint8_t tone) {  
     vfo_set_tone_instant(tone);          // фазонепрерывный прыжок частоты  
-    uint32_t start_ms = millis();  
-    while ((millis() - start_ms) < OLIVIA_SYMBOL_MS) {  
-        if (pc_file_written || soft_restart_flag) return false; // прерывание  
-        check_serial_commands();  
+    // Жёсткое ожидание до абсолютного дедлайна — БЕЗ тяжёлого парсера в окне,  
+    // как в send_rtty_bit, чтобы бод строго держался 31.25.  
+    while ((int32_t)(micros() - olivia_next_deadline_us) < 0) {  
+        if (pc_file_written || soft_restart_flag) return false;      // прерывание  
+        if (Serial.available() > 0) { soft_restart_flag = true; return false; } // Break  
+        delayMicroseconds(20);  
         watchdog_update();  
-        yield();  
     }  
+    // Абсолютный шаг: период символа не накапливает overhead между тонами  
+    olivia_next_deadline_us += (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;   // 32 мс = 31.25 бод  
     return true;  
-}  
+}
   
 // Передача одного блока из 3 символов (64 тона)  
 static bool olivia_flush_block() {  

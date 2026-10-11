@@ -35,6 +35,7 @@ extern uint8_t device_SI[5];
 #define OLIVIA_BITS       3        // log2(8) — бит на символ = число символов в блоке  
 #define OLIVIA_SYMBOL_MS  32       // 1000 / 31.25 = 32 мс на тон  
 static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорость = 250/8  
+#define OLIVIA_PREAMBLE_BLOCKS 10   // блоков NUL-преамбулы (1 блок = OLIVIA_BITS символов)
 // A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона (инверсия БП)  
 #define OLIVIA_INVERT_TONES 0
 
@@ -177,9 +178,11 @@ void olivia_send_string(const char* str) {
         VFO_TX_ON();    
     } 
   
-    // Преамбула — idle-символы NUL (0x00): fldigi интегрирует синхронизацию  
-    // по SyncIntegLen блокам (по умолчанию 4), поэтому шлём ~6 блоков.  
-    for (int i = 0; i < OLIVIA_BITS * 6; i++) olivia_send_char((char)0);
+    // Преамбула — idle-символы NUL (0x00). fldigi интегрирует синхронизацию  
+    // по SyncIntegLen блокам, поэтому даём запас — 16 блоков idle,  
+    // чтобы приёмник гарантированно захватил фазу блока до полезного текста.  
+    for (int i = 0; i < OLIVIA_BITS * OLIVIA_PREAMBLE_BLOCKS; i++)  
+        olivia_send_char((char)0);
   
     // Полезная нагрузка  
     while (*str && !pc_file_written && !soft_restart_flag) {  

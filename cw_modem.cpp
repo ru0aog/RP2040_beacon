@@ -167,7 +167,7 @@ static void send_cw_element(bool is_dash) {
 
 // Посимвольный разбор и отправка строки в эфир
 void send_cw_string(const char* str) {
-    
+    vfo_set_narrowband(true);
     for (int i = 0; str[i] != '\0'; i++) {
         if (pc_file_written || soft_restart_flag) break;
 
@@ -213,7 +213,7 @@ void send_cw_string(const char* str) {
             }
         }
     }
-    
+    vfo_set_narrowband(false);   // возвращаем штатный дизер
     Serial.println("");
 }
 

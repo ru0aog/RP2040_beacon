@@ -101,6 +101,8 @@ PllConfig pll_overclock = { 69,  3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFA
 PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30,    true,  1 };  
 
 volatile bool clk_boosted = false;       // активация разгона
+volatile bool vfo_auto_boost = false;    // авто-разгон, вычисляется один раз на старте
+
 
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
@@ -1274,7 +1276,22 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     }
     
     PllConfig target_pll;
-    
+
+
+    // АВТО-BOOST: если flash-паспорт выше стандарта — включаем разгон на КАЖДУЮ передачу.  
+    // Термогвард в рантайме может временно сбросить clk_boosted при перегреве — это нормально.  
+    if (vfo_auto_boost && !thermal_throttled) {  
+        clk_boosted = true;  
+    }  
+  
+    if (clk_boosted) {  
+        target_pll = vfo_find_optimal_pll(base_freq_hz, vfo_effective_clk_max());  
+        pll_overclock = target_pll;  
+    }  
+    else {  
+        target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_NOMINAL_HZ);  
+    }
+
     // ========================================================================
     // АРХИТЕКТУРНЫЙ АРБИТРАЖ ЧАСТОТЫ ШИНЫ
     // Честный сквозной автотюн при каждом старте (без эффекта памяти)

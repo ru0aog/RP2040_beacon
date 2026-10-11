@@ -44,6 +44,16 @@ extern PllConfig pll_overclock;   // Активный boost-профиль ТЕ�
 extern PllConfig pll_ceiling;     // Абсолютный жесткий потолок, доказанный OCTEST
 extern volatile bool clk_boosted; 
 
+// Авто-BOOST: true, если flash-паспорт выше стандартного номинала (133 МГц / 1600 МГц VCO)  
+extern volatile bool vfo_auto_boost;  
+  
+// true, если во flash записаны частоты выше стандартных (clk_sys > 133 МГц либо VCO > 1600 МГц)  
+static inline bool vfo_flash_allows_boost(void) {  
+    return (vfo_effective_clk_max() > VFO_CLK_SYS_NOMINAL_HZ) ||  
+           (vfo_effective_pll_max() > 1600000000ULL);  
+}
+
+
 struct VfoParameters {
     uint32_t pio_int;
     uint32_t pio_frac;

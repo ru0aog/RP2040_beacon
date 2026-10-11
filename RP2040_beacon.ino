@@ -506,6 +506,15 @@ void setup() {
 
   init_si5351();       // инициализировать си5351
 
+  // Авто-BOOST: включаем разгон на каждую передачу, если flash-частоты выше стандартных  
+  vfo_auto_boost = vfo_flash_allows_boost();  
+  if (vfo_auto_boost) {  
+    Serial.printf("[BOOST] Авто-разгон ВКЛ: flash clk_sys<=%.1f МГц, VCO<=%.0f МГц (стандарт 133/1600)\n",  
+                  vfo_effective_clk_max() / 1e6, vfo_effective_pll_max() / 1e6);  
+  } else {  
+    Serial.println(F("[BOOST] Авто-разгон ВЫКЛ: flash-паспорт не выше стандартных 133 МГц."));  
+  }
+
   ZERO_LED_init();     // инициализировать WS2812B
 
   vfo_encoder_init();  // энкодер

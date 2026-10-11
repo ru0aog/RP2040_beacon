@@ -166,6 +166,7 @@ static volatile uint32_t target_pio_frac8 = 0;
 // Глубина FRAC-дизера как битовая маска ГПСЧ, выбирается по pio_int  
 // при смене тона: 0x03 → ±3, 0x01 → ±1, 0x00 → выключен.  
 static volatile uint32_t vfo_frac_dither_mask = 0x03u;
+volatile uint8_t vfo_narrowband_mode = 0;   // 0 = обычный дизер, 1 = узкая полоса (Olivia)
 
 // Глобальное состояние DDS-накопителей в ОЗУ (используется в С-ориентированных ветках)
 static volatile uint32_t dds_accumulator = 0; 
@@ -2364,7 +2365,11 @@ void vfo_encoder_poll(void) {
 
 
 
-
+void vfo_set_narrowband(bool on) {  
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
+    vfo_narrowband_mode = on ? 1u : 0u;  
+    spin_unlock(vfo_spin_lock, save);  
+}
 
 
 /**  
@@ -2389,9 +2394,15 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     // Глубина FRAC-дизера по величине делителя: ±N единиц FRAC-байта  
     // — это относительная ФМ-глубина ~mask/(256·int). На малых int  
     // (ВЧ-диапазоны) даже ±1 поднимает ближнюю юбку — выключаем.  
-    if      (target_pio_int >= 38) vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 38–56)  
-    else if (target_pio_int >= 19) vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–37)  
-    else                           vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤18)
+    if (vfo_narrowband_mode) {  
+        vfo_frac_dither_mask = 0x00u;  // Olivia: дизер выключен — чистые линии  
+    } else if (target_pio_int >= 38) {  
+        vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 38–56)  
+    } else if (target_pio_int >= 19) {  
+        vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–37)  
+    } else {  
+        vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤18)  
+    }
 
     // Все накопители сбрасываем
     dds_accum_m2    = 0;  

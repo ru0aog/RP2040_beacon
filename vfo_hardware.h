@@ -83,14 +83,22 @@ extern int pin_freq_out;
 // Прототипы с аргументами по умолчанию
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit = 0); // 0 = auto
 
-void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);
-void vfo_set_tone_instant(uint8_t tone_index);
-void vfo_operation_set(bool key_down);
+void vfo_hardware_init(unsigned int base_freq_hz, double step_hz);  
+void vfo_set_tone_instant(uint8_t tone_index);  
+void vfo_operation_set(bool key_down);  
+void vfo_set_narrowband(bool on);              // вкл/выкл режим узкой полосы (Olivia): глушит FRAC-дизер  
+extern volatile uint8_t vfo_narrowband_mode;   // 1 = дизер принудительно выключен
 void vfo_clk_boost_enter(unsigned int target_freq_hz);
-void vfo_clk_boost_exit(void);
-void vfo_clk_thermal_guard(void);     
-void vfo_find_max_stable_clock(void);
-void vfo_test_pll_extreme_shurm(void);
+
+void vfo_clk_boost_exit(void);  
+void vfo_clk_thermal_guard(void);       
+void vfo_find_max_stable_clock(void);  
+void vfo_test_pll_extreme_shurm(void);  
+  
+// Узкополосный режим: при взведённом флаге FRAC-дизер принудительно  
+// отключается (чистые дискретные тоны для Olivia MFSK вместо шумовой полки).  
+extern volatile uint8_t vfo_narrowband_mode;  
+void vfo_set_narrowband(bool on);
 
 
 // --- Энкодер перестройки частоты ---  

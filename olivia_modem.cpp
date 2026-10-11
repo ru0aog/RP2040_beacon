@@ -164,14 +164,18 @@ void olivia_send_string(const char* str) {
     if (!walsh_ready) olivia_build_walsh();  
     block_count = 0;  
   
-    // Поднимаем выход (PIO плавно, либо Si5351)  
-    if (!device_SI[0]) {  
-        vfo_operation_set(false);  
-        vfo_set_tone_instant(0);  
-        vfo_operation_set(true);  
-    } else {  
-        VFO_TX_ON();  
-    }  
+    // Узкополосный режим: отключаем FRAC-дизер на всё время TX Olivia,  
+    // чтобы 8 тонов были дискретными линиями в пределах 250 Гц.  
+    vfo_set_narrowband(true);  
+  
+    // Поднимаем выход (PIO плавно, либо Si5351)    
+    if (!device_SI[0]) {    
+        vfo_operation_set(false);    
+        vfo_set_tone_instant(0);    
+        vfo_operation_set(true);    
+    } else {    
+        VFO_TX_ON();    
+    } 
   
     // Преамбула — idle-символы NUL (0x00): fldigi интегрирует синхронизацию  
     // по SyncIntegLen блокам (по умолчанию 4), поэтому шлём ~6 блоков.  
@@ -190,11 +194,12 @@ void olivia_send_string(const char* str) {
         olivia_send_char((char)0);  
     if (block_count > 0) olivia_flush_block();  
   
-    // Закрываем сессию  
-    if (device_SI[0]) VFO_TX_OFF(); 
-    else              vfo_operation_set(false);  
-    ZERO_LED_OFF();  
-    Serial.println("");  
+// Закрываем сессию    
+    if (device_SI[0]) VFO_TX_OFF();   
+    else              vfo_operation_set(false);    
+    vfo_set_narrowband(false);   // возвращаем штатный дизер для CW/IFKP/RTTY  
+    ZERO_LED_OFF();    
+    Serial.println(""); 
 }  
   
 void olivia_send_string(String str) {  

@@ -89,19 +89,25 @@ void prepare_olivia_frequencies(uint32_t base_hz) {
     // Абсолютный дедлайн следующего символа (мкс). Сеет его olivia_send_string.  
 static uint32_t olivia_next_deadline_us = 0;  
     // Удержание одного тона 32 мс с кормлением собаки и опросом CLI 
-static inline bool olivia_emit_tone(uint8_t tone) {  
-    vfo_set_tone_instant(tone);          // фазонепрерывный прыжок частоты  
-    // Жёсткое ожидание до абсолютного дедлайна — БЕЗ тяжёлого парсера в окне,  
-    // как в send_rtty_bit, чтобы бод строго держался 31.25.  
-    while ((int32_t)(micros() - olivia_next_deadline_us) < 0) {  
-        if (pc_file_written || soft_restart_flag) return false;      // прерывание  
-        if (Serial.available() > 0) { soft_restart_flag = true; return false; } // Break  
-        delayMicroseconds(20);  
-        watchdog_update();  
-    }  
-    // Абсолютный шаг: период символа не накапливает overhead между тонами  
-    olivia_next_deadline_us += (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;   // 32 мс = 31.25 бод  
-    return true;  
+static inline bool olivia_emit_tone(uint8_t tone) {    
+    vfo_set_tone_instant(tone);          // фазонепрерывный прыжок частоты    
+    ZERO_LED_GREEN_ON();                  // зажигаем зелёный в начале символа    
+    // Момент гашения — середина символа (16 мс от дедлайна конца)  
+    uint32_t led_off_us = olivia_next_deadline_us - (uint32_t)OLIVIA_SYMBOL_MS * 500UL;    
+    bool led_half_off = false;    
+    while ((int32_t)(micros() - olivia_next_deadline_us) < 0) {    
+        if (pc_file_written || soft_restart_flag) { ZERO_LED_OFF(); return false; }      // прерывание    
+        if (Serial.available() > 0) { ZERO_LED_OFF(); soft_restart_flag = true; return false; } // Break    
+        if (!led_half_off && (int32_t)(micros() - led_off_us) >= 0) {    
+            ZERO_LED_OFF();               // гасим на середине длительности тона    
+            led_half_off = true;    
+        }    
+        delayMicroseconds(20);    
+        watchdog_update();    
+    }    
+    if (!led_half_off) ZERO_LED_OFF();    // страховка, если окно уже прошло    
+    olivia_next_deadline_us += (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;   // 32 мс = 31.25 бод    
+    return true;    
 }
   
 // Передача одного блока из 3 символов (64 тона)  

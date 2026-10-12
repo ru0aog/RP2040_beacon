@@ -256,45 +256,80 @@ void check_serial_commands() {
               }
             }
           }
-          else if (command.equalsIgnoreCase("START CW")) {
-            if (is_transmitting) {
-              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
-            } else {
-              Serial.println(F("[Система] Заявка принята. Выходим в эфир CW..."));
-              force_cw_transmission = true;
-            }
+          else if (command.equalsIgnoreCase("START CW")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t cw_hz = (my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000;  
+              if (cw_hz == 0) cw_hz = 3601000;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир CW на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(cw_hz).c_str());  
+              Serial.println(buf);  
+              force_cw_transmission = true;  
+            }  
           }
-          else if (command.equalsIgnoreCase("START RTTY")) {
-            if (is_transmitting) {
-              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
-            } else {
-              Serial.println(F("[Система] Заявка принята. Выходим в эфир RTTY..."));
-              force_rtty_transmission = true;
-            }
+          else if (command.equalsIgnoreCase("START RTTY")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t rtty_hz = strtoul(my_rtty_mark_var.c_str(), NULL, 10);  
+              if (rtty_hz == 0) rtty_hz = 3601585;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир RTTY на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(rtty_hz).c_str());  
+              Serial.println(buf);  
+              force_rtty_transmission = true;  
+            }  
           }
-          else if (command.equalsIgnoreCase("START IFKP")) {
-            if (is_transmitting) {
-              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
-            } else {
-              Serial.println(F("[Система] Заявка принята. Выходим в эфир IFKP..."));
-              force_ifkp_transmission = true;
-            }
+          else if (command.equalsIgnoreCase("START IFKP")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t ifkp_hz = strtoul(my_freq_ifkp_var.c_str(), NULL, 10);  
+              if (ifkp_hz == 0) ifkp_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир IFKP на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(ifkp_hz).c_str());  
+              Serial.println(buf);  
+              force_ifkp_transmission = true;  
+            }  
           }
-          else if (command.equalsIgnoreCase("START OLIVIA")) {
-            if (is_transmitting) {
-              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
-            } else {
-              Serial.println(F("[Система] Заявка принята. Выходим в эфир OLIVIA..."));
-              force_olivia_transmission = true;
-            }
+          else if (command.equalsIgnoreCase("START OLIVIA")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t olivia_hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10);  
+              if (olivia_hz == 0) olivia_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир OLIVIA на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(olivia_hz).c_str());  
+              Serial.println(buf);  
+              force_olivia_transmission = true;  
+            }  
           }
-          else if (command.equalsIgnoreCase("START THOR")) {
-            if (is_transmitting) {
-              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
-            } else {
-              Serial.println(F("[Система] Заявка принята. Выходим в эфир THOR..."));
-              force_thor_transmission = true;
-            }
+          else if (command.equalsIgnoreCase("START THOR")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t thor_hz = strtoul(my_freq_thor_var.c_str(), NULL, 10);  
+              if (thor_hz == 0) thor_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир THOR на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(thor_hz).c_str());  
+              Serial.println(buf);  
+              force_thor_transmission = true;  
+            }  
           }
 
           // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---
@@ -966,7 +1001,7 @@ void loop() {
           uint32_t rtty_session_duration_sec = (millis() - rtty_session_start_ms) / 1000;
           update_scheduler();
           char end_buf[128];
-          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс RTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, rtty_session_duration_sec);
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс RTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, rtty_session_duration_sec);
           Serial.println(end_buf);
         if (debug_flag) {
           // Пишем в файл на виртуальную флешку историю работы
@@ -1073,7 +1108,7 @@ void loop() {
           uint32_t ifkp_session_duration_sec = (millis() - ifkp_session_start_ms) / 1000;
           update_scheduler();
           char end_buf[128];
-          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс IFKP завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ifkp_session_duration_sec);
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс IFKP завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ifkp_session_duration_sec);
           Serial.println(end_buf);
           if (debug_flag) {
             // Пишем в файл на виртуальную флешку историю работы
@@ -1160,7 +1195,7 @@ void loop() {
           uint32_t olivia_session_duration_sec = (millis() - olivia_session_start_ms) / 1000;  
           update_scheduler();  
           char end_buf[128];  
-          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс OLIVIA завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, olivia_session_duration_sec);  
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс OLIVIA завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, olivia_session_duration_sec);  
           Serial.println(end_buf);  
           if (debug_flag) {  
             log_file_write_line("Сеанс OLIVIA завершен. Длительность: " + String(olivia_session_duration_sec) + " сек.");  
@@ -1246,7 +1281,7 @@ void loop() {
           uint32_t thor_session_duration_sec = (millis() - thor_session_start_ms) / 1000;  
           update_scheduler();  
           char end_buf[128];  
-          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс THOR завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, thor_session_duration_sec);  
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс THOR завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, thor_session_duration_sec);  
           Serial.println(end_buf);  
           if (debug_flag) {  
             log_file_write_line("Сеанс THOR завершен. Длительность: " + String(thor_session_duration_sec) + " сек.");  

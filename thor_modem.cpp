@@ -492,15 +492,28 @@ static uint32_t thor_next_deadline_us = 0;
   
 static inline bool thor_emit_tone(uint8_t tone) {  
     thor_set_tone(tone);  
+  
+    // Красный светодиод зажигается в начале каждого символа и гаснет  
+    // на середине длительности — визуальное мигание в такт передаче.  
+    ZERO_LED_RED_ON();  
+    bool led_half_off = false;  
+    uint32_t half_off_us = thor_next_deadline_us - (THOR_SYMBOL_US / 2);  
+  
     while ((int32_t)(micros() - thor_next_deadline_us) < 0) {  
-        if (pc_file_written || soft_restart_flag) return false;  
-        if (Serial.available() > 0) { soft_restart_flag = true; return false; }  
+        if (pc_file_written || soft_restart_flag) { ZERO_LED_OFF(); return false; }  
+        if (Serial.available() > 0) { soft_restart_flag = true; ZERO_LED_OFF(); return false; }  
+  
+        if (!led_half_off && (int32_t)(micros() - half_off_us) >= 0) {  
+            ZERO_LED_OFF();  
+            led_half_off = true;  
+        }  
+  
         delayMicroseconds(20);  
         watchdog_update();  
     }  
     thor_next_deadline_us += THOR_SYMBOL_US;  
     return true;  
-}  
+}
   
 static inline bool thor_send_symbol(uint8_t sym) {  
     uint8_t tone = (uint8_t)((thor_prevtone + sym + 2) % THOR_NUMTONES); // IFK+ (+2)  

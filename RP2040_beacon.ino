@@ -480,15 +480,20 @@ void check_serial_commands() {
 
 
 void setup() {
-// общие дескрипторы устройства (до любых *.begin())  
-  TinyUSBDevice.setManufacturerDescriptor("Beacon CLI Console");  
-  TinyUSBDevice.setProductDescriptor("RP2040 Beacon Modem");
+  adc_init();  
+  
+  // --- USB: общие дескрипторы устройства ДО регистрации интерфейсов ---  
+  TinyUSBDevice.setManufacturerDescriptor("RU0AOG");  
+  TinyUSBDevice.setProductDescriptor("RP2040 Beacon");  
+  // Смена серийного номера заставляет Windows перечислить устройство как НОВОЕ  
+  // и завести свежие записи портов (без ручного удаления старых).  
+  TinyUSBDevice.setSerialDescriptor("RU0AOG-BEACON-0003");   // меняйте суффикс при каждой перепрошивке  
+  
+  init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage...  
+  hayes_modem_init();                             // Второй виртуальный COM-порт...  
+  init_file_manager();  
+  init_flash_disk();
 
-  adc_init();
-  init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом
-  hayes_modem_init();                             // Второй виртуальный COM-порт: эмулятор Hayes-модема
-  init_file_manager();
-  init_flash_disk();   // инициализировать флэш-диск для Windows
 
   pinMode(PIN_USR_BUTTON, INPUT_PULLUP);          // инициализируем пин кнопки
   delay(20);                                      // Даем Pull-up надежно поднять линию до +3.3 В
@@ -497,7 +502,7 @@ void setup() {
   wd_reboot_detected = watchdog_caused_reboot(); 
 
   // запуск виртуального СОМ-порта через USB  
-  Serial.setStringDescriptor("Beacon CLI Console");   // имя первого порта  
+  Serial.setStringDescriptor("Beacon Console");   // имя первого порта (должно стоять ДО begin)  
   Serial.begin(115200);
 
   // Serial1.begin(115200, SERIAL_8N1); // Запуск аппаратного UART0 на пинах GP0 (TX) и GP1 (RX)

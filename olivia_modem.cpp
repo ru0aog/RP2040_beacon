@@ -146,134 +146,55 @@ static inline bool olivia_emit_tone(uint8_t tone) {
     return true;  
 }  
   
-// Чистое кодирование блока из 3 символов -> SPB «сырых» символов (0..7, ДО Грея).  
-// chars[0..2] — входные символы; out[0..SPB-1] — результат; contestia — режим.  
-// Возвращает SPB. НИЧЕГО не шлёт в эфир (используется и эфиром, и самотестом).  
-static uint16_t olivia_encode_block(const char* chars, uint8_t* out, bool contestia) {  
-    const uint16_t SPB      = contestia ? 32u : 64u;  
-    const uint16_t WRAP     = SPB - 1;  
-    const uint64_t SCRAMBLE = contestia ? 0xEDB88320ULL : 0xE257E6D0291574ECULL;  
-    const uint8_t  NSHIFT   = contestia ? 5u : 13u;  
-    const uint64_t* WALSH   = contestia ? walsh32 : walsh64;  
+static bool olivia_flush_block() {
+    if (block_count == 0) return true;  
   
+    // fldigi добивает блок НУЛЁМ (idle)  
+    for (uint8_t p = block_count; p < OLIVIA_BITS; p++) block_chars[p] = 0;  
+  
+    const uint16_t SPB      = mode_spb();          // 64 (Olivia) / 32 (Contestia)  
+    const uint16_t WRAP     = SPB - 1;             // CodeWrap  
+    const uint64_t SCRAMBLE = mode_scramble();  
+    const uint8_t  NSHIFT   = mode_nshift();  
+    const uint64_t* WALSH   = g_contestia ? walsh32 : walsh64;  
+  
+    static uint8_t out[64];  
     for (int t = 0; t < SPB; t++) out[t] = 0;  
   
     for (uint8_t freqBit = 0; freqBit < OLIVIA_BITS; freqBit++) {  
         uint16_t v;  
-        if (contestia) v = contestia_encode(chars[freqBit]);  
-        else           v = (uint8_t)chars[freqBit] & 0x7Fu;  
+        if (g_contestia) v = contestia_encode(block_chars[freqBit]);        // 0..63  
+        else             v = (uint8_t)block_chars[freqBit] & 0x7Fu;         // 0..127  
   
-        uint16_t idx = v & WRAP;  
-        uint8_t  inv = (v >= SPB) ? 1 : 0;  
-        uint64_t row = inv ? ~WALSH[idx] : WALSH[idx];  
+        uint16_t idx = v & WRAP;            // строка Адамара  
+        uint8_t  inv = (v >= SPB) ? 1 : 0;  // 1 => отрицательный импульс  
+        
+        uint64_t row = WALSH[idx];  
+        if (inv) {
+            if (g_contestia) {
+                // Для Контестии инвертируем только ее младшие 32 бита, 
+                // оставляя старшую половину строго в нулях!
+                row = (~row) & 0x00000000FFFFFFFFULL; 
+            } else {
+                // Для Оливии инвертируем всю 64-битную строку, как в вашем первом коде
+                row = ~row; 
+            }
+        }
   
+        // ScrambleFHT: codeBit = (freqBit*nShift + t) & CodeWrap  
         uint8_t codeBit = (uint8_t)((freqBit * NSHIFT) & WRAP);  
         for (int t = 0; t < SPB; t++) {  
-            uint8_t neg = (uint8_t)((row >> (WRAP - t)) & 1ULL);  
-            neg ^= (uint8_t)((SCRAMBLE >> codeBit) & 1ULL);  
-            if (neg) {  
-                uint8_t bit = freqBit + (uint8_t)(t % OLIVIA_BITS);  
+            uint8_t neg = (uint8_t)((row >> (WRAP - t)) & 1ULL);   // знак отсчёта FHT  
+            
+            neg ^= (uint8_t)((SCRAMBLE >> codeBit) & 1ULL);        // ^ ScramblingCode  
+            if (neg) {                                             // FHT_Buffer[t] < 0  
+                uint8_t bit = freqBit + (uint8_t)(t % OLIVIA_BITS); // (FreqBit + Rotate)  
                 if (bit >= OLIVIA_BITS) bit -= OLIVIA_BITS;  
                 out[t] |= (uint8_t)(1u << bit);  
             }  
             codeBit = (uint8_t)((codeBit + 1) & WRAP);  
         }  
     }  
-    return SPB;  
-}
-
-// Прямой FHT (как в fldigi pj_fht.h) — для раскодирования в самотесте  
-static void fht_forward(int16_t* d, int n) {  
-    for (int step = 1; step < n; step *= 2)  
-        for (int p = 0; p < n; p += 2 * step)  
-            for (int q = p; (q - p) < step; q++) {  
-                int16_t b1 = d[q], b2 = d[q + step];  
-                d[q] = (int16_t)(b2 + b1);  
-                d[q + step] = (int16_t)(b2 - b1);  
-            }  
-}  
-  
-// Раскодировать freqBit-ю бит-плоскость из массива символов out[] (зеркало DecodeCharacter).  
-// Возвращает исходное значение v (0..2*SPB-1): idx = позиция пика, +SPB если пик отрицательный.  
-static uint16_t olivia_decode_freqbit(const uint8_t* out, uint8_t freqBit, bool contestia) {  
-    const uint16_t SPB      = contestia ? 32u : 64u;  
-    const uint16_t WRAP     = SPB - 1;  
-    const uint64_t SCRAMBLE = contestia ? 0xEDB88320ULL : 0xE257E6D0291574ECULL;  
-    const uint8_t  NSHIFT   = contestia ? 5u : 13u;  
-  
-    static int16_t fht[64];  
-    uint8_t rotate  = freqBit;  
-    uint8_t codeBit = (uint8_t)((freqBit * NSHIFT) & WRAP);  
-    for (int t = 0; t < SPB; t++) {  
-        uint8_t b = (uint8_t)((out[t] >> rotate) & 1u); // 1 => отсчёт FHT был < 0  
-        int16_t val = b ? -1 : +1;  
-        if ((SCRAMBLE >> codeBit) & 1ULL) val = (int16_t)(-val); // снять скремблер  
-        fht[t] = val;  
-        codeBit = (uint8_t)((codeBit + 1) & WRAP);  
-        rotate++; if (rotate >= OLIVIA_BITS) rotate -= OLIVIA_BITS;  
-    }  
-    fht_forward(fht, SPB);  
-  
-    int16_t peak = 0; uint16_t pidx = 0;  
-    for (int i = 0; i < SPB; i++) {  
-        int16_t a = fht[i] < 0 ? (int16_t)-fht[i] : fht[i];  
-        int16_t p = peak   < 0 ? (int16_t)-peak   : peak;  
-        if (a > p) { peak = fht[i]; pidx = (uint16_t)i; }  
-    }  
-    return (peak < 0) ? (uint16_t)(pidx + SPB) : pidx;  
-}  
-  
-// Round-trip самотест: кодируем блок -> раскодируем -> сверяем. Печать в Serial.  
-void olivia_selftest(bool contestia, const char* s) {  
-    if (!walsh_ready) olivia_build_walsh();  
-    const uint16_t SPB = contestia ? 32u : 64u;  
-    static uint8_t out[64];  
-  
-    Serial.print(F("[SELFTEST] "));  
-    Serial.print(contestia ? F("CONTESTIA SPB=32  \"") : F("OLIVIA SPB=64  \""));  
-    Serial.print(s); Serial.println(F("\""));  
-  
-    int bad = 0;  
-    for (const char* p = s; ; ) {  
-        char blk[OLIVIA_BITS];  
-        int n = 0;  
-        for (; n < OLIVIA_BITS && *p; n++) blk[n] = *p++;  
-        if (n == 0) break;  
-        for (int k = n; k < OLIVIA_BITS; k++) blk[k] = 0; // добивка idle  
-  
-        olivia_encode_block(blk, out, contestia);  
-  
-        for (uint8_t fb = 0; fb < OLIVIA_BITS; fb++) {  
-            uint16_t vin  = contestia ? contestia_encode(blk[fb])  
-                                      : ((uint8_t)blk[fb] & 0x7Fu);  
-            uint16_t vout = olivia_decode_freqbit(out, fb, contestia);  
-            bool ok = (vin == vout);  
-            if (!ok) bad++;  
-            Serial.print(F("  ch='"));  
-            char c = blk[fb];  
-            Serial.print((c >= 32 && c < 127) ? c : '.');  
-            Serial.print(F("' freqBit=")); Serial.print(fb);  
-            Serial.print(F(" vin="));  Serial.print(vin);  
-            Serial.print(F(" vout=")); Serial.print(vout);  
-            Serial.println(ok ? F("  OK") : F("  <<< MISMATCH"));  
-        }  
-        if (!*p) break;  
-    }  
-    Serial.print(F("[SELFTEST] несовпадений: ")); Serial.println(bad);  
-    Serial.println(bad == 0 ? F("[SELFTEST] КОДЕР ВЕРЕН -> баг в RF/боковой/преамбуле")  
-                            : F("[SELFTEST] КОДЕР РАСХОДИТСЯ -> баг в битах кодера"));  
-}
-
-  
-// Передача одного блока из 3 символов (SPB тонов)  
-static bool olivia_flush_block() {  
-    if (block_count == 0) return true;  
-  
-    // fldigi добивает блок НУЛЁМ (idle)  
-    for (uint8_t p = block_count; p < OLIVIA_BITS; p++) block_chars[p] = 0;  
-  
-    static uint8_t out[64];  
-    uint16_t SPB = olivia_encode_block(block_chars, out, g_contestia);  
   
     // Выдаём SPB тонов; модулятор fldigi применяет Грей-код к номеру тона  
     for (int t = 0; t < SPB; t++) {  

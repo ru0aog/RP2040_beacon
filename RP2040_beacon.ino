@@ -773,7 +773,7 @@ void loop() {
   // =========================================================================
   // РЕЖИМ 0. СЕАНС СВЯЗИ CW
   // =========================================================================
-  if (( (is_time_to_transmit(2) && !is_transmitting) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
+  if (( (is_time_to_transmit(0) && !is_transmitting) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
     force_cw_transmission = false;
     is_transmitting = true;
     tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
@@ -966,7 +966,7 @@ void loop() {
   // =========================================================================
   // РЕЖИМ 2. СЕАНС СВЯЗИ IFKP
   // =========================================================================
-  if (( (is_time_to_transmit(0) && !is_transmitting) || force_ifkp_transmission) && !pc_file_written && !soft_restart_flag) {
+  if (( (is_time_to_transmit(2) && !is_transmitting) || force_ifkp_transmission) && !pc_file_written && !soft_restart_flag) {
     force_ifkp_transmission = false;
     is_transmitting = true;
     tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
@@ -1159,7 +1159,7 @@ void loop() {
 // =========================================================================  
   // РЕЖИМ 4. СЕАНС СВЯЗИ THOR 11 
   // =========================================================================  
-  if (( (is_time_to_transmit(3) && !is_transmitting) || force_thor_transmission) && !pc_file_written && !soft_restart_flag) {  
+  if (( (is_time_to_transmit(4) && !is_transmitting) || force_thor_transmission) && !pc_file_written && !soft_restart_flag) {  
     force_thor_transmission = false;  
     is_transmitting = true;  
     tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting  
@@ -1245,7 +1245,7 @@ void loop() {
   // РЕЖИМ 254. ЦЕПОЧКА
   // =========================================================================
   // Проверка запуска трехмодовой цепочки из расписания
-  if ((is_time_to_transmit(4) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
+  if ((is_time_to_transmit(254) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
        Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
        is_transmitting = true;
        tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting

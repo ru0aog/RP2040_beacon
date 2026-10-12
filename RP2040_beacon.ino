@@ -480,6 +480,10 @@ void check_serial_commands() {
 
 
 void setup() {
+// общие дескрипторы устройства (до любых *.begin())  
+  TinyUSBDevice.setManufacturerDescriptor("RU0AOG");  
+  TinyUSBDevice.setProductDescriptor("RP2040 Beacon");
+
   adc_init();
   init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом
   hayes_modem_init();                             // Второй виртуальный COM-порт: эмулятор Hayes-модема
@@ -492,7 +496,8 @@ void setup() {
 
   wd_reboot_detected = watchdog_caused_reboot(); 
 
-  // запуск виртуального СОМ-порта через USB
+  // запуск виртуального СОМ-порта через USB  
+  Serial.setStringDescriptor("Beacon CLI Console");   // имя первого порта  
   Serial.begin(115200);
 
   // Serial1.begin(115200, SERIAL_8N1); // Запуск аппаратного UART0 на пинах GP0 (TX) и GP1 (RX)

@@ -83,6 +83,7 @@ enum BeaconMode : uint8_t {
   MODE_IFKP   = 2,
   MODE_OLIVIA = 3,
   MODE_THOR   = 4,
+  MODE_CONTESTIA = 5,
   MODE_SEQ    = 254,       // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
   MODE_NONE   = 255 };
 

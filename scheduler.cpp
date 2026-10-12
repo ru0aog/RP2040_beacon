@@ -73,11 +73,11 @@ RtcType activeRtc = RTC_NONE;
 datetime_t currentTime;
 
 // Имена режимов — индекс = BeaconMode: 0=CW, 1=RTTY, 2=IFKP, 3=OLIVIA, 4=THOR  
-static const char* MODE_NAMES[] = {"CW", "RTTY", "IFKP", "OLIVIA", "THOR"};
+static const char* MODE_NAMES[] = {"CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA"};
   
 // Безопасный доступ: защита от мусора в mode (например MODE_NONE=255)  
 static const char* mode_name(uint8_t mode) {    
-  return (mode < 5) ? MODE_NAMES[mode] : (mode == MODE_SEQ ? "SEQ" : "??");    
+  return (mode < 6) ? MODE_NAMES[mode] : (mode == MODE_SEQ ? "SEQ" : "??");   
 }
 
 // Глобальные переменные для хранения текущего времени
@@ -911,13 +911,13 @@ bool is_time_to_transmit(uint8_t mode) {
                                        // флаг "передача запускается" — выставляется  
                                        // вызывающим кодом СРАЗУ при получении true  
   uint32_t cur = rtc_hour * 60UL + rtc_min;    
-  static uint32_t last_min[6] = {9999, 9999, 9999, 9999, 9999, 9999};  
+  static uint32_t last_min[7] = {9999, 9999, 9999, 9999, 9999, 9999, 9999};
   
-  // слот 0..4 = CW/RTTY/IFKP/OLIVIA/THOR, слот 5 = SEQ  
-  uint8_t slot;  
-  if (mode < 5)            slot = mode;  
-  else if (mode == MODE_SEQ) slot = 5;  
-  else return false;                         // NONE и прочий мусор  
+  // слот 0..5 = CW/RTTY/IFKP/OLIVIA/THOR/CONTESTIA, слот 6 = SEQ    
+  uint8_t slot;    
+  if (mode < 6)            slot = mode;    
+  else if (mode == MODE_SEQ) slot = 6;    
+  else return false;                         // NONE и прочий мусор
   
   if (cur == last_min[slot]) return false;   // один запуск (или пропуск) на минуту
   

@@ -427,6 +427,7 @@ static void create_default_fat_with_info_file() {
     "[RTTY_INVERT]=0\r\n"
     "[FREQ_IFKP ]=3601307\r\n"
     "[FREQ_OLIVIA]=3600000\r\n"
+    "[FREQ_CONTESTIA]=3600000\r\n"
     "[FREQ_THOR]=3600000\r\n\r\n"
     "=== МАТРИЦА РАСПИСАНИЯ ПЕРЕДАЧ ===\r\n"
     "// ДНИ: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс, 0=Каждый день\r\n"
@@ -711,7 +712,8 @@ void read_and_parse_INFO_txt() {
             if (s_mode.equalsIgnoreCase("CW"))          task.mode = MODE_CW;
             else if (s_mode.equalsIgnoreCase("RTTY"))   task.mode = MODE_RTTY;
             else if (s_mode.equalsIgnoreCase("IFKP"))   task.mode = MODE_IFKP;  
-            else if (s_mode.equalsIgnoreCase("OLIVIA")) task.mode = MODE_OLIVIA;  
+            else if (s_mode.equalsIgnoreCase("OLIVIA")) task.mode = MODE_OLIVIA;
+            else if (s_mode.equalsIgnoreCase("CONTESTIA")) task.mode = MODE_CONTESTIA;
             else if (s_mode.equalsIgnoreCase("THOR"))   task.mode = MODE_THOR;  
             else if (s_mode.equalsIgnoreCase("SEQ"))    task.mode = MODE_SEQ;  
             else continue;

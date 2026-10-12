@@ -114,6 +114,7 @@ bool force_cw_transmission   = false;   // Флаг ручного запуск�
 bool force_rtty_transmission = false;   // Флаг ручного запуска RTTY
 bool force_ifkp_transmission = false;   // Флаг ручного запуска IFKP
 bool force_olivia_transmission = false; // Флаг ручного запуска OLIVIA
+bool force_contestia_transmission = false; // Флаг ручного запуска CONTESTIA
 bool force_thor_transmission = false;   // Флаг ручного запуска THOR
 volatile bool system_ready = false;     // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
@@ -316,6 +317,23 @@ void check_serial_commands() {
               force_olivia_transmission = true;  
             }  
           }
+
+          else if (command.equalsIgnoreCase("START CONTESTIA")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t contestia_hz = strtoul(my_freq_contestia_var.c_str(), NULL, 10);  
+              if (contestia_hz == 0) contestia_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир CONTESTIA на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(contestia_hz).c_str());  
+              Serial.println(buf);  
+              force_contestia_transmission = true;  
+            }  
+          }
+
           else if (command.equalsIgnoreCase("START THOR")) {  
             if (is_transmitting) {  
               Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
@@ -1210,6 +1228,87 @@ void loop() {
       dev_TX_state = false;  
       update_scheduler();  
     }  
+  }
+
+
+// =========================================================================    
+  // РЕЖИМ. СЕАНС СВЯЗИ CONTESTIA 8/250    
+  // =========================================================================    
+  if (( (is_time_to_transmit(MODE_CONTESTIA) && !is_transmitting) || force_contestia_transmission) && !pc_file_written && !soft_restart_flag) {    
+    force_contestia_transmission = false;    
+    is_transmitting = true;    
+    tx_launching = false;    
+    
+    if (debug_flag) {    
+      char time_buf[128];    
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса CONTESTIA! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);    
+      Serial.println(time_buf);    
+    }    
+    
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {    
+    
+      uint32_t contestia_session_start_ms = millis();    
+      dev_TX_state = true;    
+      update_scheduler();    
+      SI_POWER_ON();    
+    
+      if (!pc_file_written && !soft_restart_flag) {    
+        uint32_t contestia_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz    
+                   : strtoul(my_freq_contestia_var.c_str(), NULL, 10);    
+        if (contestia_hz == 0) contestia_hz = 3601307;    
+    
+        prepare_contestia_frequencies(contestia_hz);    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          Serial.print(F("[ЭФИР_CONTESTIA] Вызов: "));    
+          contestia_send_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");    
+        }    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          Serial.print(F("[ЭФИР_CONTESTIA] Текст: "));    
+          contestia_send_string(my_text_variable + "\r\n");    
+        }    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          String telemetry = get_telemetry_string();    
+          Serial.print(F("[ЭФИР_CONTESTIA] Телем: "));    
+          contestia_send_string(telemetry);    
+        }    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          if (device_BM[0] == 1) {    
+            String telemetry = get_climate_telemetry();    
+            Serial.print(F("[ЭФИР_CONTESTIA] Телем: "));    
+            contestia_send_string(telemetry);    
+          } else {    
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));    
+          }    
+        }    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          Serial.print(F("[ЭФИР_CONTESTIA] Конец: "));    
+          contestia_send_string("OVER.\r\n\r\n");    
+        }    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          uint32_t contestia_session_duration_sec = (millis() - contestia_session_start_ms) / 1000;    
+          update_scheduler();    
+          char end_buf[128];    
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс CONTESTIA завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, contestia_session_duration_sec);    
+          Serial.println(end_buf);    
+          if (debug_flag) {    
+            log_file_write_line("Сеанс CONTESTIA завершен. Длительность: " + String(contestia_session_duration_sec) + " сек.");    
+          }    
+        }    
+      }    
+    
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА    
+      is_transmitting = false;    
+      scheduled_freq_hz = 0;    
+      SI_POWER_OFF();    
+      dev_TX_state = false;    
+      update_scheduler();    
+    }    
   }
 
 

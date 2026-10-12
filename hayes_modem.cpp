@@ -386,24 +386,42 @@ static void dial(const char* p) {
     modem_info(String(number));
   }
 
-  const char* q = number;
-  while (*q == ',') q++;
-  if (*q < '0' || *q > '9') { send_result(RES_ERROR); return; }
-  uint8_t mode = *q++ - '0';
-  if (mode >= AIR_COUNT) { send_result(RES_NO_CARRIER); return; }
-
-  uint32_t freq = 0;
-  for (; *q; q++) {
-    if (*q >= '0' && *q <= '9') {
-      freq = freq * 10 + (*q - '0');
-      if (freq > 300000000UL) { send_result(RES_ERROR); return; }
-    }
-  }
-
-  if (mode != AIR_LOOP) {
-    if (pc_file_written)  { send_result(RES_NO_CARRIER); return; }
-    if (is_transmitting)  { send_result(RES_BUSY); return; }
-    if (freq == 0) freq = default_air_freq((HayesAirMode)mode);
+// Анализ набора: наличие запятой-разделителя режима и число цифр  
+  bool   has_comma   = false;  
+  size_t digit_count = 0;  
+  for (const char* s = number; *s; s++) {  
+    if (*s == ',')                     has_comma = true;  
+    else if (*s >= '0' && *s <= '9')   digit_count++;  
+  }  
+  
+  uint8_t  mode;  
+  uint32_t freq = 0;  
+  
+  if (!has_comma && digit_count > 1) {  
+    // Набор БЕЗ указания режима (например, ATD1234567890): трактуем как  
+    // обычный "телефонный номер" -> выходим в эфир RTTY на частотах из INFO.TXT.  
+    // MARK подставит default_air_freq(AIR_RTTY) ниже (my_rtty_mark_var),  
+    // SHIFT/INVERT читаются в transmit_data_line (my_rtty_shift_var / my_rtty_invert_var).  
+    mode = AIR_RTTY;  
+    freq = 0;   // 0 -> default_air_freq(AIR_RTTY) возьмёт RTTY MARK из INFO.TXT  
+  } else {  
+    const char* q = number;  
+    while (*q == ',') q++;  
+    if (*q < '0' || *q > '9') { send_result(RES_ERROR); return; }  
+    mode = *q++ - '0';  
+    if (mode >= AIR_COUNT) { send_result(RES_NO_CARRIER); return; }  
+    for (; *q; q++) {  
+      if (*q >= '0' && *q <= '9') {  
+        freq = freq * 10 + (*q - '0');  
+        if (freq > 300000000UL) { send_result(RES_ERROR); return; }  
+      }  
+    }  
+  }  
+  
+  if (mode != AIR_LOOP) {  
+    if (pc_file_written)  { send_result(RES_NO_CARRIER); return; }  
+    if (is_transmitting)  { send_result(RES_BUSY); return; }  
+    if (freq == 0) freq = default_air_freq((HayesAirMode)mode);  
   }
 
   strncpy(last_dial, number, sizeof(last_dial));

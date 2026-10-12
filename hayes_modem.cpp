@@ -610,9 +610,9 @@ void hayes_modem_init() {
   }
 }
 
-void hayes_modem_poll() {
-  if (!modem_enabled) return;
-
+void hayes_modem_poll() {  
+  if (!modem_enabled) return;  
+  
   bool dtr = ModemSerial.dtr();  
   if (prev_dtr && !dtr) handle_dtr_drop();  
   if (!prev_dtr && dtr) {  
@@ -620,25 +620,26 @@ void hayes_modem_poll() {
     // буфер и незавершённую командную строку, чтобы спурьёзный байт от  
     // detach()/attach() не "съел" префикс AT первой команды.  
     while (ModemSerial.available() > 0) ModemSerial.read();  
-    cmd_len  = 0;  
+    cmd_len   = 0;  
     esc_count = 0;  
   }  
-  prev_dtr = dtr;
-
+  prev_dtr = dtr;  
+  
+  uint32_t now = millis();          // <-- ВОТ ЭТА СТРОКА БЫЛА ПОТЕРЯНА  
   while (ModemSerial.available() > 0) {  
     uint8_t c = (uint8_t)ModemSerial.read();  
     if (data_ready) continue;   // строка уже готова и ждёт эфира — байт отбрасываем, но USB-буфер опустошаем  
     if (data_mode) handle_data_char(c, now);  
     else           handle_command_char(c);  
     last_rx_ms = now;  
-  }
-
-  if (data_mode && esc_count > 0 && millis() - last_rx_ms >= guard_ms()) {
-    if (esc_count == 3) enter_online_command();
-    else                flush_escape_chars();
-  }
-
-  if (data_ready && call_active) transmit_data_line();
+  }  
+  
+  if (data_mode && esc_count > 0 && millis() - last_rx_ms >= guard_ms()) {  
+    if (esc_count == 3) enter_online_command();  
+    else                flush_escape_chars();  
+  }  
+  
+  if (data_ready && call_active) transmit_data_line();  
 }
 
 bool hayes_modem_is_online() {

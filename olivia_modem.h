@@ -15,5 +15,8 @@ void olivia_send_string(String str);        // перегрузка для Strin
 // Публичный API модема Contestia 8/250 (тот же движок, другой режим)  
 void contestia_send_string(const char* str);  
 void contestia_send_string(String str);  
+
+// Диагностика: round-trip кодер->декодер без выхода в эфир  
+void olivia_selftest(bool contestia, const char* s);
   
 #endif // OLIVIA_MODEM_H

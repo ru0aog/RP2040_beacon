@@ -1,75 +1,101 @@
 /**  
  * ============================================================================  
- *  olivia_modem.cpp — Модулятор Olivia 8/250 (8 тонов, полоса 250 Гц)  
+ *  olivia_modem.cpp — Модулятор Olivia 8/250 и Contestia 8/250  
  * ============================================================================  
- *  Структура блока: 3 ASCII-символа (по 7 бит) кодируются ПАРАЛЛЕЛЬНО, каждый  
- *  в свою бит-плоскость 3-битного MFSK-символа. Каждый символ раскладывается на  
- *  64-битный вектор Уолша-Адамара (6 бит -> номер строки, 7-й бит -> инверсия).  
- *  На выходе — 64 тона на блок, по 32 мс каждый (31.25 бод, шаг 31.25 Гц).  
+ *  Общий конвейер MFSK (8 тонов, полоса 250 Гц, 31.25 бод, 32 мс/тон).  
+ *  Блок = 3 символа (3 бит-плоскости). Каждый символ раскладывается на  
+ *  вектор Уолша-Адамара длиной SymbolsPerBlock (SPB), скремблируется и  
+ *  «размазывается» по бит-плоскостям (FreqBit+t)%3.  
  *  
- *  Логика кодирования соответствует fldigi MFSK_Encoder (Olivia 8/250):  
- *  маска скремблера 0xE257E6D0291574EC, nShift=13, перемежитель (FreqBit+t)%3,  
- *  знак Walsh parity(i)^parity(i&j), forward Gray-код номера тона.  
- *  Единственное физическое отличие — прямоугольная манипуляция 32 мс через  
- *  vfo_set_tone_instant() вместо перекрывающихся оконных символов fldigi  
- *  (свойство прямого синтеза на Si5351/PIO). Проверять на реальном декодере.
+ *  Различия режимов (по fldigi MFSK_Encoder / ScrambleFHT / EncodeCharacter):  
+ *    Olivia 8/250    : SPB=64, Scramble=0xE257E6D0291574EC, nShift=13,  
+ *                      CodeWrap=63, прямой 7-битный символ.  
+ *    Contestia 8/250 : SPB=32, Scramble=0xEDB88320,         nShift=5,  
+ *                      CodeWrap=31, 6-битный варикод (EncodeCharacter).  
  * ============================================================================  
  */  
   
 #include <Arduino.h>  
-#include "olivia_modem.h"
-#include "vfo_hardware.h"
-#include "si5351_driver.h"
-#include "led_blink.h"
+#include "olivia_modem.h"  
+#include "vfo_hardware.h"  
+#include "si5351_driver.h"  
+#include "led_blink.h"  
 #include <hardware/watchdog.h>  
   
-// --- Внешние зависимости проекта (как в ifkp_modem.cpp) ---  
+// --- Внешние зависимости проекта ---  
 extern volatile bool pc_file_written;  
 extern bool soft_restart_flag;  
 extern void check_serial_commands();  
 extern bool debug_flag;  
 extern uint8_t device_SI[5];  
   
-// --- Константы Olivia 8/250 ---  
+// --- Общие константы 8/250 ---  
 #define OLIVIA_TONES      8  
 #define OLIVIA_BITS       3        // log2(8) — бит на символ = число символов в блоке  
 #define OLIVIA_SYMBOL_MS  32       // 1000 / 31.25 = 32 мс на тон  
 static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорость = 250/8  
-#define OLIVIA_PREAMBLE_BLOCKS 10   // блоков NUL-преамбулы (1 блок = OLIVIA_BITS символов)
-// A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона (инверсия БП)  
-#define OLIVIA_INVERT_TONES 0
-
+#define OLIVIA_PREAMBLE_BLOCKS 10   // блоков NUL-преамбулы  
+// A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона  
+#define OLIVIA_INVERT_TONES 0  
+  
 uint32_t OLIVIA_Base_freq = 3601307; // базовая частота по умолчанию  
   
-// --- Матрица Уолша-Адамара 64x64, строится рекурсивно (без хардкода/опечаток) ---  
-static uint64_t walsh_table[64];  
+// --- Переключатель режима: false = Olivia, true = Contestia ---  
+static bool g_contestia = false;  
+  
+// Параметры текущего режима  
+static inline uint16_t mode_spb()      { return g_contestia ? 32u : 64u; }  
+static inline uint64_t mode_scramble() { return g_contestia ? 0xEDB88320ULL  
+                                                            : 0xE257E6D0291574ECULL; }  
+static inline uint8_t  mode_nshift()   { return g_contestia ? 5u : 13u; }  
+  
+// --- Матрицы Уолша-Адамара: 64x64 (Olivia) и 32x32 (Contestia) ---  
+static uint64_t walsh64[64];  
+static uint64_t walsh32[32];  
 static bool     walsh_ready = false;  
   
-static void olivia_build_walsh() {  
+static void build_walsh(uint64_t* tbl, int n) {  
     // IFHT(δ_i)[j] = (-1)^popcount(i) * (-1)^popcount(i & j)  
     // => бит выхода (sample<0) = parity(i) XOR parity(i & j)  
-    for (int i = 0; i < 64; i++) {  
+    for (int i = 0; i < n; i++) {  
         uint64_t row = 0;  
-        uint8_t pi = __builtin_parity((unsigned)i);   // глобальный знак строки  
-        for (int j = 0; j < 64; j++) {  
+        uint8_t pi = __builtin_parity((unsigned)i);  
+        for (int j = 0; j < n; j++) {  
             if (__builtin_parity((unsigned)(i & j)) ^ pi)  
-                row |= (1ULL << (63 - j));  
+                row |= (1ULL << (n - 1 - j));  
         }  
-        walsh_table[i] = row;  
+        tbl[i] = row;  
     }  
+}  
+  
+static void olivia_build_walsh() {  
+    build_walsh(walsh64, 64);  
+    build_walsh(walsh32, 32);  
     walsh_ready = true;  
-}
+}  
   
-  
-// --- Грей-код (убирает многократные ошибки при соседних тонах) ---  
+// --- Грей-код ---  
 static inline uint8_t to_gray(uint8_t v) { return v ^ (v >> 1); }  
+  
+// --- Варикод Contestia: символ -> 0..63 (из fldigi EncodeCharacter) ---  
+static uint8_t contestia_encode(char ch) {  
+    uint8_t c = (uint8_t)ch;  
+    if (c >= 'a' && c <= 'z') c += 'A' - 'a';  
+    if (c == ' ')               return 59;  
+    else if (c == '\r')         return 60;  
+    else if (c == '\n')         return 0;  
+    else if (c >= 33 && c <= 90) return c - 32;  
+    else if (c == 8)            return 61;  
+    else if (c == 0)            return 0;  
+    else                        return (uint8_t)('?' - 32); // = 31  
+}  
   
 // --- Накопитель блока: 3 символа ---  
 static char    block_chars[OLIVIA_BITS];  
 static uint8_t block_count = 0;  
   
-// Подготовка сетки из 8 тонов (PIO-VFO или Si5351)  
-void prepare_olivia_frequencies(uint32_t base_hz) {  
+// Общая подготовка сетки из 8 тонов (PIO-VFO или Si5351)  
+static void prepare_common(uint32_t base_hz, const char* tag) {  
     OLIVIA_Base_freq = base_hz;  
     if (!walsh_ready) olivia_build_walsh();  
     block_count = 0;  
@@ -78,143 +104,156 @@ void prepare_olivia_frequencies(uint32_t base_hz) {
         vfo_hardware_init(base_hz, OLIVIA_STEP_HZ);  
         vfo_set_tone_instant(0);  
         if (debug_flag) {  
-            Serial.print(F("[OLIVIA] PIO готов, база "));  
+            Serial.print('['); Serial.print(tag);  
+            Serial.print(F("] PIO готов, база "));  
             Serial.print(base_hz); Serial.print(F(" Гц, шаг "));  
             Serial.print(OLIVIA_STEP_HZ, 3); Serial.println(F(" Гц"));  
         }  
     }  
 }  
   
- 
-    // Абсолютный дедлайн следующего символа (мкс). Сеет его olivia_send_string.  
-static uint32_t olivia_next_deadline_us = 0;  
-    // Удержание одного тона 32 мс с кормлением собаки и опросом CLI 
-static inline bool olivia_emit_tone(uint8_t tone) {    
-    vfo_set_tone_instant(tone);          // фазонепрерывный прыжок частоты    
-    ZERO_LED_GREEN_ON();                  // зажигаем зелёный в начале символа    
-    // Момент гашения — середина символа (16 мс от дедлайна конца)  
-    uint32_t led_off_us = olivia_next_deadline_us - (uint32_t)OLIVIA_SYMBOL_MS * 500UL;    
-    bool led_half_off = false;    
-    while ((int32_t)(micros() - olivia_next_deadline_us) < 0) {    
-        if (pc_file_written || soft_restart_flag) { ZERO_LED_OFF(); return false; }      // прерывание    
-        if (Serial.available() > 0) { ZERO_LED_OFF(); soft_restart_flag = true; return false; } // Break    
-        if (!led_half_off && (int32_t)(micros() - led_off_us) >= 0) {    
-            ZERO_LED_OFF();               // гасим на середине длительности тона    
-            led_half_off = true;    
-        }    
-        delayMicroseconds(20);    
-        watchdog_update();    
-    }    
-    if (!led_half_off) ZERO_LED_OFF();    // страховка, если окно уже прошло    
-    olivia_next_deadline_us += (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;   // 32 мс = 31.25 бод    
-    return true;    
-}
+void prepare_olivia_frequencies(uint32_t base_hz) {  
+    g_contestia = false;  
+    prepare_common(base_hz, "OLIVIA");  
+}  
   
-// Передача одного блока из 3 символов (64 тона)  
+void prepare_contestia_frequencies(uint32_t base_hz) {  
+    g_contestia = true;  
+    prepare_common(base_hz, "CONTESTIA");  
+}  
+  
+// Абсолютный дедлайн следующего символа (мкс)  
+static uint32_t olivia_next_deadline_us = 0;  
+  
+// Удержание одного тона 32 мс с кормлением собаки и опросом CLI  
+static inline bool olivia_emit_tone(uint8_t tone) {  
+    vfo_set_tone_instant(tone);  
+    ZERO_LED_GREEN_ON();  
+    uint32_t led_off_us = olivia_next_deadline_us - (uint32_t)OLIVIA_SYMBOL_MS * 500UL;  
+    bool led_half_off = false;  
+    while ((int32_t)(micros() - olivia_next_deadline_us) < 0) {  
+        if (pc_file_written || soft_restart_flag) { ZERO_LED_OFF(); return false; }  
+        if (Serial.available() > 0) { ZERO_LED_OFF(); soft_restart_flag = true; return false; }  
+        if (!led_half_off && (int32_t)(micros() - led_off_us) >= 0) {  
+            ZERO_LED_OFF();  
+            led_half_off = true;  
+        }  
+        delayMicroseconds(20);  
+        watchdog_update();  
+    }  
+    if (!led_half_off) ZERO_LED_OFF();  
+    olivia_next_deadline_us += (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;  
+    return true;  
+}  
+  
+// Передача одного блока из 3 символов (SPB тонов)  
 static bool olivia_flush_block() {  
     if (block_count == 0) return true;  
   
-    // fldigi добивает блок НУЛЁМ (idle), а не пробелом  
+    // fldigi добивает блок НУЛЁМ (idle)  
     for (uint8_t p = block_count; p < OLIVIA_BITS; p++) block_chars[p] = 0;  
   
-    const uint64_t SCRAMBLE = 0xE257E6D0291574ECULL; // ScramblingCodeOlivia  
-    const uint8_t  NSHIFT   = 13;                     // шаг для Olivia  
+    const uint16_t SPB      = mode_spb();          // 64 (Olivia) / 32 (Contestia)  
+    const uint16_t WRAP     = SPB - 1;             // CodeWrap  
+    const uint64_t SCRAMBLE = mode_scramble();  
+    const uint8_t  NSHIFT   = mode_nshift();  
+    const uint64_t* WALSH   = g_contestia ? walsh32 : walsh64;  
   
-    uint8_t out[64];  
-    for (int t = 0; t < 64; t++) out[t] = 0;  
+    static uint8_t out[64];  
+    for (int t = 0; t < SPB; t++) out[t] = 0;  
   
-    // Для каждого из 3 символов (FreqBit) раскладываем строку Адамара,  
-    // скремблируем и «размазываем» по бит-плоскостям (FreqBit + t) % 3  
     for (uint8_t freqBit = 0; freqBit < OLIVIA_BITS; freqBit++) {  
-        uint8_t  c   = (uint8_t)block_chars[freqBit] & 0x7Fu;  
-        uint8_t  idx = c & 0x3Fu;                 // 6 бит -> строка (позиция импульса)  
-        uint8_t  inv = (c >> 6) & 1u;             // 7-й бит -> знак импульса (-1)  
-        uint64_t row = inv ? ~walsh_table[idx] : walsh_table[idx]; // 1 = отрицательный отсчёт  
+        // Символ -> значение 0..(2*SPB-1): idx = позиция импульса, inv = знак  
+        uint16_t v;  
+        if (g_contestia) v = contestia_encode(block_chars[freqBit]);        // 0..63  
+        else             v = (uint8_t)block_chars[freqBit] & 0x7Fu;         // 0..127  
   
-        // Скремблер: бит маски с индексом (freqBit*13 + t) & 63  
-        uint8_t codeBit = (uint8_t)((freqBit * NSHIFT) & 63u);  
-        for (int t = 0; t < 64; t++) {  
-            uint8_t neg = (uint8_t)((row >> (63 - t)) & 1ULL);     // знак отсчёта FHT  
-            neg ^= (uint8_t)((SCRAMBLE >> codeBit) & 1ULL);        // ScrambleFHT  
+        uint16_t idx = v & WRAP;            // строка Адамара  
+        uint8_t  inv = (v >= SPB) ? 1 : 0;  // 1 => отрицательный импульс  
+        uint64_t row = inv ? ~WALSH[idx] : WALSH[idx];  
+  
+        // ScrambleFHT: codeBit = (freqBit*nShift + t) & CodeWrap  
+        uint8_t codeBit = (uint8_t)((freqBit * NSHIFT) & WRAP);  
+        for (int t = 0; t < SPB; t++) {  
+            uint8_t neg = (uint8_t)((row >> (WRAP - t)) & 1ULL);   // знак отсчёта FHT  
+            neg ^= (uint8_t)((SCRAMBLE >> codeBit) & 1ULL);        // ^ ScramblingCode  
             if (neg) {                                             // FHT_Buffer[t] < 0  
-                uint8_t bit = freqBit + (uint8_t)(t % OLIVIA_BITS);// (FreqBit + Rotate)  
+                uint8_t bit = freqBit + (uint8_t)(t % OLIVIA_BITS); // (FreqBit + Rotate)  
                 if (bit >= OLIVIA_BITS) bit -= OLIVIA_BITS;  
                 out[t] |= (uint8_t)(1u << bit);  
             }  
-            codeBit = (uint8_t)((codeBit + 1) & 63u);  
+            codeBit = (uint8_t)((codeBit + 1) & WRAP);  
         }  
     }  
   
-// Выдаём 64 тона; модулятор fldigi применяет Грей-код к номеру тона  
-    for (int t = 0; t < 64; t++) {  
+    // Выдаём SPB тонов; модулятор fldigi применяет Грей-код к номеру тона  
+    for (int t = 0; t < SPB; t++) {  
         uint8_t tone = to_gray(out[t]) & (OLIVIA_TONES - 1);  
 #if OLIVIA_INVERT_TONES  
-        tone = (uint8_t)((OLIVIA_TONES - 1) - tone);   // зеркалирование под инвертированную боковую  
+        tone = (uint8_t)((OLIVIA_TONES - 1) - tone);  
 #endif  
         if (!olivia_emit_tone(tone)) { block_count = 0; return false; }  
-    }
+    }  
     block_count = 0;  
     return true;  
-}
+}  
   
-// Добавление символа в текущий блок; при заполнении — передача  
 void olivia_send_char(char c) {  
     if (pc_file_written || soft_restart_flag) return;  
     if (c != '\r' && c != '\n' && c != 0) Serial.print(c);  
     block_chars[block_count++] = c;  
     if (block_count >= OLIVIA_BITS) olivia_flush_block();  
-}
+}  
   
-// Передача строки по протоколу Olivia 8/250  
-void olivia_send_string(const char* str) {  
+// Общий передатчик строки (режим задаётся g_contestia через prepare_*)  
+static void send_string_common(const char* str) {  
     if (str == nullptr) return;  
     if (!walsh_ready) olivia_build_walsh();  
     block_count = 0;  
   
-    // Узкополосный режим: отключаем FRAC-дизер на всё время TX Olivia,  
-    // чтобы 8 тонов были дискретными линиями в пределах 250 Гц.  
     vfo_set_narrowband(true);  
   
-    // Поднимаем выход (PIO плавно, либо Si5351)    
-    if (!device_SI[0]) {    
-        vfo_operation_set(false);    
-        vfo_set_tone_instant(0);    
-        vfo_operation_set(true);    
-    } else {    
-        VFO_TX_ON();    
-    } 
+    if (!device_SI[0]) {  
+        vfo_operation_set(false);  
+        vfo_set_tone_instant(0);  
+        vfo_operation_set(true);  
+    } else {  
+        VFO_TX_ON();  
+    }  
   
-    // Засев абсолютного дедлайна первого символа (как в THOR),  
-    // иначе цикл удержания тона не запускается и бод не выдерживается  
-    olivia_next_deadline_us = micros() + (uint32_t)OLIVIA_SYMBOL_MS * 1000UL; 
-
-    // Преамбула — idle-символы NUL (0x00). fldigi интегрирует синхронизацию  
-    // по SyncIntegLen блокам, поэтому даём запас — 16 блоков idle,  
-    // чтобы приёмник гарантированно захватил фазу блока до полезного текста.  
+    olivia_next_deadline_us = micros() + (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;  
+  
+    // Преамбула — idle-символы NUL (0x00)  
     for (int i = 0; i < OLIVIA_BITS * OLIVIA_PREAMBLE_BLOCKS; i++)  
-        olivia_send_char((char)0);
+        olivia_send_char((char)0);  
   
     // Полезная нагрузка  
     while (*str && !pc_file_written && !soft_restart_flag) {  
         olivia_send_char(*str++);  
     }  
   
-// Добиваем неполный последний блок  
     if (block_count > 0) olivia_flush_block();  
   
-    // Постамбула — 2 блока NUL, чтобы "вымыть" конвейер декодера fldigi  
+    // Постамбула — 2 блока NUL  
     for (int i = 0; i < OLIVIA_BITS * 2 && !pc_file_written && !soft_restart_flag; i++)  
         olivia_send_char((char)0);  
     if (block_count > 0) olivia_flush_block();  
   
-// Закрываем сессию    
-    if (device_SI[0]) VFO_TX_OFF();   
-    else              vfo_operation_set(false);    
-    vfo_set_narrowband(false);   // возвращаем штатный дизер для CW/IFKP/RTTY  
-    ZERO_LED_OFF();    
-    Serial.println(""); 
+    if (device_SI[0]) VFO_TX_OFF();  
+    else              vfo_operation_set(false);  
+    vfo_set_narrowband(false);  
+    ZERO_LED_OFF();  
+    Serial.println("");  
 }  
   
-void olivia_send_string(String str) {  
-    olivia_send_string(str.c_str());  
-}
+void olivia_send_string(const char* str) {  
+    g_contestia = false;  
+    send_string_common(str);  
+}  
+void olivia_send_string(String str) { olivia_send_string(str.c_str()); }  
+  
+void contestia_send_string(const char* str) {  
+    g_contestia = true;  
+    send_string_common(str);  
+}  
+void contestia_send_string(String str) { contestia_send_string(str.c_str()); }

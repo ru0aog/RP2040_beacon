@@ -78,17 +78,19 @@ enum HayesResult : uint8_t {
   RES_BUSY       = 7
 };
 
-enum HayesAirMode : uint8_t {
-  AIR_LOOP   = 0,
-  AIR_CW     = 1,
-  AIR_RTTY   = 2,
-  AIR_IFKP   = 3,
-  AIR_OLIVIA = 4,
-  AIR_THOR   = 5,
-  AIR_COUNT
-};
-
-static const char* const AIR_MODE_NAME[AIR_COUNT] = { "LOOP", "CW", "RTTY", "IFKP", "OLIVIA", "THOR" };
+enum HayesAirMode : uint8_t {  
+  AIR_LOOP     = 0,  
+  AIR_CW       = 1,  
+  AIR_RTTY     = 2,  
+  AIR_IFKP     = 3,  
+  AIR_OLIVIA   = 4,  
+  AIR_THOR     = 5,  
+  AIR_CONTESTIA= 6,  
+  AIR_COUNT  
+};  
+  
+static const char* const AIR_MODE_NAME[AIR_COUNT] =  
+  { "LOOP", "CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA" };
 
 struct HayesProfile {
   bool    echo;          // E
@@ -193,11 +195,12 @@ static uint32_t guard_ms() {
 static uint32_t default_air_freq(HayesAirMode mode) {
   uint32_t hz = 0;
   switch (mode) {
-    case AIR_CW:     hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);     if (hz == 0) hz = 3601000; break;
-    case AIR_RTTY:   hz = strtoul(my_rtty_mark_var.c_str(), NULL, 10);   if (hz == 0) hz = 3601585; break;
-    case AIR_IFKP:   hz = strtoul(my_freq_ifkp_var.c_str(), NULL, 10);   if (hz == 0) hz = 3601307; break;
-    case AIR_OLIVIA: hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10); if (hz == 0) hz = 3601307; break;
-    case AIR_THOR:   hz = strtoul(my_freq_thor_var.c_str(), NULL, 10);   if (hz == 0) hz = 3601307; break;
+    case AIR_CW:        hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);         if (hz == 0) hz = 3601000; break;
+    case AIR_RTTY:      hz = strtoul(my_rtty_mark_var.c_str(), NULL, 10);       if (hz == 0) hz = 3601585; break;
+    case AIR_IFKP:      hz = strtoul(my_freq_ifkp_var.c_str(), NULL, 10);       if (hz == 0) hz = 3601307; break;
+    case AIR_OLIVIA:    hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10);     if (hz == 0) hz = 3601307; break;
+    case AIR_CONTESTIA: hz = strtoul(my_freq_contestia_var.c_str(), NULL, 10);  if (hz == 0) hz = 3601307; break;
+    case AIR_THOR:      hz = strtoul(my_freq_thor_var.c_str(), NULL, 10);       if (hz == 0) hz = 3601307; break;
     default: break;
   }
   return hz;
@@ -287,6 +290,10 @@ static void transmit_data_line() {
       case AIR_THOR:
         prepare_thor_frequencies(air_freq_hz);
         thor_send_string(text + "\r\n");
+        break;
+      case AIR_CONTESTIA:  
+        prepare_contestia_frequencies(air_freq_hz);  
+        contestia_send_string(text + "\r\n");  
         break;
       default:
         break;
@@ -452,7 +459,7 @@ static bool show_info(long n) {
     case 1: modem_info("000"); return true;
     case 2: return true;
     case 3: modem_info("RP2040_beacon v" + BCN_VER + " " + BCN_DAT); return true;
-    case 4: modem_info("ATD0=LOOP ATD1=CW ATD2=RTTY ATD3=IFKP ATD4=OLIVIA ATD5=THOR [,FREQ_HZ]"); return true;
+    case 4: modem_info("ATD0=LOOP ATD1=CW ATD2=RTTY ATD3=IFKP ATD4=OLIVIA ATD5=THOR ATD6=CONTESTIA [,FREQ_HZ]"); return true;
     default: return false;
   }
 }

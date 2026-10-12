@@ -94,6 +94,7 @@ String my_rtty_invert_var = "";
 String my_freq_ifkp_var   = "";
 String my_freq_olivia_var = "";
 String my_freq_thor_var   = "";
+String my_freq_contestia_var   = "";
 String my_FAT             = "";
 String scan_exclude_list  = "";
 String scan_result_data   = "";
@@ -595,7 +596,7 @@ void read_and_parse_INFO_txt() {
   // 1. Полностью обнуляем ВСЕ строки перед чтением
   my_call_variable = "";  my_qth_variable  = "";  my_text_variable = "";
   my_rtty_variable = "";  my_ifkp_variable = "";  my_cw_variable = "";    
-  my_freq_cw_var = "";    my_freq_ifkp_var = "";  my_rtty_mark_var = "";  my_freq_olivia_var = "";  my_freq_thor_var = "";
+  my_freq_cw_var = "";    my_freq_ifkp_var = "";  my_rtty_mark_var = "";  my_freq_olivia_var = "";  my_freq_thor_var = "";  my_freq_contestia_var = "";
   my_rtty_shift_var = ""; my_rtty_invert_var = ""; my_cw_wpm_var = "";    my_rtty_baud_var = "";
 
   // Обнуляем старый массив матричного расписания задач
@@ -632,21 +633,22 @@ void read_and_parse_INFO_txt() {
           }  
       
           // --- БЛОК А: Одиночные текстовые и частотные маркеры ---  
-          if      (tag == "CALL")        target_str = &my_call_variable;  
-          else if (tag == "QTH")         target_str = &my_qth_variable;  
-          else if (tag == "TEXT")        target_str = &my_text_variable;  
-          else if (tag == "CW_WPM")      target_str = &my_cw_wpm_var;  
-          else if (tag == "RTTY_SPEED")  target_str = &my_rtty_baud_var;  
-          else if (tag == "FREQ_CW")     target_str = &my_freq_cw_var;  
-          else if (tag == "RTTY_MARK")   target_str = &my_rtty_mark_var;  
-          else if (tag == "RTTY_SHIFT")  target_str = &my_rtty_shift_var;  
-          else if (tag == "RTTY_INVERT") target_str = &my_rtty_invert_var;  
-          else if (tag == "FREQ_IFKP")   target_str = &my_freq_ifkp_var;
-          else if (tag == "FREQ_OLIVIA") target_str = &my_freq_olivia_var;
-          else if (tag == "FREQ_THOR")   target_str = &my_freq_thor_var;
-          else if (tag == "CW")          target_str = &my_cw_variable;    // НОВОЕ  
-          else if (tag == "RTTY")        target_str = &my_rtty_variable;  // НОВОЕ  
-          else if (tag == "IFKP")        target_str = &my_ifkp_variable;  // НОВОЕ
+          if      (tag == "CALL")           target_str = &my_call_variable;  
+          else if (tag == "QTH")            target_str = &my_qth_variable;  
+          else if (tag == "TEXT")           target_str = &my_text_variable;  
+          else if (tag == "CW_WPM")         target_str = &my_cw_wpm_var;  
+          else if (tag == "RTTY_SPEED")     target_str = &my_rtty_baud_var;  
+          else if (tag == "FREQ_CW")        target_str = &my_freq_cw_var;  
+          else if (tag == "RTTY_MARK")      target_str = &my_rtty_mark_var;  
+          else if (tag == "RTTY_SHIFT")     target_str = &my_rtty_shift_var;  
+          else if (tag == "RTTY_INVERT")    target_str = &my_rtty_invert_var;  
+          else if (tag == "FREQ_IFKP")      target_str = &my_freq_ifkp_var;
+          else if (tag == "FREQ_OLIVIA")    target_str = &my_freq_olivia_var;
+          else if (tag == "FREQ_THOR")      target_str = &my_freq_thor_var;
+          else if (tag == "FREQ_CONTESTIA") target_str = &my_freq_contestia_var;
+          else if (tag == "CW")             target_str = &my_cw_variable;    // НОВОЕ  
+          else if (tag == "RTTY")           target_str = &my_rtty_variable;  // НОВОЕ  
+          else if (tag == "IFKP")           target_str = &my_ifkp_variable;  // НОВОЕ
 
           // --- БЛОК Б: Матрица расписания [TASK_XX] ---  
           else if (tag.startsWith("TASK_")) {  
@@ -668,7 +670,7 @@ void read_and_parse_INFO_txt() {
           char c = (char)ram_disk_buffer[j];
           if (c == '\n' || c == '\r' || c == '[') { i = j - 1; break; }
           
-          if (!is_task_line && (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || target_str == &my_freq_olivia_var || target_str == &my_freq_thor_var || 
+          if (!is_task_line && (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || target_str == &my_freq_olivia_var || target_str == &my_freq_thor_var || target_str == &my_freq_contestia_var || 
               target_str == &my_rtty_shift_var || target_str == &my_rtty_invert_var || target_str == &my_freq_cw_var)) {
             if (c >= '0' && c <= '9') value += c;
           } else {
@@ -951,9 +953,10 @@ void print_current_settings() {
   Serial.print("Частота  [RTTY_MARK ]: "); Serial.print(my_rtty_mark_var); Serial.println(" Гц");
   Serial.print("Сдвиг    [RTTY_SHIFT]: "); Serial.print(my_rtty_shift_var.length() > 0 ? my_rtty_shift_var : "170"); Serial.println(" Гц");
   Serial.print("Инверсия [RTTY_INV  ]: "); Serial.println(my_rtty_invert_var == "1" ? "ВКЛЮЧЕНА (Mark < Space)" : "ВЫКЛЮЧЕНА (Mark > Space)");
-  Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Гц");
-  Serial.print("Частота [FREQ_OLIVIA]: "); Serial.print(my_freq_olivia_var); Serial.println(" Гц");
-  Serial.print("Частота   [FREQ_THOR]: "); Serial.print(my_freq_thor_var); Serial.println(" Гц");
+  Serial.print("Частота     [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Гц");
+  Serial.print("Частота    [FREQ_OLIVIA]: "); Serial.print(my_freq_olivia_var); Serial.println(" Гц");
+  Serial.print("Частота [FREQ_CONTESTIA]: "); Serial.print(my_freq_contestia_var); Serial.println(" Гц");
+  Serial.print("Частота      [FREQ_THOR]: "); Serial.print(my_freq_thor_var); Serial.println(" Гц");
 
   // Вывод аппаратной конфигурации пинов из SET.TXT
   Serial.println("--- Аппаратная конфигурация (SET.TXT) ---");

@@ -481,8 +481,8 @@ void check_serial_commands() {
 
 void setup() {
 // общие дескрипторы устройства (до любых *.begin())  
-  TinyUSBDevice.setManufacturerDescriptor("RU0AOG");  
-  TinyUSBDevice.setProductDescriptor("RP2040 Beacon");
+  TinyUSBDevice.setManufacturerDescriptor("Beacon CLI Console");  
+  TinyUSBDevice.setProductDescriptor("RP2040 Beacon Modem");
 
   adc_init();
   init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом

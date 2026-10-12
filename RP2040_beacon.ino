@@ -334,13 +334,6 @@ void check_serial_commands() {
             }  
           }
 
-          else if (command.equalsIgnoreCase("TEST CONTESTIA")) {  
-              olivia_selftest(true,  "CQ CQ DE RU0AOG");  
-          }  
-          else if (command.equalsIgnoreCase("TEST OLIVIA")) {  
-              olivia_selftest(false, "CQ CQ DE RU0AOG");  
-          }
-
 
           else if (command.equalsIgnoreCase("START THOR")) {  
             if (is_transmitting) {  

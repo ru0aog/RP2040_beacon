@@ -67,6 +67,7 @@
 #include "rtty_modem.h"
 #include "ifkp_modem.h"
 #include "olivia_modem.h"
+#include "thor_modem.h"
 #include "bme280.h"
 #include "lcd.h"
 #include "led_blink.h"
@@ -102,11 +103,12 @@ String device_AH_name = "AHT20  Гигрометр";
 String device_AT_name = "EEPROM AT24C";
 String device_DL_name = "дисплей LCD1602/1604";
 
-bool force_cw_transmission   = false; // Флаг ручного запуска CW
-bool force_rtty_transmission = false; // Флаг ручного запуска RTTY
-bool force_ifkp_transmission = false; // Флаг ручного запуска IFKP
+bool force_cw_transmission   = false;   // Флаг ручного запуска CW
+bool force_rtty_transmission = false;   // Флаг ручного запуска RTTY
+bool force_ifkp_transmission = false;   // Флаг ручного запуска IFKP
 bool force_olivia_transmission = false; // Флаг ручного запуска OLIVIA
-volatile bool system_ready = false;   // Флаг готовности: setup() полностью отработал, баннер напечатан 
+bool force_thor_transmission = false;   // Флаг ручного запуска THOR
+volatile bool system_ready = false;     // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 extern volatile bool tx_launching; 
 extern PllConfig pll_overclock;   // из vfo_hardware.cpp
@@ -275,10 +277,19 @@ void check_serial_commands() {
             if (is_transmitting) {
               Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
             } else {
-              Serial.println(F("[Система] Заявка принята. Выходим в эфир CW..."));
+              Serial.println(F("[Система] Заявка принята. Выходим в эфир OLIVIA..."));
               force_olivia_transmission = true;
             }
           }
+          else if (command.equalsIgnoreCase("START THOR")) {
+            if (is_transmitting) {
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));
+            } else {
+              Serial.println(F("[Система] Заявка принята. Выходим в эфир THOR..."));
+              force_thor_transmission = true;
+            }
+          }
+
           // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---
           else if (command.equalsIgnoreCase("clear log")) {
             if (is_transmitting) {
@@ -758,8 +769,202 @@ void loop() {
   // Если за время проверки команд взлетел флаг рестарта — выходим
   if (soft_restart_flag || pc_file_written) return;
 
+
   // =========================================================================
-  // РЕЖИМ 0. СЕАНС СВЯЗИ IFKP
+  // РЕЖИМ 0. СЕАНС СВЯЗИ CW
+  // =========================================================================
+  if (( (is_time_to_transmit(2) && !is_transmitting) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
+    force_cw_transmission = false;
+    is_transmitting = true;
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
+    
+    if (debug_flag) {  
+      char time_buf[128];
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса CW! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
+      Serial.println(time_buf);
+    }
+    
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
+      
+      // Засекаем точное время старта сеанса в эфире
+      uint32_t cw_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
+      SI_POWER_ON();
+      
+      if (!pc_file_written && !soft_restart_flag) {
+        uint32_t cw_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz  
+                 : ((my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000);    // приоритет отдать частоте задачи по расписанию
+        
+        prepare_cw_frequency(cw_hz);
+        if (debug_flag) {
+          Serial.print(F("[Скорость] ")); Serial.print(1200 / CW_DOT_TIME_MS); Serial.print(F(" WPM, "));
+          Serial.print(F("длительность точки ")); Serial.print(CW_DOT_TIME_MS); Serial.println(F(" мс"));
+        }
+        
+        // ШАГ 1: Передача позывного и локатора
+        if (!pc_file_written && !soft_restart_flag) {
+          Serial.print(F("[ЭФИР_CW] Вызов: "));
+          send_cw_string("VVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " ");
+        }
+        
+        // ШАГ 2: Передача основного текста
+        if (!pc_file_written && !soft_restart_flag) {
+          Serial.print(F("[ЭФИР_CW] Текст: "));
+          send_cw_string(my_text_variable + " ");
+        }
+        
+        // ШАГ 3: Передача первой телеметрии
+        if (!pc_file_written && !soft_restart_flag) {
+          String telemetry = get_telemetry_string();
+          Serial.print(F("[ЭФИР_CW] Телем: "));
+          send_cw_string(telemetry);
+        }
+        
+        // ШАГ 4: Передача климатической телеметрии
+        if (!pc_file_written && !soft_restart_flag) {
+          if (device_BM[0] == 1) {
+            String telemetry = get_climate_telemetry();
+            Serial.print(F("[ЭФИР_CW] Телем: "));
+            send_cw_string(telemetry);
+          }
+          else {
+            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
+          }
+        }
+        
+        // ШАГ 5: Завершение передачи
+        if (!pc_file_written && !soft_restart_flag) {
+          Serial.print(F("[ЭФИР_CW] Конец: "));
+          send_cw_string("OVER.");
+        }
+        
+        // Считаем, сколько полных секунд длился сеанс
+        uint32_t cw_session_duration_sec = (millis() - cw_session_start_ms) / 1000;
+        update_scheduler();
+        char end_buf[128];
+        snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс CW завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, cw_session_duration_sec);
+        Serial.println(end_buf);
+
+        if (debug_flag) {
+          // Пишем в файл на виртуальную флешку историю работы
+          log_file_write_line("Сеанс CW завершен.   Длительность: " + String(cw_session_duration_sec) + " сек.");
+        }
+      } 
+      
+      // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
+      is_transmitting = false;
+      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
+      SI_POWER_OFF();
+      dev_TX_state = false;
+      update_scheduler(); // Переключаем планировщик на следующий интервал времени
+    } 
+  }
+
+  // =========================================================================
+  // РЕЖИМ 1. СЕАНС СВЯЗИ RTTY
+  // =========================================================================
+  if (( (is_time_to_transmit(1) && !is_transmitting) || force_rtty_transmission) && !pc_file_written && !soft_restart_flag) {
+    force_rtty_transmission = false;
+    is_transmitting = true;
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
+    
+    if (debug_flag) {
+      char time_buf[128];
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса RTTY! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
+      Serial.println(time_buf);
+    }
+    
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
+      
+      // Засекаем точное время старта сеанса
+      uint32_t rtty_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
+      SI_POWER_ON();
+      
+      if (!pc_file_written && !soft_restart_flag) {
+        // --- НОВАЯ КОРРЕКТИРОВКА РАСЧЕТА ЧАСТОТ RTTY ---
+        uint32_t rtty_mark_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz    // приоритет отдать частоте задачи по расписанию
+                        : strtoul(my_rtty_mark_var.c_str(), NULL, 10);
+        if (rtty_mark_hz == 0)  rtty_mark_hz = 3601585; // Дефолтная частота MARK
+
+        uint32_t rtty_shift_hz = strtoul(my_rtty_shift_var.c_str(), NULL, 10);
+        if (rtty_shift_hz == 0) rtty_shift_hz = 170;    // Дефолтный сдвиг 170 Гц
+
+        bool rtty_invert = (my_rtty_invert_var == "1"); // Флаг инверсии
+        
+        // Вызов обновленной функции модема
+        prepare_rtty_frequencies(rtty_mark_hz, rtty_shift_hz, rtty_invert);
+        
+        if (debug_flag) {
+          Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.print(F(" БОД, "));
+          Serial.print(F("длительность бита ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));
+        }
+        
+        // ШАГ 1: RTTY передача позывного и локатора
+        if (!pc_file_written && !soft_restart_flag) {
+          Serial.print(F("[ЭФИР_RTTY] Вызов: "));
+          send_rtty_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");
+        }
+        
+        // ШАГ 2: RTTY передача основного текста
+        if (!pc_file_written && !soft_restart_flag) {
+          Serial.print(F("[ЭФИР_RTTY] Текст: "));
+          send_rtty_string(my_text_variable + " ");
+        }
+        
+        // ШАГ 3: RTTY передача первой телеметрии
+        if (!pc_file_written && !soft_restart_flag) {
+          String telemetry = get_telemetry_string();
+          Serial.print(F("[ЭФИР_RTTY] Телем: "));
+          send_rtty_string(telemetry);
+        }
+
+        // ШАГ 4: Передача климатической телеметрии
+        if (!pc_file_written && !soft_restart_flag) {
+          if (device_BM[0] == 1) {
+            String telemetry = get_climate_telemetry();
+          Serial.print(F("[ЭФИР_RTTY] Телем: "));
+            send_rtty_string(telemetry);
+          }
+          else {
+            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
+          }
+        }
+        
+        // ШАГ 5: RTTY завершение передачи
+        if (!pc_file_written && !soft_restart_flag) {
+          Serial.print(F("[ЭФИР_RTTY] Конец: "));
+          send_rtty_string("OVER.\r\n\r\n");
+        }
+        
+        // Строка лога выводится СТРОГО при штатном завершении сеанса
+        if (!pc_file_written && !soft_restart_flag) {
+          uint32_t rtty_session_duration_sec = (millis() - rtty_session_start_ms) / 1000;
+          update_scheduler();
+          char end_buf[128];
+          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс RTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, rtty_session_duration_sec);
+          Serial.println(end_buf);
+        if (debug_flag) {
+          // Пишем в файл на виртуальную флешку историю работы
+          log_file_write_line("Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
+          }
+        }
+      } 
+      
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА
+      is_transmitting = false;
+      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
+      SI_POWER_OFF();
+      dev_TX_state = false;
+      update_scheduler(); 
+    } 
+  }
+
+
+  // =========================================================================
+  // РЕЖИМ 2. СЕАНС СВЯЗИ IFKP
   // =========================================================================
   if (( (is_time_to_transmit(0) && !is_transmitting) || force_ifkp_transmission) && !pc_file_written && !soft_restart_flag) {
     force_ifkp_transmission = false;
@@ -865,203 +1070,6 @@ void loop() {
   }
 
 
-
-  // =========================================================================
-  // РЕЖИМ 1. СЕАНС СВЯЗИ RTTY
-  // =========================================================================
-  if (( (is_time_to_transmit(1) && !is_transmitting) || force_rtty_transmission) && !pc_file_written && !soft_restart_flag) {
-    force_rtty_transmission = false;
-    is_transmitting = true;
-    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
-    
-    if (debug_flag) {
-      char time_buf[128];
-      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса RTTY! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
-      Serial.println(time_buf);
-    }
-    
-    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
-      
-      // Засекаем точное время старта сеанса
-      uint32_t rtty_session_start_ms = millis();
-      dev_TX_state = true;
-      update_scheduler();
-      SI_POWER_ON();
-      
-      if (!pc_file_written && !soft_restart_flag) {
-        // --- НОВАЯ КОРРЕКТИРОВКА РАСЧЕТА ЧАСТОТ RTTY ---
-        uint32_t rtty_mark_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz    // приоритет отдать частоте задачи по расписанию
-                        : strtoul(my_rtty_mark_var.c_str(), NULL, 10);
-        if (rtty_mark_hz == 0)  rtty_mark_hz = 3601585; // Дефолтная частота MARK
-
-        uint32_t rtty_shift_hz = strtoul(my_rtty_shift_var.c_str(), NULL, 10);
-        if (rtty_shift_hz == 0) rtty_shift_hz = 170;    // Дефолтный сдвиг 170 Гц
-
-        bool rtty_invert = (my_rtty_invert_var == "1"); // Флаг инверсии
-        
-        // Вызов обновленной функции модема
-        prepare_rtty_frequencies(rtty_mark_hz, rtty_shift_hz, rtty_invert);
-        
-        if (debug_flag) {
-          Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.print(F(" БОД, "));
-          Serial.print(F("длительность бита ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));
-        }
-        
-        // ШАГ 1: RTTY передача позывного и локатора
-        if (!pc_file_written && !soft_restart_flag) {
-          Serial.print(F("[ЭФИР_RTTY] Вызов: "));
-          send_rtty_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");
-        }
-        
-        // ШАГ 2: RTTY передача основного текста
-        if (!pc_file_written && !soft_restart_flag) {
-          Serial.print(F("[ЭФИР_RTTY] Текст: "));
-          send_rtty_string(my_text_variable + " ");
-        }
-        
-        // ШАГ 3: RTTY передача первой телеметрии
-        if (!pc_file_written && !soft_restart_flag) {
-          String telemetry = get_telemetry_string();
-          Serial.print(F("[ЭФИР_RTTY] Телем: "));
-          send_rtty_string(telemetry);
-        }
-
-        // ШАГ 4: Передача климатической телеметрии
-        if (!pc_file_written && !soft_restart_flag) {
-          if (device_BM[0] == 1) {
-            String telemetry = get_climate_telemetry();
-          Serial.print(F("[ЭФИР_RTTY] Телем: "));
-            send_rtty_string(telemetry);
-          }
-          else {
-            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
-          }
-        }
-        
-        // ШАГ 5: RTTY завершение передачи
-        if (!pc_file_written && !soft_restart_flag) {
-          Serial.print(F("[ЭФИР_RTTY] Конец: "));
-          send_rtty_string("OVER.\r\n\r\n");
-        }
-        
-        // Строка лога выводится СТРОГО при штатном завершении сеанса
-        if (!pc_file_written && !soft_restart_flag) {
-          uint32_t rtty_session_duration_sec = (millis() - rtty_session_start_ms) / 1000;
-          update_scheduler();
-          char end_buf[128];
-          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс RTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, rtty_session_duration_sec);
-          Serial.println(end_buf);
-        if (debug_flag) {
-          // Пишем в файл на виртуальную флешку историю работы
-          log_file_write_line("Сеанс RTTY завершен. Длительность: " + String(rtty_session_duration_sec) + " сек.");
-          }
-        }
-      } 
-      
-      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА
-      is_transmitting = false;
-      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
-      SI_POWER_OFF();
-      dev_TX_state = false;
-      update_scheduler(); 
-    } 
-  }
-
-
-
-
-  // =========================================================================
-  // РЕЖИМ 2. СЕАНС СВЯЗИ CW
-  // =========================================================================
-  if (( (is_time_to_transmit(2) && !is_transmitting) || force_cw_transmission) && !pc_file_written && !soft_restart_flag) {
-    force_cw_transmission = false;
-    is_transmitting = true;
-    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
-    
-    if (debug_flag) {  
-      char time_buf[128];
-      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса CW! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);
-      Serial.println(time_buf);
-    }
-    
-    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
-      
-      // Засекаем точное время старта сеанса в эфире
-      uint32_t cw_session_start_ms = millis();
-      dev_TX_state = true;
-      update_scheduler();
-      SI_POWER_ON();
-      
-      if (!pc_file_written && !soft_restart_flag) {
-        uint32_t cw_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz  
-                 : ((my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000);    // приоритет отдать частоте задачи по расписанию
-        
-        prepare_cw_frequency(cw_hz);
-        if (debug_flag) {
-          Serial.print(F("[Скорость] ")); Serial.print(1200 / CW_DOT_TIME_MS); Serial.print(F(" WPM, "));
-          Serial.print(F("длительность точки ")); Serial.print(CW_DOT_TIME_MS); Serial.println(F(" мс"));
-        }
-        
-        // ШАГ 1: Передача позывного и локатора
-        if (!pc_file_written && !soft_restart_flag) {
-          Serial.print(F("[ЭФИР_CW] Вызов: "));
-          send_cw_string("VVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " ");
-        }
-        
-        // ШАГ 2: Передача основного текста
-        if (!pc_file_written && !soft_restart_flag) {
-          Serial.print(F("[ЭФИР_CW] Текст: "));
-          send_cw_string(my_text_variable + " ");
-        }
-        
-        // ШАГ 3: Передача первой телеметрии
-        if (!pc_file_written && !soft_restart_flag) {
-          String telemetry = get_telemetry_string();
-          Serial.print(F("[ЭФИР_CW] Телем: "));
-          send_cw_string(telemetry);
-        }
-        
-        // ШАГ 4: Передача климатической телеметрии
-        if (!pc_file_written && !soft_restart_flag) {
-          if (device_BM[0] == 1) {
-            String telemetry = get_climate_telemetry();
-            Serial.print(F("[ЭФИР_CW] Телем: "));
-            send_cw_string(telemetry);
-          }
-          else {
-            Serial.println(F("[Система] отустствует климатический модуль. Погодная телеметрия не передаётся"));
-          }
-        }
-        
-        // ШАГ 5: Завершение передачи
-        if (!pc_file_written && !soft_restart_flag) {
-          Serial.print(F("[ЭФИР_CW] Конец: "));
-          send_cw_string("OVER.");
-        }
-        
-        // Считаем, сколько полных секунд длился сеанс
-        uint32_t cw_session_duration_sec = (millis() - cw_session_start_ms) / 1000;
-        update_scheduler();
-        char end_buf[128];
-        snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс CW завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, cw_session_duration_sec);
-        Serial.println(end_buf);
-
-        if (debug_flag) {
-          // Пишем в файл на виртуальную флешку историю работы
-          log_file_write_line("Сеанс CW завершен.   Длительность: " + String(cw_session_duration_sec) + " сек.");
-        }
-      } 
-      
-      // БЛОК ВЫХОДА ИЗ СЕАНСА - выполняется всегда: и при успехе, и при экстренном прерывании
-      is_transmitting = false;
-      scheduled_freq_hz = 0;  // обнулить частоту, чтобы не выдать частоту расписания по прямой команде пользователя
-      SI_POWER_OFF();
-      dev_TX_state = false;
-      update_scheduler(); // Переключаем планировщик на следующий интервал времени
-    } 
-  }
-
-
 // =========================================================================  
   // РЕЖИМ 3. СЕАНС СВЯЗИ OLIVIA 8/250  
   // =========================================================================  
@@ -1148,8 +1156,93 @@ void loop() {
   }
 
 
+// =========================================================================  
+  // РЕЖИМ 4. СЕАНС СВЯЗИ THOR 11 
+  // =========================================================================  
+  if (( (is_time_to_transmit(3) && !is_transmitting) || force_thor_transmission) && !pc_file_written && !soft_restart_flag) {  
+    force_thor_transmission = false;  
+    is_transmitting = true;  
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting  
+  
+    if (debug_flag) {  
+      char time_buf[128];  
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса THOR! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);  
+      Serial.println(time_buf);  
+    }  
+  
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
+  
+      uint32_t thor_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
+      SI_POWER_ON();
+  
+      if (!pc_file_written && !soft_restart_flag) {
+        uint32_t thor_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz           // приоритет частоте из расписания  
+                   : strtoul(my_freq_thor_var.c_str(), NULL, 10);  
+        if (thor_hz == 0) thor_hz = 3601307;  
+  
+        prepare_thor_frequencies(thor_hz);  
+  
+        // THOR: позывной и локатор  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_THOR] Вызов: "));  
+          thor_send_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");  
+        }  
+  
+        // THOR: основной текст  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_THOR] Текст: "));  
+          thor_send_string(my_text_variable + "\r\n");  
+        }  
+  
+        // THOR: первая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();  
+          Serial.print(F("[ЭФИР_THOR] Телем: "));  
+          thor_send_string(telemetry);  
+        }  
+  
+        // THOR: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            String telemetry = get_climate_telemetry();  
+            Serial.print(F("[ЭФИР_THOR] Телем: "));  
+            thor_send_string(telemetry);  
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+  
+        // THOR: завершение  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_THOR] Конец: "));  
+          thor_send_string("OVER.\r\n\r\n");  
+        }  
+  
+        if (!pc_file_written && !soft_restart_flag) {  
+          uint32_t thor_session_duration_sec = (millis() - thor_session_start_ms) / 1000;  
+          update_scheduler();  
+          char end_buf[128];  
+          snprintf(end_buf, sizeof(end_buf), "[Система] : %02d:%02d:%02d - Сеанс THOR завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, thor_session_duration_sec);  
+          Serial.println(end_buf);  
+          if (debug_flag) {  
+            log_file_write_line("Сеанс THOR завершен. Длительность: " + String(thor_session_duration_sec) + " сек.");  
+          }  
+        }  
+      }  
+  
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА  
+      is_transmitting = false;  
+      scheduled_freq_hz = 0;  
+      SI_POWER_OFF();  
+      dev_TX_state = false;  
+      update_scheduler();  
+    }  
+  }
+
   // =========================================================================
-  // РЕЖИМ 4. ЦЕПОЧКА
+  // РЕЖИМ 254. ЦЕПОЧКА
   // =========================================================================
   // Проверка запуска трехмодовой цепочки из расписания
   if ((is_time_to_transmit(4) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {

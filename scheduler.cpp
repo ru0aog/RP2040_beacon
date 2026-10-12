@@ -72,12 +72,12 @@ RtcType activeRtc = RTC_NONE;
 
 datetime_t currentTime;
 
-// Имена режимов — соответствуют enum BeaconMode: 0=IFKP, 1=RTTY, 2=CW, 3=OLIVIA, 4=SEQ  
-static const char* MODE_NAMES[] = {"IFKP", "RTTY", "CW", "OLIVIA", "SEQ"};  
+// Имена режимов — индекс = BeaconMode: 0=CW, 1=RTTY, 2=IFKP, 3=OLIVIA, 4=THOR  
+static const char* MODE_NAMES[] = {"CW", "RTTY", "IFKP", "OLIVIA", "THOR"};
   
 // Безопасный доступ: защита от мусора в mode (например MODE_NONE=255)  
-static const char* mode_name(uint8_t mode) {  
-  return (mode <= MODE_SEQ) ? MODE_NAMES[mode] : "??";  
+static const char* mode_name(uint8_t mode) {    
+  return (mode < 5) ? MODE_NAMES[mode] : (mode == MODE_SEQ ? "SEQ" : "??");    
 }
 
 // Глобальные переменные для хранения текущего времени
@@ -910,11 +910,16 @@ bool is_time_to_transmit(uint8_t mode) {
   extern volatile bool tx_launching;   // Объявлено как extern для явного связывания
                                        // флаг "передача запускается" — выставляется  
                                        // вызывающим кодом СРАЗУ при получении true  
-  uint32_t cur = rtc_hour * 60UL + rtc_min;  
-  static uint32_t last_min[5] = {9999, 9999, 9999, 9999, 9999};
+  uint32_t cur = rtc_hour * 60UL + rtc_min;    
+  static uint32_t last_min[6] = {9999, 9999, 9999, 9999, 9999, 9999};  
   
-  if (mode > 5) return false;  
-  if (cur == last_min[mode]) return false;   // один запуск (или пропуск) на минуту  
+  // слот 0..4 = CW/RTTY/IFKP/OLIVIA/THOR, слот 5 = SEQ  
+  uint8_t slot;  
+  if (mode < 5)            slot = mode;  
+  else if (mode == MODE_SEQ) slot = 5;  
+  else return false;                         // NONE и прочий мусор  
+  
+  if (cur == last_min[slot]) return false;   // один запуск (или пропуск) на минуту
   
   // Проверка занятости ДО перебора задач — закрывает окно гонки  
   // между опросами разных режимов и исключает спам лога при hit.  
@@ -942,13 +947,13 @@ bool is_time_to_transmit(uint8_t mode) {
     // Ветка пропуска при занятости устройства или предпусковом состоянии
     if (is_transmitting || tx_launching) {  
       Serial.printf("[Планировщик] Задача %02d: устройство занято, сеанс пропущен\n", i + 1);  
-      last_min[mode] = cur;   // фиксируем пропуск: без спама и без запоздалого  
+      last_min[slot] = cur;   // фиксируем пропуск: без спама и без запоздалого  
       return false;           // запуска в той же минуте после освобождения шины  
     }  
   
     Serial.printf("[Планировщик] Задача %02d: запуск %s в %02d:%02d\n",  
                   i + 1, mode_name(mode), rtc_hour, rtc_min);  
-    last_min[mode] = cur;  
+    last_min[slot] = cur;  
     scheduled_freq_hz = beacon_schedule[i].freq_hz;   // частота из задачи  
     tx_launching = true;  // Атомарно занимаем шину перед выходом из планировщика
     return true;  

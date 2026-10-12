@@ -93,6 +93,7 @@ String my_rtty_shift_var  = "";
 String my_rtty_invert_var = "";
 String my_freq_ifkp_var   = "";
 String my_freq_olivia_var = "";
+String my_freq_thor_var   = "";
 String my_FAT             = "";
 String scan_exclude_list  = "";
 String scan_result_data   = "";
@@ -424,7 +425,8 @@ static void create_default_fat_with_info_file() {
     "[RTTY_SHIFT]=170\r\n"
     "[RTTY_INVERT]=0\r\n"
     "[FREQ_IFKP ]=3601307\r\n"
-    "[FREQ_OLIVIA]=3600000\r\n\r\n"
+    "[FREQ_OLIVIA]=3600000\r\n"
+    "[FREQ_THOR]=3600000\r\n\r\n"
     "=== МАТРИЦА РАСПИСАНИЯ ПЕРЕДАЧ ===\r\n"
     "// ДНИ: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс, 0=Каждый день\r\n"
     "// МОДЫ: CW, RTTY, IFKP, SEQ (Сквозной цикл CW->RTTY->IFKP)\r\n"
@@ -593,7 +595,7 @@ void read_and_parse_INFO_txt() {
   // 1. Полностью обнуляем ВСЕ строки перед чтением
   my_call_variable = "";  my_qth_variable  = "";  my_text_variable = "";
   my_rtty_variable = "";  my_ifkp_variable = "";  my_cw_variable = "";    
-  my_freq_cw_var = "";    my_freq_ifkp_var = "";  my_rtty_mark_var = "";  my_freq_olivia_var = "";
+  my_freq_cw_var = "";    my_freq_ifkp_var = "";  my_rtty_mark_var = "";  my_freq_olivia_var = "";  my_freq_thor_var = "";
   my_rtty_shift_var = ""; my_rtty_invert_var = ""; my_cw_wpm_var = "";    my_rtty_baud_var = "";
 
   // Обнуляем старый массив матричного расписания задач
@@ -641,6 +643,7 @@ void read_and_parse_INFO_txt() {
           else if (tag == "RTTY_INVERT") target_str = &my_rtty_invert_var;  
           else if (tag == "FREQ_IFKP")   target_str = &my_freq_ifkp_var;
           else if (tag == "FREQ_OLIVIA") target_str = &my_freq_olivia_var;
+          else if (tag == "FREQ_THOR")   target_str = &my_freq_thor_var;
           else if (tag == "CW")          target_str = &my_cw_variable;    // НОВОЕ  
           else if (tag == "RTTY")        target_str = &my_rtty_variable;  // НОВОЕ  
           else if (tag == "IFKP")        target_str = &my_ifkp_variable;  // НОВОЕ
@@ -665,7 +668,7 @@ void read_and_parse_INFO_txt() {
           char c = (char)ram_disk_buffer[j];
           if (c == '\n' || c == '\r' || c == '[') { i = j - 1; break; }
           
-          if (!is_task_line && (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || target_str == &my_freq_olivia_var || 
+          if (!is_task_line && (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || target_str == &my_freq_olivia_var || target_str == &my_freq_thor_var || 
               target_str == &my_rtty_shift_var || target_str == &my_rtty_invert_var || target_str == &my_freq_cw_var)) {
             if (c >= '0' && c <= '9') value += c;
           } else {
@@ -703,10 +706,12 @@ void read_and_parse_INFO_txt() {
             }
             task.freq_hz = strtoul(s_freq.c_str(), NULL, 10);
 
-            if (s_mode.equalsIgnoreCase("CW"))        task.mode = MODE_CW;
-            else if (s_mode.equalsIgnoreCase("RTTY"))  task.mode = MODE_RTTY;
-            else if (s_mode.equalsIgnoreCase("IFKP"))  task.mode = MODE_IFKP;
-            else if (s_mode.equalsIgnoreCase("SEQ"))   task.mode = MODE_SEQ;
+            if (s_mode.equalsIgnoreCase("CW"))          task.mode = MODE_CW;
+            else if (s_mode.equalsIgnoreCase("RTTY"))   task.mode = MODE_RTTY;
+            else if (s_mode.equalsIgnoreCase("IFKP"))   task.mode = MODE_IFKP;  
+            else if (s_mode.equalsIgnoreCase("OLIVIA")) task.mode = MODE_OLIVIA;  
+            else if (s_mode.equalsIgnoreCase("THOR"))   task.mode = MODE_THOR;  
+            else if (s_mode.equalsIgnoreCase("SEQ"))    task.mode = MODE_SEQ;  
             else continue;
 
             int slash1 = s_time.indexOf('/');
@@ -940,14 +945,15 @@ void print_current_settings() {
   Serial.print("Таймер   [START_CW  ]: "); Serial.println(my_cw_variable.length()   > 0 ? my_cw_variable   : "Не задан");
   Serial.print("Таймер   [START_RTTY]: "); Serial.println(my_rtty_variable.length() > 0 ? my_rtty_variable : "Не задан");
   Serial.print("Таймер   [START_IFKP]: "); Serial.println(my_ifkp_variable.length() > 0 ? my_ifkp_variable : "Не задан");
-  Serial.print("Скорость  CW [CW_WPM]: "); Serial.print(my_cw_wpm_var.length() > 0 ? my_cw_wpm_var : "20"); Serial.print(" WPM (Длина точки: "); Serial.print(CW_DOT_TIME_MS); Serial.println(" ms)");
-  Serial.print("Скорость [RTTY_SPEED]: "); Serial.print(my_rtty_baud_var.length() > 0 ? my_rtty_baud_var : "45.45"); Serial.print(" Baud (Длина бита: "); Serial.print(RTTY_BIT_TIME_US/1000); Serial.println(" ms)");
-  Serial.print("Частота  [FREQ_CW   ]: "); Serial.print(my_freq_cw_var.length() > 0 ? my_freq_cw_var : "3601000 (Резерв)"); Serial.println(" Hz");
-  Serial.print("Частота  [RTTY_MARK ]: "); Serial.print(my_rtty_mark_var); Serial.println(" Hz");
-  Serial.print("Сдвиг    [RTTY_SHIFT]: "); Serial.print(my_rtty_shift_var.length() > 0 ? my_rtty_shift_var : "170"); Serial.println(" Hz");
+  Serial.print("Скорость  CW [CW_WPM]: "); Serial.print(my_cw_wpm_var.length() > 0 ? my_cw_wpm_var : "20"); Serial.print(" WPM (Длина точки: "); Serial.print(CW_DOT_TIME_MS); Serial.println(" мс)");
+  Serial.print("Скорость [RTTY_SPEED]: "); Serial.print(my_rtty_baud_var.length() > 0 ? my_rtty_baud_var : "45.45"); Serial.print(" Baud (Длина бита: "); Serial.print(RTTY_BIT_TIME_US/1000); Serial.println(" мс)");
+  Serial.print("Частота  [FREQ_CW   ]: "); Serial.print(my_freq_cw_var.length() > 0 ? my_freq_cw_var : "3601000 (Резерв)"); Serial.println(" Гц");
+  Serial.print("Частота  [RTTY_MARK ]: "); Serial.print(my_rtty_mark_var); Serial.println(" Гц");
+  Serial.print("Сдвиг    [RTTY_SHIFT]: "); Serial.print(my_rtty_shift_var.length() > 0 ? my_rtty_shift_var : "170"); Serial.println(" Гц");
   Serial.print("Инверсия [RTTY_INV  ]: "); Serial.println(my_rtty_invert_var == "1" ? "ВКЛЮЧЕНА (Mark < Space)" : "ВЫКЛЮЧЕНА (Mark > Space)");
-  Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Hz");
-  Serial.print("Частота [FREQ_OLIVIA]: "); Serial.print(my_freq_olivia_var); Serial.println(" Hz");
+  Serial.print("Частота  [FREQ_IFKP ]: "); Serial.print(my_freq_ifkp_var); Serial.println(" Гц");
+  Serial.print("Частота [FREQ_OLIVIA]: "); Serial.print(my_freq_olivia_var); Serial.println(" Гц");
+  Serial.print("Частота   [FREQ_THOR]: "); Serial.print(my_freq_thor_var); Serial.println(" Гц");
 
   // Вывод аппаратной конфигурации пинов из SET.TXT
   Serial.println("--- Аппаратная конфигурация (SET.TXT) ---");

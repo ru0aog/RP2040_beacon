@@ -77,12 +77,14 @@ bool is_time_to_transmit(uint8_t mode);
 // ============================================================================
 // Структура планировщика задач нового поколения в ОЗУ
 // ============================================================================
-enum BeaconMode : uint8_t {
-  MODE_IFKP=0, 
-  MODE_RTTY=1, 
-  MODE_CW  =2, 
-  MODE_SEQ =3,            // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
-  MODE_NONE=255 };  
+enum BeaconMode : uint8_t {  
+  MODE_CW     = 0,
+  MODE_RTTY   = 1,
+  MODE_IFKP   = 2,
+  MODE_OLIVIA = 3,
+  MODE_THOR   = 4,
+  MODE_SEQ    = 254,       // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
+  MODE_NONE   = 255 };
 
 // Структура задачи с использованием битовой маски под дни недели (1 байт)
 struct TaskItem {  

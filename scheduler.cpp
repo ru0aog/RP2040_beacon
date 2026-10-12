@@ -185,7 +185,7 @@ void init_scheduler() {
   pWire->setTimeout(50);
   
   if (!pingRTC()) {
-    Serial.println("[Система] ОШИБКА! Внешний модуль RTC не найден на шине.");
+    Serial.println("[Система] ВНИМАНИЕ! Внешний модуль RTC не найден на шине.");
     activeRtc = RTC_INTERNAL;
     device_DS[0] = 0;
     device_DS[4] = 0;

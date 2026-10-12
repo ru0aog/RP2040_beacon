@@ -263,8 +263,8 @@ void init_si5351() {
   }
 
   if (!device_SI[0]) {
-      Serial.println(F("[Система] КРИТИЧЕСКАЯ ОШИБКА! ГЕН SI-5351 не найден на шине Wire."));
-      Serial.print(F("[Система] ВНИМАНИЕ! Будет использован внутренний DDS-генератор на пине ")); Serial.println(VFO_OUTPUT_PIN);
+      Serial.println(F("[Система] ВНИМАНИЕ! ГЕН SI-5351 не найден на шине Wire."));
+      Serial.print(F("[Система] Будет использован внутренний DDS-генератор на пине ")); Serial.println(VFO_OUTPUT_PIN);
       SI_FAIL = true;
     }
 }

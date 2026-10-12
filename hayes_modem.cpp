@@ -309,9 +309,10 @@ static void transmit_data_line() {
 // Режим данных
 // ---------------------------------------------------------------------------
 static void data_char(uint8_t c) {
-  if (air_mode == AIR_LOOP) {
-    ModemSerial.write(c);
-    return;
+  if (air_mode == AIR_LOOP) {  
+    ModemSerial.write(c);   // эхо обратно в модемный порт (COM21)  
+    Serial.write(c);        // дублируем принятый по петле символ в консольный порт  
+    return;  
   }
   if (cfg.online_echo) {
     ModemSerial.write(c);
@@ -360,8 +361,8 @@ static void handle_data_char(uint8_t c, uint32_t now) {
 // ---------------------------------------------------------------------------
 // Командный режим
 // ---------------------------------------------------------------------------
-static void dial(const char* p) {
-  if (call_active) { send_result(RES_ERROR); return; }
+static void dial(const char* p) {  
+  if (call_active) hang_up("повторный набор");   // авто-отбой предыдущего вызова, затем новый набор
 
   char number[HAYES_DIAL_MAX];
   size_t n = 0;

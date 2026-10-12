@@ -8,7 +8,6 @@
  *   18 тонов, прямоугольная манипуляция через vfo_set_tone_instant().  
  *   Дизер глушится vfo_set_narrowband(true) на время TX (как в Olivia).  
  *  
- * ВНИМАНИЕ: Varicode-таблицы и depth перемежителя взять ВЕРБАТИМ из fldigi.  
  */  
   
 #include <Arduino.h>  

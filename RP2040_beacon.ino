@@ -1,7 +1,7 @@
 ﻿/**
  * ============================================================================
  *  RP2040_beacon.ino — Главный диспетчер и инициализация радиомаяка
- *  Версия 2.20 от 2026-10-10, автор RU0AOG
+ *  Версия 2.21 от 2026-10-12, автор RU0AOG
  * ============================================================================
  *  
  *  НАЗНАЧЕНИЕ
@@ -45,6 +45,12 @@
  *    ? / tele / time / date / text / setparam M=V /  
  *    start cw|rtty|ifkp / stop / restart / reset / help.  
  *  
+ *  ЭМУЛЯТОР HAYES-МОДЕМА (hayes_modem)  
+ *  -----------------------------------  
+ *  Второй виртуальный COM-порт принимает AT-команды; ATD<режим> "соединяет"  
+ *  с эфиром (0 петля, 1 CW, 2 RTTY, 3 IFKP, 4 OLIVIA, 5 THOR), после CONNECT  
+ *  каждая строка передаётся в эфир. Опрос — hayes_modem_poll() в loop().  
+ *  
  *  ГЛОБАЛЬНОЕ СОСТОЯНИЕ:  
  *    device_SI/DS/BM/AT/DL[5]  — таблицы найденного оборудования.  
  *    soft_restart_flag, pc_file_written, is_transmitting — флаги управления.  
@@ -68,6 +74,7 @@
 #include "ifkp_modem.h"
 #include "olivia_modem.h"
 #include "thor_modem.h"
+#include "hayes_modem.h"
 #include "bme280.h"
 #include "lcd.h"
 #include "led_blink.h"
@@ -77,8 +84,8 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-String BCN_VER = "2.20";
-String BCN_DAT = "2026-10-10";
+String BCN_VER = "2.21";
+String BCN_DAT = "2026-10-12";
 
 bool dev_TX_state  = false;
 
@@ -339,11 +346,13 @@ void check_serial_commands() {
             climate_send_table_to_air();
           }
 
+          else if (command.equalsIgnoreCase("modem")) {
+            hayes_modem_print_status();
+          }
 
           else if (command.equalsIgnoreCase("sched") || command.equalsIgnoreCase("schedule")) {  
             print_schedule();  
           }
-
 
           // === OCTEST: стресс-тест поиска максимальной стабильной clk_sys ===  
           else if (command.equalsIgnoreCase("OCTEST")) {  
@@ -435,6 +444,7 @@ void check_serial_commands() {
           Serial.println(F("clim            - Вывод таблицы климатических замеров"));
           Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));
           Serial.println(F("remount         - Переподключить USB-диск (обновление в Проводнике)"));
+          Serial.println(F("modem           - Состояние эмулятора Hayes-модема (второй COM-порт, AT-команды)"));
           Serial.println(F("stop            - Экстренная остановка передачи маяка"));
           Serial.println(F("restart         - Мягкий виртуальный перезапуск маяка"));
           Serial.println(F("reset           - Жесткий аппаратный сброс процессора RP2040"));
@@ -472,6 +482,7 @@ void check_serial_commands() {
 void setup() {
   adc_init();
   init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом
+  hayes_modem_init();                             // Второй виртуальный COM-порт: эмулятор Hayes-модема
   init_file_manager();
   init_flash_disk();   // инициализировать флэш-диск для Windows
 
@@ -765,6 +776,7 @@ void loop() {
   // =========================================================================
   check_and_handle_pc_changes();
   check_serial_commands();
+  hayes_modem_poll();       // эмулятор Hayes-модема на втором COM-порту
 
   // Если за время проверки команд взлетел флаг рестарта — выходим
   if (soft_restart_flag || pc_file_written) return;

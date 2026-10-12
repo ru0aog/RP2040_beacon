@@ -43,7 +43,13 @@
  *  КОНСОЛЬНЫЕ КОМАНДЫ (check_serial_commands)  
  *  ------------------------------------------  
  *    ? / tele / time / date / text / setparam M=V /  
- *    start cw|rtty|ifkp / stop / restart / reset / help.  
+ *    start cw|rtty|ifkp / stop / restart / reset / modem / help.  
+ *  
+ *  ЭМУЛЯТОР HAYES-МОДЕМА (hayes_modem)  
+ *  -----------------------------------  
+ *  Второй виртуальный COM-порт принимает AT-команды; ATD<режим> "соединяет"  
+ *  с эфиром (0 петля, 1 CW, 2 RTTY, 3 IFKP, 4 OLIVIA, 5 THOR), после CONNECT  
+ *  каждая строка передаётся в эфир. Опрос — hayes_modem_poll() в loop().  
  *  
  *  ГЛОБАЛЬНОЕ СОСТОЯНИЕ:  
  *    device_SI/DS/BM/AT/DL[5]  — таблицы найденного оборудования.  
@@ -72,6 +78,7 @@
 #include "lcd.h"
 #include "led_blink.h"
 #include "climate_log.h"
+#include "hayes_modem.h"
 #include <hardware/watchdog.h>
 #include <hardware/adc.h>
 #include "vfo_hardware.h"
@@ -340,6 +347,10 @@ void check_serial_commands() {
           }
 
 
+          else if (command.equalsIgnoreCase("modem")) {
+            hayes_modem_print_status();
+          }
+
           else if (command.equalsIgnoreCase("sched") || command.equalsIgnoreCase("schedule")) {  
             print_schedule();  
           }
@@ -435,6 +446,7 @@ void check_serial_commands() {
           Serial.println(F("clim            - Вывод таблицы климатических замеров"));
           Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));
           Serial.println(F("remount         - Переподключить USB-диск (обновление в Проводнике)"));
+          Serial.println(F("modem           - Состояние эмулятора Hayes-модема (второй COM-порт, AT-команды)"));
           Serial.println(F("stop            - Экстренная остановка передачи маяка"));
           Serial.println(F("restart         - Мягкий виртуальный перезапуск маяка"));
           Serial.println(F("reset           - Жесткий аппаратный сброс процессора RP2040"));
@@ -472,6 +484,7 @@ void check_serial_commands() {
 void setup() {
   adc_init();
   init_usb_msc_interface();                       // Регистрирует дескрипторы Mass Storage в стек TinyUSB до начала энумерации хостом
+  hayes_modem_init();                             // Второй виртуальный COM-порт: эмулятор Hayes-модема
   init_file_manager();
   init_flash_disk();   // инициализировать флэш-диск для Windows
 
@@ -765,6 +778,7 @@ void loop() {
   // =========================================================================
   check_and_handle_pc_changes();
   check_serial_commands();
+  hayes_modem_poll();       // эмулятор Hayes-модема на втором COM-порту
 
   // Если за время проверки команд взлетел флаг рестарта — выходим
   if (soft_restart_flag || pc_file_written) return;

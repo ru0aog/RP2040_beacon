@@ -36,9 +36,9 @@
 #include "cw_modem.h"
 
 
-#define BOOST_DEBUG              0
-#define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать кандидатов
-#define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать
+#define BOOST_DEBUG              0         // 0 — выключить отладочную печать блока разгона
+#define VFO_PLL_DEBUG            0         // 0 — выключить отладочную печать подбора кандидатов
+#define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать блока PLL
 
 #define VFO_INT_PENALTY   500000000ULL     // жёсткий запрет pio_int < 4
 

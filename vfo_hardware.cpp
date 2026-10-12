@@ -1279,20 +1279,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     PllConfig target_pll;
 
 
-    // АВТО-BOOST: если flash-паспорт выше стандарта — включаем разгон на КАЖДУЮ передачу.  
-    // Термогвард в рантайме может временно сбросить clk_boosted при перегреве — это нормально.  
-    if (vfo_auto_boost && !thermal_throttled) {  
-        clk_boosted = true;  
-    }  
-  
-    if (clk_boosted) {  
-        target_pll = vfo_find_optimal_pll(base_freq_hz, vfo_effective_clk_max());  
-        pll_overclock = target_pll;  
-    }  
-    else {  
-        target_pll = vfo_find_optimal_pll(base_freq_hz, VFO_CLK_SYS_NOMINAL_HZ);  
-    }
-
     // ========================================================================
     // АРХИТЕКТУРНЫЙ АРБИТРАЖ ЧАСТОТЫ ШИНЫ
     // Честный сквозной автотюн при каждом старте (без эффекта памяти)

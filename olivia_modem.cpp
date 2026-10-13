@@ -366,10 +366,9 @@ static void send_string_common(const char* str) {
     if (block_count > 0) olivia_flush_block();  
 
     tx_done:  
-    if (device_SI[0]) VFO_TX_OFF();  
-    else              vfo_operation_set(false);  
-    vfo_set_narrowband(false);  
-    ZERO_LED_OFF();  
+    VFO_TX_OFF();               // глушим генераторы
+    vfo_set_narrowband(false);  // возвращаем дизер
+    ZERO_LED_OFF();
     Serial.println("");  
 }  
   

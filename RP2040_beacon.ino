@@ -309,7 +309,7 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t olivia_hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10);  
               if (olivia_hz == 0) olivia_hz = 3601307;  
-              char buf[128];  
+              char buf[136];  
               snprintf(buf, sizeof(buf),  
                       "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир OLIVIA на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(olivia_hz).c_str());  
@@ -325,7 +325,7 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t contestia_hz = strtoul(my_freq_contestia_var.c_str(), NULL, 10);  
               if (contestia_hz == 0) contestia_hz = 3601307;  
-              char buf[128];  
+              char buf[136];  
               snprintf(buf, sizeof(buf),  
                       "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир CONTESTIA на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(contestia_hz).c_str());  

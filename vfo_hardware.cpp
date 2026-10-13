@@ -1299,16 +1299,13 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
 #define VFO_QUAD_THRESH_HIGH_HZ    15000000ULL  // разогнанная шина  
   
 
-  
 static void vfo_quad_update(uint64_t base_hz) {  
     // фактическая частота шины: берём из живого состояния PLL,  
     // а не из константы — буст Термогуарда меняет её на лету  
-    uint32_t clk_sys = (pll_overclock > VFO_CLK_SYS_NOMINAL_HZ)  
-                       ? pll_overclock : VFO_CLK_SYS_NOMINAL_HZ;  
-  
-    uint64_t threshold = (clk_sys > VFO_QUAD_CLKSYS_BOOST_HZ)  
-                         ? VFO_QUAD_THRESH_HIGH_HZ  
-                         : VFO_QUAD_THRESH_LOW_HZ;  
+    
+    // берём фактическую частоту шины напрямую  
+    uint64_t clk_sys = current_clk_sys_hz;  
+    uint64_t threshold = (clk_sys > VFO_CLK_SYS_NOMINAL_HZ) ? 15000000ULL : 7500000ULL;
   
     vfo_quad_div4 = (base_hz >= threshold) ? 1 : 0;  
   
@@ -1432,7 +1429,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // допустимая фазовая ошибка достигается только до ~7.5 МГц,  
     // при разгоне (clk_sys > 200 МГц) — до ~15 МГц.  
     if (vfo_quadrature) {  
-        vfo_quad_update(base_freq_mhz / 1000ULL);  
+        vfo_quad_update((uint64_t)base_freq_hz);
     }  
 
 // Диагностический вывод рантайм-телеметрии в Serial  

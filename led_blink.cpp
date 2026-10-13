@@ -56,6 +56,20 @@
  *    ZERO_LED_GREEN_ON()  — зелёный (или встроенный LED на Pico).  
  *    ZERO_LED_BLUE_ON()   — синий  (или встроенный LED на Pico).  
  *    ZERO_LED_OFF()       — погасить все индикаторы.  
+ *  
+ *  ИСПОЛЬЗУЕМЫЕ БИБЛИОТЕКИ И МОДУЛИ  
+ *  -------------------------------  
+ *  - Raspberry Pi Pico SDK (BSD-3): hardware/gpio.h, прямой доступ  
+ *    к регистрам SIO (sio_hw->gpio_set/gpio_clr), __time_critical_func  
+ *  - Arduino core RP2040 (LGPL-2.1): pinMode/digitalWrite,  
+ *    noInterrupts()/interrupts(), delayMicroseconds()  
+ *  - Модули проекта: led_blink.h, file_manager.h  
+ *  - Сторонний код отсутствует: параллельный bit-bang протокола  
+ *    WS2812B на регистрах SIO — оригинальная разработка автора,  
+ *    без библиотек NeoPixel/FastLED и без PIO.  
+ *  
+ *  Этот файл — часть RP2040_beacon, распространяется под GPLv3  
+ *  (см. LICENSE в корне репозитория).  
  * ============================================================================  
  */
 

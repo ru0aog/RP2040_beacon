@@ -43,12 +43,13 @@
  *  КОНСОЛЬНЫЕ КОМАНДЫ (check_serial_commands)  
  *  ------------------------------------------  
  *    ? / tele / time / date / text / setparam M=V /  
- *    start cw|rtty|ifkp / stop / restart / reset / help.  
+ *    start cw|rtty|ifkp|olivia|contestia|thor|mfsk16|dominoex|fsq / stop / restart / reset / help.  
  *  
  *  ЭМУЛЯТОР HAYES-МОДЕМА (hayes_modem)  
  *  -----------------------------------  
  *  Второй виртуальный COM-порт принимает AT-команды; ATD<режим> "соединяет"  
- *  с эфиром (0 петля, 1 CW, 2 RTTY, 3 IFKP, 4 OLIVIA, 5 THOR), после CONNECT  
+ *  с эфиром (0 петля, 1 CW, 2 RTTY, 3 IFKP, 4 OLIVIA, 5 THOR, 6 CONTESTIA, 7 MFSK16,
+ *  8 DOMINOEX, 9 FSQ), после CONNECT  
  *  каждая строка передаётся в эфир. Опрос — hayes_modem_poll() в loop().  
  *  
  *  ГЛОБАЛЬНОЕ СОСТОЯНИЕ:  
@@ -125,6 +126,9 @@ bool force_ifkp_transmission = false;   // Флаг ручного запуск�
 bool force_olivia_transmission = false; // Флаг ручного запуска OLIVIA
 bool force_contestia_transmission = false; // Флаг ручного запуска CONTESTIA
 bool force_thor_transmission = false;   // Флаг ручного запуска THOR
+bool force_mfsk16_transmission = false;   // Флаг ручного запуска MFSK16
+bool force_dominoex_transmission = false; // Флаг ручного запуска DOMINOEX
+bool force_fsq_transmission = false;      // Флаг ручного запуска FSQ
 volatile bool system_ready = false;     // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 extern volatile bool tx_launching; 
@@ -358,6 +362,51 @@ void check_serial_commands() {
               force_thor_transmission = true;  
             }  
           }
+          else if (command.equalsIgnoreCase("START MFSK16")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t mfsk16_hz = strtoul(my_freq_mfsk16_var.c_str(), NULL, 10);  
+              if (mfsk16_hz == 0) mfsk16_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир MFSK16 на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(mfsk16_hz).c_str());  
+              Serial.println(buf);  
+              force_mfsk16_transmission = true;  
+            }  
+          }
+          else if (command.equalsIgnoreCase("START DOMINOEX")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t dominoex_hz = strtoul(my_freq_dominoex_var.c_str(), NULL, 10);  
+              if (dominoex_hz == 0) dominoex_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир DOMINOEX на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(dominoex_hz).c_str());  
+              Serial.println(buf);  
+              force_dominoex_transmission = true;  
+            }  
+          }
+          else if (command.equalsIgnoreCase("START FSQ")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t fsq_hz = strtoul(my_freq_fsq_var.c_str(), NULL, 10);  
+              if (fsq_hz == 0) fsq_hz = 3601307;  
+              char buf[128];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир FSQ на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(fsq_hz).c_str());  
+              Serial.println(buf);  
+              force_fsq_transmission = true;  
+            }  
+          }
 
           // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---
           else if (command.equalsIgnoreCase("clear log")) {
@@ -502,6 +551,9 @@ void check_serial_commands() {
           Serial.println(F("start cw        - Немедленно запустить внеочередной сеанс CW"));
           Serial.println(F("start rtty      - Немедленно запустить внеочередной сеанс RTTY"));
           Serial.println(F("start ifkp      - Немедленно запустить внеочередной сеанс IFKP"));
+          Serial.println(F("start mfsk16    - Немедленно запустить внеочередной сеанс MFSK16"));
+          Serial.println(F("start dominoex  - Немедленно запустить внеочередной сеанс DominoEX 8"));
+          Serial.println(F("start fsq       - Немедленно запустить внеочередной сеанс FSQ"));
           Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
           Serial.println(F("clim            - Вывод таблицы климатических замеров"));
           Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));
@@ -1393,6 +1445,264 @@ void loop() {
           Serial.println(end_buf);  
           if (debug_flag) {  
             log_file_write_line("Сеанс THOR завершен. Длительность: " + String(thor_session_duration_sec) + " сек.");  
+          }  
+        }  
+      }  
+  
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА  
+      is_transmitting = false;  
+      scheduled_freq_hz = 0;  
+      SI_POWER_OFF();  
+      dev_TX_state = false;  
+      update_scheduler();  
+    }  
+  }
+
+
+// =========================================================================  
+  // РЕЖИМ 6. СЕАНС СВЯЗИ MFSK16 
+  // =========================================================================  
+  if (( (is_time_to_transmit(MODE_MFSK16) && !is_transmitting) || force_mfsk16_transmission) && !pc_file_written && !soft_restart_flag) {  
+    force_mfsk16_transmission = false;  
+    is_transmitting = true;  
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting  
+  
+    if (debug_flag) {  
+      char time_buf[128];  
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса MFSK16! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);  
+      Serial.println(time_buf);  
+    }  
+  
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
+  
+      uint32_t mfsk16_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
+      SI_POWER_ON();
+  
+      if (!pc_file_written && !soft_restart_flag) {
+        uint32_t mfsk16_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz           // приоритет частоте из расписания  
+                   : strtoul(my_freq_mfsk16_var.c_str(), NULL, 10);  
+        if (mfsk16_hz == 0) mfsk16_hz = 3601307;  
+  
+        prepare_mfsk16_frequencies(mfsk16_hz);  
+  
+        // MFSK16: позывной и локатор  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_MFSK16] Вызов: "));  
+          mfsk16_send_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");  
+        }  
+  
+        // MFSK16: основной текст  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_MFSK16] Текст: "));  
+          mfsk16_send_string(my_text_variable + "\r\n");  
+        }  
+  
+        // MFSK16: первая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();  
+          Serial.print(F("[ЭФИР_MFSK16] Телем: "));  
+          mfsk16_send_string(telemetry);  
+        }  
+  
+        // MFSK16: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            String telemetry = get_climate_telemetry();  
+            Serial.print(F("[ЭФИР_MFSK16] Телем: "));  
+            mfsk16_send_string(telemetry);  
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+  
+        // MFSK16: завершение  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_MFSK16] Конец: "));  
+          mfsk16_send_string("OVER.\r\n\r\n");  
+        }  
+  
+        if (!pc_file_written && !soft_restart_flag) {  
+          uint32_t mfsk16_session_duration_sec = (millis() - mfsk16_session_start_ms) / 1000;  
+          update_scheduler();  
+          char end_buf[128];  
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс MFSK16 завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, mfsk16_session_duration_sec);  
+          Serial.println(end_buf);  
+          if (debug_flag) {  
+            log_file_write_line("Сеанс MFSK16 завершен. Длительность: " + String(mfsk16_session_duration_sec) + " сек.");  
+          }  
+        }  
+      }  
+  
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА  
+      is_transmitting = false;  
+      scheduled_freq_hz = 0;  
+      SI_POWER_OFF();  
+      dev_TX_state = false;  
+      update_scheduler();  
+    }  
+  }
+
+
+// =========================================================================  
+  // РЕЖИМ 7. СЕАНС СВЯЗИ DOMINOEX 8 
+  // =========================================================================  
+  if (( (is_time_to_transmit(MODE_DOMINOEX) && !is_transmitting) || force_dominoex_transmission) && !pc_file_written && !soft_restart_flag) {  
+    force_dominoex_transmission = false;  
+    is_transmitting = true;  
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting  
+  
+    if (debug_flag) {  
+      char time_buf[128];  
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса DOMINOEX! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);  
+      Serial.println(time_buf);  
+    }  
+  
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
+  
+      uint32_t dominoex_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
+      SI_POWER_ON();
+  
+      if (!pc_file_written && !soft_restart_flag) {
+        uint32_t dominoex_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz           // приоритет частоте из расписания  
+                   : strtoul(my_freq_dominoex_var.c_str(), NULL, 10);  
+        if (dominoex_hz == 0) dominoex_hz = 3601307;  
+  
+        prepare_dominoex_frequencies(dominoex_hz);  
+  
+        // DOMINOEX: позывной и локатор  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_DOMINOEX] Вызов: "));  
+          dominoex_send_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");  
+        }  
+  
+        // DOMINOEX: основной текст  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_DOMINOEX] Текст: "));  
+          dominoex_send_string(my_text_variable + "\r\n");  
+        }  
+  
+        // DOMINOEX: первая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();  
+          Serial.print(F("[ЭФИР_DOMINOEX] Телем: "));  
+          dominoex_send_string(telemetry);  
+        }  
+  
+        // DOMINOEX: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            String telemetry = get_climate_telemetry();  
+            Serial.print(F("[ЭФИР_DOMINOEX] Телем: "));  
+            dominoex_send_string(telemetry);  
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+  
+        // DOMINOEX: завершение  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_DOMINOEX] Конец: "));  
+          dominoex_send_string("OVER.\r\n\r\n");  
+        }  
+  
+        if (!pc_file_written && !soft_restart_flag) {  
+          uint32_t dominoex_session_duration_sec = (millis() - dominoex_session_start_ms) / 1000;  
+          update_scheduler();  
+          char end_buf[128];  
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс DOMINOEX завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, dominoex_session_duration_sec);  
+          Serial.println(end_buf);  
+          if (debug_flag) {  
+            log_file_write_line("Сеанс DOMINOEX завершен. Длительность: " + String(dominoex_session_duration_sec) + " сек.");  
+          }  
+        }  
+      }  
+  
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА  
+      is_transmitting = false;  
+      scheduled_freq_hz = 0;  
+      SI_POWER_OFF();  
+      dev_TX_state = false;  
+      update_scheduler();  
+    }  
+  }
+
+
+// =========================================================================  
+  // РЕЖИМ 8. СЕАНС СВЯЗИ FSQ-4.5 
+  // =========================================================================  
+  if (( (is_time_to_transmit(MODE_FSQ) && !is_transmitting) || force_fsq_transmission) && !pc_file_written && !soft_restart_flag) {  
+    force_fsq_transmission = false;  
+    is_transmitting = true;  
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting  
+  
+    if (debug_flag) {  
+      char time_buf[128];  
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса FSQ! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);  
+      Serial.println(time_buf);  
+    }  
+  
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {
+  
+      uint32_t fsq_session_start_ms = millis();
+      dev_TX_state = true;
+      update_scheduler();
+      SI_POWER_ON();
+  
+      if (!pc_file_written && !soft_restart_flag) {
+        uint32_t fsq_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz           // приоритет частоте из расписания  
+                   : strtoul(my_freq_fsq_var.c_str(), NULL, 10);  
+        if (fsq_hz == 0) fsq_hz = 3601307;  
+  
+        prepare_fsq_frequencies(fsq_hz);  
+  
+        // FSQ: позывной и локатор  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_FSQ] Вызов: "));  
+          fsq_send_string("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n");  
+        }  
+  
+        // FSQ: основной текст  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_FSQ] Текст: "));  
+          fsq_send_string(my_text_variable + "\r\n");  
+        }  
+  
+        // FSQ: первая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();  
+          Serial.print(F("[ЭФИР_FSQ] Телем: "));  
+          fsq_send_string(telemetry);  
+        }  
+  
+        // FSQ: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            String telemetry = get_climate_telemetry();  
+            Serial.print(F("[ЭФИР_FSQ] Телем: "));  
+            fsq_send_string(telemetry);  
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+  
+        // FSQ: завершение  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_FSQ] Конец: "));  
+          fsq_send_string("OVER.\r\n\r\n");  
+        }  
+  
+        if (!pc_file_written && !soft_restart_flag) {  
+          uint32_t fsq_session_duration_sec = (millis() - fsq_session_start_ms) / 1000;  
+          update_scheduler();  
+          char end_buf[128];  
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс FSQ завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, fsq_session_duration_sec);  
+          Serial.println(end_buf);  
+          if (debug_flag) {  
+            log_file_write_line("Сеанс FSQ завершен. Длительность: " + String(fsq_session_duration_sec) + " сек.");  
           }  
         }  
       }  

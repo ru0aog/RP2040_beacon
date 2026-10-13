@@ -86,12 +86,12 @@ RtcType activeRtc = RTC_NONE;
 
 datetime_t currentTime;
 
-// Имена режимов — индекс = BeaconMode: 0=CW, 1=RTTY, 2=IFKP, 3=OLIVIA, 4=THOR  
-static const char* MODE_NAMES[] = {"CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA"};
+// Имена режимов — индекс = BeaconMode: 0=CW, 1=RTTY, 2=IFKP, 3=OLIVIA, 4=THOR, 5=CONTESTIA, 6=MFSK16, 7=DOMINOEX, 8=FSQ  
+static const char* MODE_NAMES[] = {"CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA", "MFSK16", "DOMINOEX", "FSQ"};
   
 // Безопасный доступ: защита от мусора в mode (например MODE_NONE=255)  
 static const char* mode_name(uint8_t mode) {    
-  return (mode < 6) ? MODE_NAMES[mode] : (mode == MODE_SEQ ? "SEQ" : "??");   
+  return (mode < 9) ? MODE_NAMES[mode] : (mode == MODE_SEQ ? "SEQ" : "??");   
 }
 
 // Глобальные переменные для хранения текущего времени
@@ -902,7 +902,8 @@ String fmt_next_start(int32_t abs_min) {
  * срабатывания установлен флаг @c is_transmitting, сеанс пропускается.  
  *  
  * @param[in] mode  Режим передачи: MODE_IFKP (0), MODE_RTTY (1), MODE_CW (2), MODE_OLIVIA (3),
- *                  MODE_SEQ (4). Значения > 4 отклоняются.  
+ *                  MODE_THOR (4), MODE_CONTESTIA (5), MODE_MFSK16 (6), MODE_DOMINOEX (7),
+ *                  MODE_FSQ (8), MODE_SEQ (254). Прочие значения отклоняются.  
  *  
  * @return @c true  — задача совпала, передачу нужно запустить  
  *                   (вызывающий код обязан выставить @c is_transmitting);  
@@ -925,12 +926,12 @@ bool is_time_to_transmit(uint8_t mode) {
                                        // флаг "передача запускается" — выставляется  
                                        // вызывающим кодом СРАЗУ при получении true  
   uint32_t cur = rtc_hour * 60UL + rtc_min;    
-  static uint32_t last_min[7] = {9999, 9999, 9999, 9999, 9999, 9999, 9999};
+  static uint32_t last_min[10] = {9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999};
   
-  // слот 0..5 = CW/RTTY/IFKP/OLIVIA/THOR/CONTESTIA, слот 6 = SEQ    
+  // слот 0..8 = CW/RTTY/IFKP/OLIVIA/THOR/CONTESTIA/MFSK16/DOMINOEX/FSQ, слот 9 = SEQ    
   uint8_t slot;    
-  if (mode < 6)            slot = mode;    
-  else if (mode == MODE_SEQ) slot = 6;    
+  if (mode < 9)            slot = mode;    
+  else if (mode == MODE_SEQ) slot = 9;    
   else return false;                         // NONE и прочий мусор
   
   if (cur == last_min[slot]) return false;   // один запуск (или пропуск) на минуту

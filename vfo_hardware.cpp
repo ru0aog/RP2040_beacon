@@ -2485,18 +2485,28 @@ void vfo_quadrature_start(uint32_t freq_hz) {
     // Таблица под 2*F: clkdiv = clk_sys/(2·2F) = clk_sys/(4F) — ровно то,  
     // что нужно 4-тактовой программе для выходной частоты F.  
     // rebuild внутри сам перезапускает core1 (как в vfo_hardware_init).  
-    vfo_base_mhz = (uint64_t)freq_hz * 2ULL * 1000ULL;  
-    vfo_step_mhz = 0;  
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
-    
-    // Тон 0 -> target_* для core1; set_tone_instant уже заполнил clkdiv.  
-    // SM конфигурируем после rebuild: clkdiv на момент старта уже валиден.  
-    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);  
-    pio_sm_restart(lo_pio, lo_sm);          // PC -> wrap_target, чистая фаза  
-    pio_sm_set_enabled(lo_pio, lo_sm, true);  
-    
-    quad_active = true;  
+    vfo_base_mhz = (uint64_t)freq_hz * 2ULL * 1000ULL;    
+    vfo_step_mhz = 0;    
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);    
+  
+    // Явно загружаем тон 0 в target_* — rebuild сам НЕ применяет тон    
+    vfo_set_tone_instant(0);    
+  
+    // Core1 в квадратурном пути мог быть мёртв (init/stop делали reset).    
+    // Гарантированно поднимаем дизеринг-конвейер — он будет писать clkdiv.    
+    multicore_reset_core1();    
+    tone_changed = true;    
+    multicore_launch_core1(vfo_core1_entry);    
+  
+    // Дать core1 записать первый clkdiv до старта SM    
+    sleep_us(50);    
+  
+    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);    
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);    
+    pio_sm_restart(lo_pio, lo_sm);          // PC -> wrap_target, чистая фаза    
+    pio_sm_set_enabled(lo_pio, lo_sm, true);    
+      
+    quad_active = true;
 }
   
 /**  

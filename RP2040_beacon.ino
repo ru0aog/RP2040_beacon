@@ -408,16 +408,6 @@ void check_serial_commands() {
             }  
           }
 
-          else if (command.equalsIgnoreCase("rx")) {  
-            if (is_transmitting) {  
-              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
-            } else {  
-              update_scheduler();  
-              Serial.println("запускаем квадратурный режим");  
-
-            }  
-          }
-
           else if (command.startsWith("quad ")) {          // quad 3600000  
               uint32_t f = strtoul(command.substring(5).c_str(), NULL, 10);  
               if (f == 0) f = 3600000;  

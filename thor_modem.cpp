@@ -1,21 +1,41 @@
 /**    
  * ============================================================================    
- *  thor_modem.cpp — Модулятор THOR 8 / THOR 11 (MFSK, IFK+, FEC k=7 + перемежитель)
+ *  thor_modem.cpp — Общий IFK/MFSK-движок: THOR 8/11, MFSK16, DominoEX 8, FSQ
+ *  + генератор RSID (общий для THOR-семейства и Olivia/Contestia)
  *  Алгоритмы адаптированы из fldigi (GPLv3, David Freese W1HKJ и др.)
  * ============================================================================    
- *  Цепочка передачи (как в fldigi thor::sendchar/sendsymbol):    
- *    ASCII --varicode--> биты --свёрт.кодер(1/2)--> по 2 бита    
- *         --> накопление 4 бит --> перемежитель(4xD) --> символ 0..15    
- *         --> IFK+:  tone = (prevtone + sym + 2) % 18    
- *    18 тонов, прямоугольная манипуляция через vfo_set_tone_instant().    
+ *  Общая инфраструктура:    
+ *    mfsk_prepare(base, step, n) — сетка n<=33 тонов: регистровые пакеты    
+ *        DATA_MFSK[33][8] для Si5351 либо vfo_hardware_init(base, step) (PIO).    
+ *    mfsk_emit_tone(tone, symbol_us) — тон + ожидание абсолютного дедлайна,    
+ *        LED, контроль прерывания, watchdog.    
+ *    rsid_send(code, center) — RSID fldigi: 15 символов GF(16), 16 тонов    
+ *        11025/1024 Гц, 92.88 мс, перед ним 5 символов тишины.    
+ *    
+ *  Режимы:    
+ *    THOR 11 : 18 тонов, varicode -> FEC k=7 -> перемежитель 4x10 -> IFK+ (+2)    
+ *    MFSK16  : 16 тонов 15.625 Гц, 64 мс; varicode -> FEC k=7 -> перемежитель    
+ *              4x10 -> код Грея -> абсолютный тон (без IFK). RSID 57.    
+ *    DomEX 8 : 18 тонов 15.625 Гц (2x baud), 128 мс; nibble-varicode,    
+ *              IFK+ tone=(prev+nib+2)%18. RSID 86.    
+ *    FSQ-4.5 : 33 тона 8.789 Гц (3 бина 12000/4096), 256 мс;    
+ *              fsq_varicode, IFK+ tone=(prev+sym+1)%33. Без RSID (в fldigi нет).    
  *    Дизер глушится vfo_set_narrowband(true) на время TX.    
  *    
  *  ---- Производный код / использованные источники -------------------------    
  *  Алгоритмы адаптированы из fldigi (GPLv3, David Freese W1HKJ и др.):    
- *    - thor.cxx / thor.h: свёрточный код k=7 (0x6d,0x4f), перемежитель 4x10,    
+ *    - thor/thor.cxx, thor.h: свёрточный код k=7 (0x6d,0x4f), перемежитель 4x10,    
  *      IFK+ (+2), тайминги символов, преамбула/флаш    
- *    - MFSKvaricode.cxx / thorvaricode.cxx: таблицы varicode    
+ *    - mfsk/mfsk.cxx, mfsk.h, mfsk/interleave.cxx, misc/misc.cxx (grayencode):    
+ *      MFSK16 — упаковка бит в символы, преамбула, STX/EOT, flush    
+ *    - mfsk/mfskvaricode.cxx / thor/thorvaricode.cxx: таблицы varicode    
  *      (varicode IZ8BLY / ZL1BPU MFSK standard)    
+ *    - dominoex/dominoex.cxx, dominoex/dominovar.cxx: DominoEX — IFK+, idle,    
+ *      таблица nibble-varicode (primary/secondary)    
+ *    - fsq/fsq.cxx, fsq/fsq_varicode.cxx: FSQ — сетка, IFK+, idle, BOL/EOL,    
+ *      таблица fsq_varicode    
+ *    - rsid/rsid.cxx, rsid/rsid_defs.cxx: кодер RSID (Squares/indices, GF16)    
+ *      и номера режимов    
  *    
  * ============================================================================    
  */
@@ -32,9 +52,10 @@ extern bool soft_restart_flag;
 extern void check_serial_commands();  
 extern bool debug_flag;  
 extern uint8_t device_SI[5];
+extern String my_call_variable;
 extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);  
   
-// ---------------- Константы подрежимов (из thor.cxx / thor.h) -------------  
+// ---------------- Константы THOR (из thor.cxx / thor.h) ------------------  
 #define THOR_NUMTONES   18            // число тонов
 #define THOR_K          7             // THOR_K  
 #define THOR_POLY1      0x6d          // THOR_POLY1  
@@ -56,9 +77,39 @@ extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 // Длины преамбулы/хвоста для сброса FEC+перемежителя (мимикрия thor tx_process)  
 #define THOR_PREAMBLE_CHARS  4        // <<< СВЕРИТЬ с thor::tx_process (preamble)  
 #define THOR_FLUSH_CHARS     8        // <<< СВЕРИТЬ (FLUSHLENGTH)  
-  
-uint32_t THOR_Base_freq = 3601307;  
-uint8_t  DATA_THOR[THOR_NUMTONES][8];  
+
+// ---------------- MFSK16 (mfsk.cxx: SR 8000, symlen 512) -----------------
+#define MFSK16_NUMTONES      16
+static const double   MFSK16_STEP_HZ   = 15.625;         // 8000/512
+static const uint32_t MFSK16_SYMBOL_US = 64000;          // 512/8000 с
+#define MFSK16_PREAMBLE      107                         // mfsk.cxx: preamble
+#define MFSK16_RSID_CODE     57                          // rsid_defs: MFSK16
+
+// ---------------- DominoEX 8 (dominoex.cxx: SR 8000, symlen 1024) --------
+#define DOMEX_NUMTONES       18
+static const double   DOMEX8_STEP_HZ   = 15.625;         // doublespaced: 2*8000/1024
+static const uint32_t DOMEX8_SYMBOL_US = 128000;         // 1024/8000 с (7.8125 бод)
+#define DOMEX8_RSID_CODE     86                          // rsid_defs: DOMINOEX_8
+
+// ---------------- FSQ (fsq.cxx: SR 12000, FSQ_SYMLEN 4096, spacing 3) ----
+#define FSQ_NUMTONES         33
+static const double   FSQ_STEP_HZ      = 3.0 * 12000.0 / 4096.0; // 8.7890625 Гц
+// Скорость (fsq.cxx: symlen 8192/6144/4096/3072/2048 при 12000 Гц):
+// 1.5 бод 682667, 2 бод 512000, 3 бод 341333, 4.5 бод 256000, 6 бод 170667 мкс
+static const uint32_t FSQ_SYMBOL_US    = 256000;         // FSQ-4.5: 3072/12000 с
+
+// ---------------- RSID (rsid.cxx) ----------------------------------------
+#define RSID_NSYMBOLS        15
+static const double   RSID_STEP_HZ     = 11025.0 / 1024.0; // 10.7666 Гц
+static const uint32_t RSID_SYMBOL_US   = 92880;            // 1024/11025 с
+
+#define MFSK_MAX_TONES       33
+
+uint32_t THOR_Base_freq     = 3601307;  
+uint32_t MFSK16_Base_freq   = 3601307;
+uint32_t DOMINOEX_Base_freq = 3601307;
+uint32_t FSQ_Base_freq      = 3601307;
+uint8_t  DATA_MFSK[MFSK_MAX_TONES][8];  // регистровые пакеты Si5351 текущей сетки
   
 // ---------------- Varicode (ВЕРБАТИМ из fldigi) --------------------------  
 // MFSKvaricode.cxx: varicode[256] (строки '0'/'1'), + varienc()/varidec()  
@@ -429,9 +480,117 @@ static const char *thor_varicode[] = {
      if (sec == 0) return varienc(c);  
      if (c >= ' ' && c <= 'z') return thor_varicode[c - ' '];  
      return varienc(0);  
- }  
+ }
 
+// ---------------- DominoEX nibble-varicode (ВЕРБАТИМ dominovar.cxx) -----
+// varicode[512][3]: 0..255 — primary, 256..511 — secondary алфавит.
+// Первый nibble < 8, продолжения имеют старший бит (0x8).
+static const uint8_t domino_varicode[512][3] = {
+	/* Primary alphabet */
+	{ 1,15, 9}, { 1,15,10}, { 1,15,11}, { 1,15,12}, { 1,15,13}, { 1,15,14}, { 1,15,15}, { 2, 8, 8},
+	{ 2,12, 0}, { 2, 8, 9}, { 2, 8,10}, { 2, 8,11}, { 2, 8,12}, { 2,13, 0}, { 2, 8,13}, { 2, 8,14},
+	{ 2, 8,15}, { 2, 9, 8}, { 2, 9, 9}, { 2, 9,10}, { 2, 9,11}, { 2, 9,12}, { 2, 9,13}, { 2, 9,14},
+	{ 2, 9,15}, { 2,10, 8}, { 2,10, 9}, { 2,10,10}, { 2,10,11}, { 2,10,12}, { 2,10,13}, { 2,10,14},
+	{ 0, 0, 0}, { 7,11, 0}, { 0, 8,14}, { 0,10,11}, { 0, 9,10}, { 0, 9, 9}, { 0, 8,15}, { 7,10, 0},
+	{ 0, 8,12}, { 0, 8,11}, { 0, 9,13}, { 0, 8, 8}, { 2,11, 0}, { 7,14, 0}, { 7,13, 0}, { 0, 8, 9},
+	{ 3,15, 0}, { 4,10, 0}, { 4,15, 0}, { 5, 9, 0}, { 6, 8, 0}, { 5,12, 0}, { 5,14, 0}, { 6,12, 0},
+	{ 6,11, 0}, { 6,14, 0}, { 0, 8,10}, { 0, 8,13}, { 0,10, 8}, { 7,15, 0}, { 0, 9,15}, { 7,12, 0},
+	{ 0, 9, 8}, { 3, 9, 0}, { 4,14, 0}, { 3,12, 0}, { 3,14, 0}, { 3, 8, 0}, { 4,12, 0}, { 5, 8, 0},
+	{ 5,10, 0}, { 3,10, 0}, { 7, 8, 0}, { 6,10, 0}, { 4,11, 0}, { 4, 8, 0}, { 4,13, 0}, { 3,11, 0},
+	{ 4, 9, 0}, { 6,15, 0}, { 3,13, 0}, { 2,15, 0}, { 2,14, 0}, { 5,11, 0}, { 6,13, 0}, { 5,13, 0},
+	{ 5,15, 0}, { 6, 9, 0}, { 7, 9, 0}, { 0,10,14}, { 0,10, 9}, { 0,10,15}, { 0,10,10}, { 0, 9,12},
+	{ 0, 9,11}, { 4, 0, 0}, { 1,11, 0}, { 0,12, 0}, { 0,11, 0}, { 1, 0, 0}, { 0,15, 0}, { 1, 9, 0},
+	{ 0,10, 0}, { 5, 0, 0}, { 2,10, 0}, { 1,14, 0}, { 0, 9, 0}, { 0,14, 0}, { 6, 0, 0}, { 3, 0, 0},
+	{ 1, 8, 0}, { 2, 8, 0}, { 7, 0, 0}, { 0, 8, 0}, { 2, 0, 0}, { 0,13, 0}, { 1,13, 0}, { 1,12, 0},
+	{ 1,15, 0}, { 1,10, 0}, { 2, 9, 0}, { 0,10,12}, { 0, 9,14}, { 0,10,13}, { 0,11, 8}, { 2,10,15},
+	{ 2,11, 8}, { 2,11, 9}, { 2,11,10}, { 2,11,11}, { 2,11,12}, { 2,11,13}, { 2,11,14}, { 2,11,15},
+	{ 2,12, 8}, { 2,12, 9}, { 2,12,10}, { 2,12,11}, { 2,12,12}, { 2,12,13}, { 2,12,14}, { 2,12,15},
+	{ 2,13, 8}, { 2,13, 9}, { 2,13,10}, { 2,13,11}, { 2,13,12}, { 2,13,13}, { 2,13,14}, { 2,13,15},
+	{ 2,14, 8}, { 2,14, 9}, { 2,14,10}, { 2,14,11}, { 2,14,12}, { 2,14,13}, { 2,14,14}, { 2,14,15},
+	{ 0,11, 9}, { 0,11,10}, { 0,11,11}, { 0,11,12}, { 0,11,13}, { 0,11,14}, { 0,11,15}, { 0,12, 8},
+	{ 0,12, 9}, { 0,12,10}, { 0,12,11}, { 0,12,12}, { 0,12,13}, { 0,12,14}, { 0,12,15}, { 0,13, 8},
+	{ 0,13, 9}, { 0,13,10}, { 0,13,11}, { 0,13,12}, { 0,13,13}, { 0,13,14}, { 0,13,15}, { 0,14, 8},
+	{ 0,14, 9}, { 0,14,10}, { 0,14,11}, { 0,14,12}, { 0,14,13}, { 0,14,14}, { 0,14,15}, { 0,15, 8},
+	{ 0,15, 9}, { 0,15,10}, { 0,15,11}, { 0,15,12}, { 0,15,13}, { 0,15,14}, { 0,15,15}, { 1, 8, 8},
+	{ 1, 8, 9}, { 1, 8,10}, { 1, 8,11}, { 1, 8,12}, { 1, 8,13}, { 1, 8,14}, { 1, 8,15}, { 1, 9, 8},
+	{ 1, 9, 9}, { 1, 9,10}, { 1, 9,11}, { 1, 9,12}, { 1, 9,13}, { 1, 9,14}, { 1, 9,15}, { 1,10, 8},
+	{ 1,10, 9}, { 1,10,10}, { 1,10,11}, { 1,10,12}, { 1,10,13}, { 1,10,14}, { 1,10,15}, { 1,11, 8},
+	{ 1,11, 9}, { 1,11,10}, { 1,11,11}, { 1,11,12}, { 1,11,13}, { 1,11,14}, { 1,11,15}, { 1,12, 8},
+	{ 1,12, 9}, { 1,12,10}, { 1,12,11}, { 1,12,12}, { 1,12,13}, { 1,12,14}, { 1,12,15}, { 1,13, 8},
+	{ 1,13, 9}, { 1,13,10}, { 1,13,11}, { 1,13,12}, { 1,13,13}, { 1,13,14}, { 1,13,15}, { 1,14, 8},
+	{ 1,14, 9}, { 1,14,10}, { 1,14,11}, { 1,14,12}, { 1,14,13}, { 1,14,14}, { 1,14,15}, { 1,15, 8},
 
+	/* Secondary alphabet */
+	{ 6,15, 9}, { 6,15,10}, { 6,15,11}, { 6,15,12}, { 6,15,13}, { 6,15,14}, { 6,15,15}, { 7, 8, 8},
+	{ 4,10,12}, { 7, 8, 9}, { 7, 8,10}, { 7, 8,11}, { 7, 8,12}, { 4,10,13}, { 7, 8,13}, { 7, 8,14},
+	{ 7, 8,15}, { 7, 9, 8}, { 7, 9, 9}, { 7, 9,10}, { 7, 9,11}, { 7, 9,12}, { 7, 9,13}, { 7, 9,14},
+	{ 7, 9,15}, { 7,10, 8}, { 7,10, 9}, { 7,10,10}, { 7,10,11}, { 7,10,12}, { 7,10,13}, { 7,10,14},
+	{ 3, 8, 8}, { 4,15,11}, { 5, 8,14}, { 5,10,11}, { 5, 9,10}, { 5, 9, 9}, { 5, 8,15}, { 4,15,10},
+	{ 5, 8,12}, { 5, 8,11}, { 5, 9,13}, { 5, 8, 8}, { 4,10,11}, { 4,15,14}, { 4,15,13}, { 5, 8, 9},
+	{ 4,11,15}, { 4,12,10}, { 4,12,15}, { 4,13, 9}, { 4,14, 8}, { 4,13,12}, { 4,13,14}, { 4,14,12},
+	{ 4,14,11}, { 4,14,14}, { 5, 8,10}, { 5, 8,13}, { 5,10, 8}, { 4,15,15}, { 5, 9,15}, { 4,15,12},
+	{ 5, 9, 8}, { 4,11, 9}, { 4,12,14}, { 4,11,12}, { 4,11,14}, { 4,11, 8}, { 4,12,12}, { 4,13, 8},
+	{ 4,13,10}, { 4,11,10}, { 4,15, 8}, { 4,14,10}, { 4,12,11}, { 4,12, 8}, { 4,12,13}, { 4,11,11},
+	{ 4,12, 9}, { 4,14,15}, { 4,11,13}, { 4,10,15}, { 4,10,14}, { 4,13,11}, { 4,14,13}, { 4,13,13},
+	{ 4,13,15}, { 4,14, 9}, { 4,15, 9}, { 5,10,14}, { 5,10, 9}, { 5,10,15}, { 5,10,10}, { 5, 9,12},
+	{ 5, 9,11}, { 3, 8,12}, { 4, 9,11}, { 4, 8,12}, { 4, 8,11}, { 3, 8, 9}, { 4, 8,15}, { 4, 9, 9},
+	{ 4, 8,10}, { 3, 8,13}, { 4,10,10}, { 4, 9,14}, { 4, 8, 9}, { 4, 8,14}, { 3, 8,14}, { 3, 8,11},
+	{ 4, 9, 8}, { 4,10, 8}, { 3, 8,15}, { 4, 8, 8}, { 3, 8,10}, { 4, 8,13}, { 4, 9,13}, { 4, 9,12},
+	{ 4, 9,15}, { 4, 9,10}, { 4,10, 9}, { 5,10,12}, { 5, 9,14}, { 5,10,12}, { 5,11, 8}, { 7,10,15},
+	{ 7,11, 8}, { 7,11, 9}, { 7,11,10}, { 7,11,11}, { 7,11,12}, { 7,11,13}, { 7,11,14}, { 7,11,15},
+	{ 7,12, 8}, { 7,12, 9}, { 7,12,10}, { 7,12,11}, { 7,12,12}, { 7,12,13}, { 7,12,14}, { 7,12,15},
+	{ 7,13, 8}, { 7,13, 9}, { 7,13,10}, { 7,13,11}, { 7,13,12}, { 7,13,13}, { 7,13,14}, { 7,13,15},
+	{ 7,14, 8}, { 7,14, 9}, { 7,14,10}, { 7,14,11}, { 7,14,12}, { 7,14,13}, { 7,14,14}, { 7,14,15},
+	{ 5,11, 9}, { 5,11,10}, { 5,11,11}, { 5,11,12}, { 5,11,13}, { 5,11,14}, { 5,11,15}, { 5,12, 8},
+	{ 5,12, 9}, { 5,12,10}, { 5,12,11}, { 5,12,12}, { 5,12,13}, { 5,12,14}, { 5,12,15}, { 5,13, 8},
+	{ 5,13, 9}, { 5,13,10}, { 5,13,11}, { 5,13,12}, { 5,13,13}, { 5,13,14}, { 5,13,15}, { 5,14, 8},
+	{ 5,14, 9}, { 5,14,10}, { 5,14,11}, { 5,14,12}, { 5,14,13}, { 5,14,14}, { 5,14,15}, { 5,15, 8},
+	{ 5,15, 9}, { 5,15,10}, { 5,15,11}, { 5,15,12}, { 5,15,13}, { 5,15,14}, { 5,15,15}, { 6, 8, 8},
+	{ 6, 8, 9}, { 6, 8,10}, { 6, 8,11}, { 6, 8,12}, { 6, 8,13}, { 6, 8,14}, { 6, 8,15}, { 6, 9, 8},
+	{ 6, 9, 9}, { 6, 9,10}, { 6, 9,11}, { 6, 9,12}, { 6, 9,13}, { 6, 9,14}, { 6, 9,15}, { 6,10, 8},
+	{ 6,10, 9}, { 6,10,10}, { 6,10,11}, { 6,10,12}, { 6,10,13}, { 6,10,14}, { 6,10,15}, { 6,11, 8},
+	{ 6,11, 9}, { 6,11,10}, { 6,11,11}, { 6,11,12}, { 6,11,13}, { 6,11,14}, { 6,11,15}, { 6,12, 8},
+	{ 6,12, 9}, { 6,12,10}, { 6,12,11}, { 6,12,12}, { 6,12,13}, { 6,12,14}, { 6,12,15}, { 6,13, 8},
+	{ 6,13, 9}, { 6,13,10}, { 6,13,11}, { 6,13,12}, { 6,13,13}, { 6,13,14}, { 6,13,15}, { 6,14, 8},
+	{ 6,14, 9}, { 6,14,10}, { 6,14,11}, { 6,14,12}, { 6,14,13}, { 6,14,14}, { 6,14,15}, { 6,15, 8},
+};
+
+// ---------------- FSQ varicode (ВЕРБАТИМ fsq_varicode.cxx) ---------------
+// fsq_varicode[256][2]: sym1 всегда, sym2 — только если > 28.
+static const uint8_t fsq_varicode[256][2] = {
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   //   0..  7
+	{27,31}, { 0, 0}, {28, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   //   8.. 15
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   //  16.. 23
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   //  24.. 31
+	{ 0, 0}, {11,30}, {12,30}, {13,30}, {14,30}, {15,30}, {16,30}, {17,30},   //  32.. 39
+	{18,30}, {19,30}, {20,30}, {21,30}, {27,29}, {22,30}, {27, 0}, {23,30},   //  40.. 47
+	{10,30}, { 1,30}, { 2,30}, { 3,30}, { 4,30}, { 5,30}, { 6,30}, { 7,30},   //  48.. 55
+	{ 8,30}, { 9,30}, {24,30}, {25,30}, {26,30}, { 0,31}, {27,30}, {28,29},   //  56.. 63
+	{ 0,29}, { 1,29}, { 2,29}, { 3,29}, { 4,29}, { 5,29}, { 6,29}, { 7,29},   //  64.. 71
+	{ 8,29}, { 9,29}, {10,29}, {11,29}, {12,29}, {13,29}, {14,29}, {15,29},   //  72.. 79
+	{16,29}, {17,29}, {18,29}, {19,29}, {20,29}, {21,29}, {22,29}, {23,29},   //  80.. 87
+	{24,29}, {25,29}, {26,29}, { 1,31}, { 2,31}, { 3,31}, { 4,31}, { 5,31},   //  88.. 95
+	{ 9,31}, { 1, 0}, { 2, 0}, { 3, 0}, { 4, 0}, { 5, 0}, { 6, 0}, { 7, 0},   //  96..103
+	{ 8, 0}, { 9, 0}, {10, 0}, {11, 0}, {12, 0}, {13, 0}, {14, 0}, {15, 0},   // 104..111
+	{16, 0}, {17, 0}, {18, 0}, {19, 0}, {20, 0}, {21, 0}, {22, 0}, {23, 0},   // 112..119
+	{24, 0}, {25, 0}, {26, 0}, { 6,31}, { 7,31}, { 8,31}, { 0,30}, {28,31},   // 120..127
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 128..135
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 136..143
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 144..151
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 152..159
+	{ 0, 0}, { 0, 0}, { 0, 0}, {14,31}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 160..167
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 168..175
+	{12,31}, {10,31}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 176..183
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 184..191
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 192..199
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 200..207
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, {13,31},   // 208..215
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 216..223
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 224..231
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 232..239
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, {11,31},   // 240..247
+	{ 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0}, { 0, 0},   // 248..255
+};
 
 // ---------------- Свёрточный кодер (viterbi.cxx::encoder) ----------------  
 static uint32_t enc_shreg = 0;  
@@ -445,6 +604,7 @@ static inline uint8_t thor_encode(uint8_t bit) {
 }  
   
 // ---------------- Перемежитель (interleave.cxx, INTERLEAVE_FWD) ----------  
+// THOR и MFSK16 используют одинаковый перемежитель 4x10.
 static uint8_t il_table[THOR_IL_DEPTH * THOR_IL_SIZE * THOR_IL_SIZE];  
 static inline uint8_t* il_tab(int i, int j, int k) {  
     return &il_table[(THOR_IL_SIZE*THOR_IL_SIZE*i) + (THOR_IL_SIZE*j) + k];  
@@ -470,49 +630,89 @@ static void il_bits(uint32_t* pbits) {
     for (int i = 0; i < THOR_IL_SIZE; i++) v = (v << 1) | syms[i];  
     *pbits = v;  
 }  
-  
-// ---------------- Сетка частот (18 тонов) --------------------------------  
-void prepare_thor_frequencies(uint32_t base_hz) {
-    THOR_Base_freq = base_hz;
+
+// ---------------- FEC-конвейер: бит -> кодер -> 4 бита -> перемежитель ---
+// (thor::sendchar / mfsk::sendbit). sym_out == nullptr — без выдачи в эфир
+// (mfsk::clearbits: прогрев перемежителя нулями).
+typedef bool (*fec_sym_fn)(uint8_t sym);
+static uint32_t fec_bitshreg = 0;
+static int      fec_bitstate = 0;
+
+static void fec_reset() {
+    thor_enc_init();
+    il_init();
+    fec_bitshreg = 0;
+    fec_bitstate = 0;
+}
+
+static bool fec_send_bit(uint8_t bit, fec_sym_fn sym_out) {
+    uint8_t data = thor_encode(bit);
+    for (int i = 0; i < 2; i++) {
+        fec_bitshreg = (fec_bitshreg << 1) | ((data >> i) & 1u);
+        fec_bitstate++;
+        if (fec_bitstate == THOR_IL_SIZE) {
+            il_bits(&fec_bitshreg);
+            if (sym_out && !sym_out((uint8_t)(fec_bitshreg & 0x0F))) return false;
+            fec_bitstate = 0;
+            fec_bitshreg = 0;
+        }
+    }
+    return true;
+}
+
+static bool fec_send_code(const char* code, fec_sym_fn sym_out) {
+    while (*code)
+        if (!fec_send_bit((uint8_t)(*code++ - '0'), sym_out)) return false;
+    return true;
+}
+
+// =========================================================================
+//  ОБЩИЙ MFSK-ДВИЖОК
+// =========================================================================
+static uint8_t  mfsk_numtones = 0;
+static uint32_t mfsk_next_deadline_us = 0;
+
+void mfsk_prepare(uint32_t base_hz, double step_hz, uint8_t numtones) {
+    if (numtones > MFSK_MAX_TONES) numtones = MFSK_MAX_TONES;
+    mfsk_numtones = numtones;
 		// ЕСЛИ СИНТЕЗАТОР ОТСУТСТВУЕТ - ИНИЦИАЛИЗИРУЕМ PIO ЯДРО И ВЫХОДИМ
     if (!device_SI[0]) {
-        vfo_hardware_init(base_hz, THOR_STEP_HZ);
+        vfo_hardware_init(base_hz, step_hz);
         vfo_set_tone_instant(0);  
         if (debug_flag) {
-            Serial.print(F("[THOR] PIO готов, база "));
+            Serial.print(F("[MFSK] PIO готов, база "));
             Serial.print(base_hz); Serial.print(F(" Гц, шаг "));
-            Serial.print(THOR_STEP_HZ, 4); Serial.println(F(" Гц"));
+            Serial.print(step_hz, 4); Serial.print(F(" Гц, тонов "));
+            Serial.println(numtones);
         }
         return;  
     }
 
     // Если синтезатор установлен - расчет байт для Si5351
     uint64_t base_mHz = (uint64_t)base_hz * 1000ULL;  
-    uint64_t step_mHz = (uint64_t)(THOR_STEP_HZ * 1000.0);  
-    for (int i = 0; i < THOR_NUMTONES; i++)  
-        si_calculate_freq_bytes_mHz(base_mHz + (uint64_t)i * step_mHz, DATA_THOR[i]);  
+    for (uint8_t i = 0; i < numtones; i++)  
+        si_calculate_freq_bytes_mHz(base_mHz + (uint64_t)((double)i * step_hz * 1000.0 + 0.5),
+                                    DATA_MFSK[i]);  
 }  
-  
-static void thor_set_tone(uint8_t tone) {  
-    if (tone >= THOR_NUMTONES) return;  
-    if (device_SI[0] && SI_FAIL == false) setFrq_si5351(DATA_THOR[tone]);  
+
+static void mfsk_set_tone(uint8_t tone) {  
+    if (tone >= mfsk_numtones) return;  
+    if (device_SI[0] && SI_FAIL == false) setFrq_si5351(DATA_MFSK[tone]);  
     else                                  vfo_set_tone_instant(tone);  
 }  
+
+// Отсчёт дедлайнов заново от текущего момента (после пересчёта сетки и т.п.)
+static inline void mfsk_sync_deadline() { mfsk_next_deadline_us = micros(); }
+
+// Ожидание конца текущего символа по абсолютному дедлайну.
+// led=true: красный LED в начале символа, гаснет на середине.
+static bool mfsk_wait_symbol(uint32_t symbol_us, bool led) {
+    uint32_t deadline = mfsk_next_deadline_us + symbol_us;
+    uint32_t half_off_us = deadline - (symbol_us / 2);  
+    bool led_half_off = !led;
+    if (led) ZERO_LED_RED_ON();  
   
-// ---------------- IFK+ символ + тайминг (абсолютный дедлайн) -------------  
-static uint8_t  thor_prevtone = 0;  
-static uint32_t thor_next_deadline_us = 0;  
-  
-static inline bool thor_emit_tone(uint8_t tone) {  
-    thor_set_tone(tone);  
-  
-    // Красный светодиод зажигается в начале каждого символа и гаснет  
-    // на середине длительности — визуальное мигание в такт передаче.  
-    ZERO_LED_RED_ON();  
-    bool led_half_off = false;  
-    uint32_t half_off_us = thor_next_deadline_us - (THOR_SYMBOL_US / 2);  
-  
-    while ((int32_t)(micros() - thor_next_deadline_us) < 0) {  
+    while ((int32_t)(micros() - deadline) < 0) {  
         if (pc_file_written || soft_restart_flag) { ZERO_LED_OFF(); return false; }  
         if (Serial.available() > 0) { soft_restart_flag = true; ZERO_LED_OFF(); return false; }  
   
@@ -524,84 +724,324 @@ static inline bool thor_emit_tone(uint8_t tone) {
         delayMicroseconds(20);  
         watchdog_update();  
     }  
-    thor_next_deadline_us += THOR_SYMBOL_US;  
+    mfsk_next_deadline_us = deadline;  
     return true;  
 }
-  
-static inline bool thor_send_symbol(uint8_t sym) {  
-    uint8_t tone = (uint8_t)((thor_prevtone + sym + 2) % THOR_NUMTONES); // IFK+ (+2)  
-    thor_prevtone = tone;  
-#if THOR_INVERT_TONES  
-    tone = (uint8_t)((THOR_NUMTONES - 1) - tone);  
-#endif  
-    return thor_emit_tone(tone);  
-}  
-  
-// ---------------- Кодирование символа (thor::sendchar) ------------------  
-static uint32_t thor_bitshreg = 0;  
-static int      thor_bitstate = 0;  
-  
-static bool thor_send_coded(uint8_t c, int secondary) {  
-    const char* code = thorvarienc(c, secondary);   // требует таблиц выше  
-    while (*code) {  
-        uint8_t data = thor_encode((uint8_t)(*code++ - '0'));  
-        for (int i = 0; i < 2; i++) {  
-            thor_bitshreg = (thor_bitshreg << 1) | ((data >> i) & 1u);  
-            thor_bitstate++;  
-            if (thor_bitstate == 4) {  
-                il_bits(&thor_bitshreg);  
-                if (!thor_send_symbol((uint8_t)(thor_bitshreg & 0x0F))) return false;  
-                thor_bitstate = 0;  
-                thor_bitshreg = 0;  
-            }  
-        }  
-    }  
-    return true;  
-}  
-  
-void thor_send_char(char c) {  
-    if (pc_file_written || soft_restart_flag) return;  
-    if (c != '\r' && c != '\n') Serial.print(c);  
-    thor_send_coded((uint8_t)c, 0);  
-}  
-  
-// ---------------- Передача строки ---------------------------------------  
-void thor_send_string(const char* str) {  
-    if (str == nullptr) return;  
-  
-    // Сброс состояния конвейера  
-    thor_enc_init();  
-    il_init();  
-    thor_prevtone = 0;  
-    thor_bitshreg = 0;  
-    thor_bitstate = 0;  
-  
+
+bool mfsk_emit_tone(uint8_t tone, uint32_t symbol_us) {  
+    mfsk_set_tone(tone);  
+    return mfsk_wait_symbol(symbol_us, true);
+}
+
+static void mfsk_carrier(bool on) {
+    if (device_SI[0]) { if (on) VFO_TX_ON(); else VFO_TX_OFF(); }
+    else              vfo_operation_set(on);
+}
+
+static void mfsk_tx_begin() {
     vfo_set_narrowband(true);                 // глушим FRAC-дизер (как Olivia)  
     if (!device_SI[0]) {  
         vfo_operation_set(false);  
         vfo_set_tone_instant(0);  
         vfo_operation_set(true);  
     } else { VFO_TX_ON(); }  
-  
-    thor_next_deadline_us = micros() + THOR_SYMBOL_US;  
-  
-    // Преамбула (idle) — захват синхронизации декодером  
-    for (int i = 0; i < THOR_PREAMBLE_CHARS && !pc_file_written && !soft_restart_flag; i++)  
-        thor_send_coded(0, 0);  
-  
-    // Полезная нагрузка  
-    while (*str && !pc_file_written && !soft_restart_flag)  
-        thor_send_char(*str++);  
-  
-    // Хвост — сброс перемежителя и свёрточного кодера  
-    for (int i = 0; i < THOR_FLUSH_CHARS && !pc_file_written && !soft_restart_flag; i++)  
-        thor_send_coded(0, 0);  
-  
-    if (device_SI[0]) VFO_TX_OFF();  
-    else              vfo_operation_set(false);  
+    mfsk_sync_deadline();
+}
+
+static void mfsk_tx_end() {
+    mfsk_carrier(false);
     vfo_set_narrowband(false);  
     ZERO_LED_OFF();  
     Serial.println("");  
+}
+
+static inline bool mfsk_abort() { return pc_file_written || soft_restart_flag; }
+
+static inline void mfsk_echo(uint8_t c) {
+    if (c >= ' ') Serial.print((char)c);
+}
+
+// =========================================================================
+//  RSID (rsid.cxx: cRsId::Encode / cRsId::send)
+// =========================================================================
+static const uint8_t rsid_squares[256] = {
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,
+	0, 2, 4, 6, 8,10,12,14, 9,11,13,15, 1, 3, 5, 7,
+	0, 3, 6, 5,12,15,10, 9, 1, 2, 7, 4,13,14,11, 8,
+	0, 4, 8,12, 9,13, 1, 5,11,15, 3, 7, 2, 6,10,14,
+	0, 5,10,15,13, 8, 7, 2, 3, 6, 9,12,14,11, 4, 1,
+	0, 6,12,10, 1, 7,13,11, 2, 4,14, 8, 3, 5,15, 9,
+	0, 7,14, 9, 5, 2,11,12,10,13, 4, 3,15, 8, 1, 6,
+	0, 8, 9, 1,11, 3, 2,10,15, 7, 6,14, 4,12,13, 5,
+	0, 9,11, 2,15, 6, 4,13, 7,14,12, 5, 8, 1, 3,10,
+	0,10,13, 7, 3, 9,14, 4, 6,12,11, 1, 5,15, 8, 2,
+	0,11,15, 4, 7,12, 8, 3,14, 5, 1,10, 9, 2, 6,13,
+	0,12, 1,13, 2,14, 3,15, 4, 8, 5, 9, 6,10, 7,11,
+	0,13, 3,14, 6,11, 5, 8,12, 1,15, 2,10, 7, 9, 4,
+	0,14, 5,11,10, 4,15, 1,13, 3, 8, 6, 7, 9, 2,12,
+	0,15, 7, 8,14, 1, 9, 6, 5,10, 2,13,11, 4,12, 3
+};
+static const uint8_t rsid_indices[12] = { 2, 4, 8, 9, 11, 15, 7, 14, 5, 10, 13, 3 };
+
+void rsid_encode(uint16_t code, uint8_t* rsid /*15*/) {
+    rsid[0] = (uint8_t)(code >> 8);
+    rsid[1] = (uint8_t)((code >> 4) & 0x0f);
+    rsid[2] = (uint8_t)(code & 0x0f);
+    for (int i = 3; i < RSID_NSYMBOLS; i++) rsid[i] = 0;
+    for (int i = 0; i < 12; i++) {
+        for (int j = RSID_NSYMBOLS - 1; j > 0; j--)
+            rsid[j] = rsid[j - 1] ^ rsid_squares[(rsid[j] << 4) + rsid_indices[i]];
+        rsid[0] = rsid_squares[(rsid[0] << 4) + rsid_indices[i]];
+    }
+}
+
+// 5 символов тишины + 15 тонов: f = center - 7*step + tone*step.
+// Оставляет в mfsk_prepare сетку RSID — вызывающий восстанавливает свою.
+bool rsid_send(uint16_t code, double center_hz) {
+    uint8_t rsid[RSID_NSYMBOLS];
+    rsid_encode(code, rsid);
+    mfsk_prepare((uint32_t)(center_hz - 7.0 * RSID_STEP_HZ + 0.5), RSID_STEP_HZ, 16);
+
+    mfsk_carrier(false);
+    mfsk_sync_deadline();
+    for (int i = 0; i < 5; i++)
+        if (!mfsk_wait_symbol(RSID_SYMBOL_US, false)) return false;
+
+    mfsk_set_tone(rsid[0]);
+    mfsk_carrier(true);
+    for (int i = 0; i < RSID_NSYMBOLS; i++)
+        if (!mfsk_emit_tone(rsid[i], RSID_SYMBOL_US)) return false;
+    return true;
+}
+
+// =========================================================================
+//  THOR
+// =========================================================================
+void prepare_thor_frequencies(uint32_t base_hz) {
+    THOR_Base_freq = base_hz;
+    mfsk_prepare(base_hz, THOR_STEP_HZ, THOR_NUMTONES);
+}  
+  
+static uint8_t thor_prevtone = 0;  
+  
+static bool thor_send_symbol(uint8_t sym) {  
+    uint8_t tone = (uint8_t)((thor_prevtone + sym + 2) % THOR_NUMTONES); // IFK+ (+2)  
+    thor_prevtone = tone;  
+#if THOR_INVERT_TONES  
+    tone = (uint8_t)((THOR_NUMTONES - 1) - tone);  
+#endif  
+    return mfsk_emit_tone(tone, THOR_SYMBOL_US);  
+}  
+  
+static bool thor_send_coded(uint8_t c, int secondary) {  
+    return fec_send_code(thorvarienc(c, secondary), thor_send_symbol);
+}  
+  
+void thor_send_char(char c) {  
+    if (mfsk_abort()) return;  
+    mfsk_echo((uint8_t)c);
+    thor_send_coded((uint8_t)c, 0);  
+}  
+  
+void thor_send_string(const char* str) {  
+    if (str == nullptr) return;  
+  
+    fec_reset();
+    thor_prevtone = 0;  
+    mfsk_tx_begin();
+  
+    // Преамбула (idle) — захват синхронизации декодером  
+    for (int i = 0; i < THOR_PREAMBLE_CHARS && !mfsk_abort(); i++)  
+        thor_send_coded(0, 0);  
+  
+    // Полезная нагрузка  
+    while (*str && !mfsk_abort())  
+        thor_send_char(*str++);  
+  
+    // Хвост — сброс перемежителя и свёрточного кодера  
+    for (int i = 0; i < THOR_FLUSH_CHARS && !mfsk_abort(); i++)  
+        thor_send_coded(0, 0);  
+  
+    mfsk_tx_end();
 }  
   
 void thor_send_string(String str) { thor_send_string(str.c_str()); }
+
+// =========================================================================
+//  MFSK16 (mfsk.cxx)
+// =========================================================================
+void prepare_mfsk16_frequencies(uint32_t base_hz) {
+    MFSK16_Base_freq = base_hz;
+    mfsk_prepare(base_hz, MFSK16_STEP_HZ, MFSK16_NUMTONES);
+}
+
+// misc.cxx: grayencode
+static inline uint8_t mfsk_grayencode(uint8_t data) {
+    uint8_t bits = data;
+    for (int i = 1; i < 8; i++) bits ^= (uint8_t)(data >> i);
+    return bits;
+}
+
+// mfsk::sendsymbol: абсолютный тон = grayencode(sym), без IFK
+static bool mfsk16_send_symbol(uint8_t sym) {
+    return mfsk_emit_tone(mfsk_grayencode(sym & (MFSK16_NUMTONES - 1)), MFSK16_SYMBOL_US);
+}
+
+static inline bool mfsk16_send_bit(uint8_t bit) { return fec_send_bit(bit, mfsk16_send_symbol); }
+
+static bool mfsk16_send_char(uint8_t c) {
+    mfsk_echo(c);
+    return fec_send_code(varienc(c), mfsk16_send_symbol);
+}
+
+void mfsk16_send_string(const char* str) {
+    if (str == nullptr) return;
+    fec_reset();
+    mfsk_tx_begin();
+
+    if (!rsid_send(MFSK16_RSID_CODE, MFSK16_Base_freq + 7.5 * MFSK16_STEP_HZ)) goto done;
+    mfsk_prepare(MFSK16_Base_freq, MFSK16_STEP_HZ, MFSK16_NUMTONES);
+    mfsk_sync_deadline();
+
+    // TX_STATE_PREAMBLE: clearbits() + preamble/3 нулевых бит
+    for (int i = 0; i < MFSK16_PREAMBLE; i++) fec_send_bit(0, nullptr);
+    for (int i = 0; i < MFSK16_PREAMBLE / 3; i++) if (!mfsk16_send_bit(0)) goto done;
+
+    // TX_STATE_START: CR STX CR
+    if (!fec_send_code(varienc('\r'), mfsk16_send_symbol)) goto done;
+    if (!fec_send_code(varienc(2),    mfsk16_send_symbol)) goto done;
+    if (!fec_send_code(varienc('\r'), mfsk16_send_symbol)) goto done;
+
+    while (*str)
+        if (!mfsk16_send_char((uint8_t)*str++)) goto done;
+
+    // TX_STATE_FLUSH: CR EOT CR + flushtx(preamble)
+    if (!fec_send_code(varienc('\r'), mfsk16_send_symbol)) goto done;
+    if (!fec_send_code(varienc(4),    mfsk16_send_symbol)) goto done;
+    if (!fec_send_code(varienc('\r'), mfsk16_send_symbol)) goto done;
+    if (!mfsk16_send_bit(1)) goto done;
+    for (int i = 0; i < MFSK16_PREAMBLE; i++) if (!mfsk16_send_bit(0)) goto done;
+
+done:
+    mfsk_tx_end();
+}
+
+void mfsk16_send_string(String str) { mfsk16_send_string(str.c_str()); }
+
+// =========================================================================
+//  DominoEX 8 (dominoex.cxx, без FEC)
+// =========================================================================
+void prepare_dominoex_frequencies(uint32_t base_hz) {
+    DOMINOEX_Base_freq = base_hz;
+    mfsk_prepare(base_hz, DOMEX8_STEP_HZ, DOMEX_NUMTONES);
+}
+
+static uint8_t domex_prevtone = 0;
+
+static bool domex_send_symbol(uint8_t sym) {
+    uint8_t tone = (uint8_t)((domex_prevtone + 2 + sym) % DOMEX_NUMTONES);   // IFK+
+    domex_prevtone = tone;
+    return mfsk_emit_tone(tone, DOMEX8_SYMBOL_US);
+}
+
+// dominoex::sendchar: первый nibble всегда, продолжения — пока установлен 0x8
+static bool domex_send_char(uint8_t c, bool secondary) {
+    const uint8_t* code = domino_varicode[c + (secondary ? 256 : 0)];
+    if (!domex_send_symbol(code[0])) return false;
+    for (int k = 1; k < 3; k++) {
+        if (!(code[k] & 0x8)) break;
+        if (!domex_send_symbol(code[k])) return false;
+    }
+    return true;
+}
+
+static inline bool domex_send_idle() { return domex_send_char(0, true); }   // secondary NUL
+
+void dominoex_send_string(const char* str) {
+    if (str == nullptr) return;
+    domex_prevtone = 0;
+    mfsk_tx_begin();
+
+    if (!rsid_send(DOMEX8_RSID_CODE, DOMINOEX_Base_freq + 8.5 * DOMEX8_STEP_HZ)) goto done;
+    mfsk_prepare(DOMINOEX_Base_freq, DOMEX8_STEP_HZ, DOMEX_NUMTONES);
+    mfsk_sync_deadline();
+
+    if (!domex_send_idle()) goto done;                                      // PREAMBLE
+    if (!domex_send_char('\r', false) || !domex_send_char(2, false) ||
+        !domex_send_char('\r', false)) goto done;                           // START
+
+    while (*str) {
+        mfsk_echo((uint8_t)*str);
+        if (!domex_send_char((uint8_t)*str++, false)) goto done;
+    }
+
+    if (!domex_send_char('\r', false) || !domex_send_char(4, false) ||
+        !domex_send_char('\r', false)) goto done;                           // END
+    for (int i = 0; i < 4; i++) if (!domex_send_idle()) goto done;          // FLUSH
+
+done:
+    mfsk_tx_end();
+}
+
+void dominoex_send_string(String str) { dominoex_send_string(str.c_str()); }
+
+// =========================================================================
+//  FSQ (fsq.cxx, недиректный режим: " " BOL "<call>:" текст EOL)
+// =========================================================================
+#define FSQBOL " \n"
+#define FSQEOL "\n "
+
+void prepare_fsq_frequencies(uint32_t base_hz) {
+    FSQ_Base_freq = base_hz;
+    mfsk_prepare(base_hz, FSQ_STEP_HZ, FSQ_NUMTONES);
+}
+
+static uint8_t fsq_prevtone = 0;
+
+static bool fsq_send_symbol(uint8_t sym) {
+    uint8_t tone = (uint8_t)((fsq_prevtone + sym + 1) % FSQ_NUMTONES);    // IFK+
+    fsq_prevtone = tone;
+    return mfsk_emit_tone(tone, FSQ_SYMBOL_US);
+}
+
+// fsq::send_char: 0 -> idle (28,30); иначе sym1, и sym2 только если > 28
+static bool fsq_send_char(uint8_t c) {
+    if (c == 0) return fsq_send_symbol(28) && fsq_send_symbol(30);
+    uint8_t sym1 = fsq_varicode[c][0];
+    uint8_t sym2 = fsq_varicode[c][1];
+    if (!fsq_send_symbol(sym1)) return false;
+    if (sym2 > 28 && !fsq_send_symbol(sym2)) return false;
+    return true;
+}
+
+static bool fsq_send_cstr(const char* s) {
+    while (*s) if (!fsq_send_char((uint8_t)*s++)) return false;
+    return true;
+}
+
+void fsq_send_string(const char* str) {
+    if (str == nullptr) return;
+    fsq_prevtone = 0;
+    mfsk_tx_begin();   // сетка уже задана prepare_fsq_frequencies()
+
+    // BOT: " " + FSQBOL + mycall + ":" (без CRC — недиректный режим)
+    if (!fsq_send_cstr(" " FSQBOL)) goto done;
+    if (!fsq_send_cstr(my_call_variable.c_str())) goto done;
+    if (!fsq_send_char(':')) goto done;
+
+    // CR в fsq_varicode отсутствует (={0,0} -> пробел) — переводы строк только LF
+    while (*str) {
+        uint8_t c = (uint8_t)*str++;
+        if (c == '\r') continue;
+        mfsk_echo(c);
+        if (!fsq_send_char(c)) goto done;
+    }
+
+    fsq_send_cstr(FSQEOL);
+
+done:
+    mfsk_tx_end();
+}
+
+void fsq_send_string(String str) { fsq_send_string(str.c_str()); }

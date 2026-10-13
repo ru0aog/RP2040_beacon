@@ -163,19 +163,17 @@ VfoParameters __attribute__((section(".time_critical.vfo_tones"))) vfo_tones[VFO
 
 // Доступ к глобальному состоянию усилителя мощности для манипуляции ключом CW
 extern bool dev_TX_state; 
+
+static PIO lo_pio = pio0;
+static unsigned int lo_sm = 0;
+
 static unsigned int lo_offset = 0;
 static bool pio_program_loaded = false;
+
+
 static uint8_t current_active_tone = VFO_TONE_NONE;
 static volatile bool tone_changed = false;
 
-// --- Квадратурный канал Q ---  
-static PIO lo_pio = pio0;  
-static unsigned int lo_sm = 0;  
-// --- Квадратура I/Q (временная реализация: задержка старта Q-SM) ---  
-int pin_freq_out_q = 22;            // GP22 — канал Q; I остаётся на pin_freq_out  
-static unsigned int lo_sm_q = 1;    // SM1 на том же pio0 и той же программе  
-static bool q_sm_ready = false;  
-static volatile uint32_t vfo_delay_sysclk = 0; // n тактов clk_sys (0 = квадратура выкл)
 
 // Межъядерный аппаратный спинлок
 static spin_lock_t* vfo_spin_lock = nullptr;
@@ -580,16 +578,6 @@ static inline __attribute__((always_inline)) uint32_t __not_in_flash_func(vfo_xo
     return x;
 }
 
-
-// --- Статический хелпер задержки: n итераций × 3 такта (subs+bne на M0+) ---  
-// Живёт в RAM — критично: flash-кэш-промах ломает точность задержки.  
-static inline void __not_in_flash_func(vfo_delay_cycles)(uint32_t n) {  
-    __asm volatile (  
-        "1: subs %0, %0, #1 \n"  
-        "   bne 1b          \n"  
-        : "+r" (n) :: "cc"  
-    );  
-}  
 
 
 /**  
@@ -1275,44 +1263,12 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
 
 
 
-
-
-
-
-// Порог перехода задержка->div4 зависит от фактической частоты шины:  
-// n_ideal = clk_sys/(4·F); ошибка фазы растёт как ~45°/n.  
-// 133 МГц -> 7.5 МГц (n≈4.4, ~±10°), 300+ МГц -> 15 МГц (n≈5+, ~±9°).  
-#define VFO_QUAD_CLKSYS_BOOST_HZ   200000000u   // выше = считаем разгоном  
-#define VFO_QUAD_THRESH_LOW_HZ      7500000ULL  // штатная шина  
-#define VFO_QUAD_THRESH_HIGH_HZ    15000000ULL  // разогнанная шина  
-  
-
-static void vfo_quad_update(uint64_t base_hz) {  
-    // фактическая частота шины: берём из живого состояния PLL,  
-    // а не из константы — буст Термогуарда меняет её на лету  
-    
-    // берём фактическую частоту шины напрямую  
-    uint64_t clk_sys = current_clk_sys_hz;  
-    uint64_t threshold = (clk_sys > VFO_CLK_SYS_NOMINAL_HZ) ? 15000000ULL : 7500000ULL;
-  
-    vfo_quad_div4 = (base_hz >= threshold) ? 1 : 0;  
-  
-    if (!vfo_quad_div4) {  
-        // n = round(clk_sys / (4·F)) тактов clk_sys до старта Q-SM;  
-        // -2 компенсирует ~2 такта на рестарт SM из core1  
-        uint64_t n = ((uint64_t)clk_sys + 2 * base_hz) / (4 * base_hz);  
-        vfo_delay_sysclk = (n > 2) ? (uint32_t)(n - 2) : 1u;  
-    }  
-    quad_resync = 1;   // core1 применит на следующей итерации цикла  
-}
-
 // vfo_hardware.cpp — вынести блок заполнения в функцию:  
 static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {  
     for (int i = 0; i < VFO_TONES_COUNT; i++) {  
         uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);  
         vfo_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
-    }
-
+    }  
     // Сбросить кэш активного тона, чтобы следующий vfo_set_tone_instant применил новые значения  
     current_active_tone = VFO_TONE_NONE;  
 }
@@ -1411,20 +1367,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     pio_sm_init(lo_pio, lo_sm, lo_offset, &c); 
     pio_sm_set_enabled(lo_pio, lo_sm, true);
 
-    // --- Q-канал: вторая SM на той же PIO-программе, свой пин ---  
-    if (!q_sm_ready) {  
-        pio_gpio_init(lo_pio, pin_freq_out_q);  
-        pio_sm_config c_q = pio_get_default_sm_config();  
-        sm_config_set_set_pins(&c_q, pin_freq_out_q, 1);  
-        sm_config_set_clkdiv_int_frac(&c_q,  
-                                      vfo_tones[0].pio_int,  
-                                      vfo_tones[0].pio_frac);  
-        pio_sm_init(lo_pio, lo_sm_q, lo_offset, &c_q);  
-        pio_sm_set_enabled(lo_pio, lo_sm_q, false);  
-        pio_sm_set_consecutive_pindirs(lo_pio, lo_sm_q, pin_freq_out_q, 1, false);  
-        q_sm_ready = true;  
-    }
-
     // Расчет базовой частоты и привязка к сетке Брезенхема
     uint64_t base_target_chz = (uint64_t)base_freq_hz * 100ULL; 
     uint64_t snapped_base_chz = base_target_chz;
@@ -1435,33 +1377,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // Синхронный потокобезопасный расчет всей FSK/IFKP таблицы тонов
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz); 
     vfo_set_tone_instant(0);
-
-
-    // --- Задержка старта Q на 90°: n = round(clk_sys / (4·F)) тактов ---  
-    {  
-        uint64_t n = (current_clk_sys_hz + 2ULL * base_freq_hz)  
-                     / (4ULL * base_freq_hz);  
-        vfo_delay_sysclk = (n > 2) ? (uint32_t)(n - 1) : 0u; // -1: оверхед записи в ctrl  
-    }
-
-    if (vfo_delay_sysclk && q_sm_ready) {  
-        pio_sm_set_enabled(lo_pio, lo_sm,   false);  
-        pio_sm_set_enabled(lo_pio, lo_sm_q, false);  
-        // одинаковый clkdiv в обе SM (формат: int<<16 | frac<<8)  
-        uint32_t cd = (vfo_tones[0].pio_int << 16)  
-                    | (vfo_tones[0].pio_frac << 8);  
-        lo_pio->sm[lo_sm].clkdiv   = cd;  
-        lo_pio->sm[lo_sm_q].clkdiv = cd;  
-        pio_sm_restart(lo_pio, lo_sm);  
-        pio_sm_restart(lo_pio, lo_sm_q);  
-        pio_sm_set_enabled(lo_pio, lo_sm,   true);  
-        pio_sm_set_enabled(lo_pio, lo_sm_q, true);  
-  
-        // Рестарт делителей с интервалом n тактов -> сдвиг фазы Q на 90°  
-        pio_sm_clkdiv_restart(lo_pio, lo_sm);  
-        vfo_delay_cycles(vfo_delay_sysclk);  
-        pio_sm_clkdiv_restart(lo_pio, lo_sm_q);  
-    }
 
 // Диагностический вывод рантайм-телеметрии в Serial  
     #if VFO_PLL_DEBUG  
@@ -2513,5 +2428,4 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, key_down);
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm_q, pin_freq_out_q, 1, key_down);
 }

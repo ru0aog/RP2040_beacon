@@ -44,6 +44,20 @@
  *  get_telemetry_string()     — строка "T_DS=.. T_CPU=..".  
  *  is_time_to_transmit(mode)  — проверка расписания для режима.  
  *  handle_time_command / handle_date_command — установка времени/даты из UART.  
+ *  
+ *  ИСПОЛЬЗУЕМЫЕ БИБЛИОТЕКИ И МОДУЛИ  
+ *  -------------------------------  
+ *  - Raspberry Pi Pico SDK (BSD-3): hardware/adc.h, hardware/rtc.h,  
+ *    hardware/clocks.h, pico/util/datetime.h (datetime_t)  
+ *  - Arduino core RP2040 (LGPL-2.1): TwoWire/Wire (I2C), Serial,  
+ *    snprintf, GPIO  
+ *  - Модули проекта: scheduler.h, file_manager.h, si5351_driver.h,  
+ *    climate_log.h, vfo_hardware.h  
+ *  - Сторонний код отсутствует: драйвер DS3231/DS1307 и матричный  
+ *    планировщик — оригинальная разработка автора проекта.  
+ *  
+ *  Этот файл — часть RP2040_beacon, распространяется под GPLv3  
+ *  (см. LICENSE в корне репозитория).  
  * ============================================================================  
  */
 

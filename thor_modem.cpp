@@ -1,14 +1,24 @@
-/**  
- * thor_modem.cpp — Модулятор THOR 8 / THOR 11 (MFSK, IFK+, FEC k=7 + перемежитель)  
- *  
- * Цепочка передачи (как в fldigi thor::sendchar/sendsymbol):  
- *   ASCII --varicode--> биты --свёрт.кодер(1/2)--> по 2 бита  
- *        --> накопление 4 бит --> перемежитель(4xD) --> символ 0..15  
- *        --> IFK+:  tone = (prevtone + sym + 2) % 18  
- *   18 тонов, прямоугольная манипуляция через vfo_set_tone_instant().  
- *   Дизер глушится vfo_set_narrowband(true) на время TX (как в Olivia).  
- *  
- */  
+/**    
+ * ============================================================================    
+ *  thor_modem.cpp — Модулятор THOR 8 / THOR 11 (MFSK, IFK+, FEC k=7 + перемежитель)
+ *  Алгоритмы адаптированы из fldigi (GPLv3, David Freese W1HKJ и др.)
+ * ============================================================================    
+ *  Цепочка передачи (как в fldigi thor::sendchar/sendsymbol):    
+ *    ASCII --varicode--> биты --свёрт.кодер(1/2)--> по 2 бита    
+ *         --> накопление 4 бит --> перемежитель(4xD) --> символ 0..15    
+ *         --> IFK+:  tone = (prevtone + sym + 2) % 18    
+ *    18 тонов, прямоугольная манипуляция через vfo_set_tone_instant().    
+ *    Дизер глушится vfo_set_narrowband(true) на время TX.    
+ *    
+ *  ---- Производный код / использованные источники -------------------------    
+ *  Алгоритмы адаптированы из fldigi (GPLv3, David Freese W1HKJ и др.):    
+ *    - thor.cxx / thor.h: свёрточный код k=7 (0x6d,0x4f), перемежитель 4x10,    
+ *      IFK+ (+2), тайминги символов, преамбула/флаш    
+ *    - MFSKvaricode.cxx / thorvaricode.cxx: таблицы varicode    
+ *      (varicode IZ8BLY / ZL1BPU MFSK standard)    
+ *    
+ * ============================================================================    
+ */
   
 #include <Arduino.h>  
 #include "thor_modem.h"  

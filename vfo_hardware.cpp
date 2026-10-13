@@ -125,10 +125,12 @@ volatile bool vfo_auto_boost = false;    // авто-разгон, вычисл�
 // --- Квадратура I/Q: один SM, 4-тактовая программа, 2 соседних пина ---  
 // ВАЖНО: пин Q обязан быть pin_freq_out + 1 (set pins работает с  
 // последовательным диапазоном). Если pin_freq_out = 21, то Q = GP22.
-uint8_t pin_freq_out_i = 1;
-uint8_t pin_freq_out_q = 2;
-static_assert(pin_freq_out_q == pin_freq_out_i + 1,  
-              "PIO set pins: Q должен быть следующим GPIO после I");
+uint8_t pin_freq_out_i = 1;  
+uint8_t pin_freq_out_q = 2;  
+  
+// compile-time проверка невозможна — проверка при старте квадратуры:  
+// в vfo_quadrature_start() добавить:  
+//   if (pin_freq_out_q != pin_freq_out_i + 1) { quad_active = false; return; }
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  

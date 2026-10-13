@@ -152,16 +152,6 @@ void vfo_clk_boost_arm(void) {
     clk_boosted = true;  
 }
 
-
-// Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)
-static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };
-static const pio_program_t pio_square_program = { 
-    .instructions = pio_square_instructions, 
-    .length = 2, 
-    .origin = -1,
-    .pio_version = 0 
-};
-
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)  
 static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };  
 static const pio_program_t pio_square_program = {   
@@ -2473,12 +2463,13 @@ void vfo_quadrature_start(uint32_t freq_hz) {
     pio_sm_set_enabled(lo_pio, lo_sm, false);  
   
     pio_sm_config cq = pio_get_default_sm_config();  
-    sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3);  
-    sm_config_set_set_pins(&cq, pin_freq_out, 2);   // I и Q — два соседних пина  
-  
-    pio_gpio_init(lo_pio, pin_freq_out);  
+    sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3); 
+
+    sm_config_set_set_pins(&cq, pin_freq_out_i, 2);  
+    pio_gpio_init(lo_pio, pin_freq_out_i);  
     pio_gpio_init(lo_pio, pin_freq_out_q);  
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 2, true);  
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);
+
     pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
   
     // Таблица под 2*F: clkdiv = clk_sys/(2*2F) = clk_sys/(4F) — ровно то,  

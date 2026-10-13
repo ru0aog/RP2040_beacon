@@ -408,24 +408,24 @@ void check_serial_commands() {
             }  
           }
 
-          else if (command.startsWith("quad ")) {          // quad 3600000  
-              uint32_t f = strtoul(command.substring(5).c_str(), NULL, 10);  
-              if (f == 0) f = 3600000;  
-              if (is_transmitting) {  
-                  Serial.println(F("[Ошибка] Сейчас идет трансляция!"));  
-              } else {
-                  Serial.println("запускаем квадратурный режим");
-                  vfo_quadrature_start(f);  
-                  Serial.printf("[QUAD] LO = %lu Гц на GP1/GP2\n", (unsigned long)f);  
-              }  
+          else if (command.equalsIgnoreCase("quad off")) {    
+              // Должна идти ПЕРВОЙ — иначе startsWith("quad ") перехватит её  
+              uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);    
+              if (cw_hz == 0) cw_hz = 3600000;  
+              Serial.println("возврат в обычный режим");  
+              vfo_quadrature_stop(cw_hz, 1.0);    
+              Serial.println(F("[QUAD] OFF"));    
           }  
-          else if (command.equalsIgnoreCase("quad off")) {  
-              // Возвращаем штатную TX-конфигурацию на частоте CW-маяка  
-              uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);  
-              if (cw_hz == 0) cw_hz = 3600000;
-              Serial.println("возврат в обычный режим");
-              vfo_quadrature_stop(cw_hz, 1.0);  
-              Serial.println(F("[QUAD] OFF"));  
+          else if (command.startsWith("quad ")) {          // quad 3600000    
+              uint32_t f = strtoul(command.substring(5).c_str(), NULL, 10);    
+              if (f == 0) f = 3600000;    
+              if (is_transmitting) {    
+                  Serial.println(F("[Ошибка] Сейчас идет трансляция!"));    
+              } else {  
+                  Serial.println("запускаем квадратурный режим");  
+                  vfo_quadrature_start(f);    
+                  Serial.printf("[QUAD] LO = %lu Гц на GP1/GP2\n", (unsigned long)f);    
+              }    
           }
 
           // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---

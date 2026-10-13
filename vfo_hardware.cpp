@@ -122,7 +122,11 @@ PllConfig pll_ceiling   = { 95,  3, 1, 380011083ULL, (uint32_t)VREG_VOLTAGE_1_30
 volatile bool clk_boosted = false;       // активация разгона
 volatile bool vfo_auto_boost = false;    // авто-разгон, вычисляется один раз на старте
 
-
+// --- Квадратура I/Q: один SM, 4-тактовая программа, 2 соседних пина ---  
+// ВАЖНО: пин Q обязан быть pin_freq_out + 1 (set pins работает с  
+// последовательным диапазоном). Если pin_freq_out = 21, то Q = GP22.
+uint8_t pin_freq_out_i = 1;
+uint8_t pin_freq_out_q = 2;
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -157,6 +161,37 @@ static const pio_program_t pio_square_program = {
     .origin = -1,
     .pio_version = 0 
 };
+
+// Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)  
+static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };  
+static const pio_program_t pio_square_program = {   
+    .instructions = pio_square_instructions,   
+    .length = 2,   
+    .origin = -1,  
+    .pio_version = 0   
+};  
+  
+// Квадратурная программа для RX: 4 такта на период, два соседних пина.  
+// set pins — pin_freq_out (I, бит 0) и pin_freq_out+1 (Q, бит 1).  
+// Последовательность (I,Q): 01 -> 11 -> 10 -> 00 — код Грея,  
+// Q отстаёт от I ровно на 90°. Частота выхода = clk_sys / (4 * clkdiv),  
+// поэтому clkdiv считаем как для удвоенной частоты в обычной схеме.  
+static const uint16_t pio_quad_instructions[] = {  
+    0xe001,  // set pins, 0b01  : I=0 Q=1  
+    0xe003,  // set pins, 0b11  : I=1 Q=1  
+    0xe002,  // set pins, 0b10  : I=1 Q=0  
+    0xe000,  // set pins, 0b00  : I=0 Q=0  
+};  
+static const pio_program_t pio_quad_program = {  
+    .instructions = pio_quad_instructions,  
+    .length = 4,  
+    .origin = -1,  
+    .pio_version = 0  
+};  
+static unsigned int quad_offset = 0;  
+static bool quad_program_loaded = false;  
+static bool quad_active = false;          // true = SM сконфигурирована под RX-квадратуру
+
 
 // Физическое размещение массива в RAM. Секция .time_critical гарантирует нахождение в ОЗУ
 VfoParameters __attribute__((section(".time_critical.vfo_tones"))) vfo_tones[VFO_TONES_COUNT];
@@ -2422,10 +2457,59 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
 
 
 /**  
+ * @brief Перевести VFO в RX-режим квадратурного LO (I/Q для SDR-смесителя).  
+ *  
+ * Одна SM переконфигурируется на 4-тактовую программу, выдающую код Грея  
+ * на пины pin_freq_out (I) и pin_freq_out+1 (Q). Делитель считается как  
+ * для частоты 2*F в штатной схеме — программа из 4 тактов даёт F.  
+ * Таблица тонов перестраивается под 2F, дизеринг core1 продолжает работать.  
+ */  
+void vfo_quadrature_start(uint32_t freq_hz) {  
+    if (!quad_program_loaded) {  
+        quad_offset = pio_add_program(lo_pio, &pio_quad_program);  
+        quad_program_loaded = true;  
+    }  
+  
+    pio_sm_set_enabled(lo_pio, lo_sm, false);  
+  
+    pio_sm_config cq = pio_get_default_sm_config();  
+    sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3);  
+    sm_config_set_set_pins(&cq, pin_freq_out, 2);   // I и Q — два соседних пина  
+  
+    pio_gpio_init(lo_pio, pin_freq_out);  
+    pio_gpio_init(lo_pio, pin_freq_out_q);  
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 2, true);  
+    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
+  
+    // Таблица под 2*F: clkdiv = clk_sys/(2*2F) = clk_sys/(4F) — ровно то,  
+    // что нужно 4-тактовой программе для выходной частоты F.  
+    vfo_base_mhz = (uint64_t)freq_hz * 2ULL * 1000ULL;  
+    vfo_step_mhz = 0;  
+    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
+    vfo_set_tone_instant(0);  
+    pio_sm_set_enabled(lo_pio, lo_sm, true);  
+  
+    quad_active = true;  
+}  
+  
+/**  
+ * @brief Вернуть VFO в штатный TX-режим (2-тактовый меандр на одном пине).  
+ * Полная переинициализация — восстанавливает программу, пины и таблицу тонов.  
+ */  
+void vfo_quadrature_stop(uint32_t freq_hz, double step_hz) {  
+    pio_sm_set_enabled(lo_pio, lo_sm, false);  
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_q, 1, false); // Q в input  
+    quad_active = false;  
+    vfo_hardware_init(freq_hz, step_hz);   // вернёт square-программу и TX-сетку  
+}
+
+
+/**  
  * @brief Синхронное управление ключом эфира (нажатие/отпускание CW-ключа).  
  * Коммутирует выходной пин высокочастотного меандра @c pin_freq_out:  
  */
 void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     // 1. Управляем направлением пина генератора PIO (высокочастотный меандр)
+    if (quad_active) return;  
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, key_down);
 }

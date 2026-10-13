@@ -18,6 +18,9 @@
 extern uint32_t vfo_max_clk_sys_hz;   // из Flash, паспорт=133 МГц  
 extern uint32_t vfo_max_pll_vco_hz;   // из Flash, паспорт=1600 МГц 
 
+void vfo_quadrature_start(uint32_t freq_hz);  
+void vfo_quadrature_stop(uint32_t freq_hz, double step_hz);
+
 // Эффективный лимит поиска: flash-доказанный, но не выше аппаратного барьера  
 static inline uint64_t vfo_effective_clk_max(void) {  
     uint64_t lim = (uint64_t)vfo_max_clk_sys_hz;  

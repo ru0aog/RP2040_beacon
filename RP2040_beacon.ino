@@ -334,7 +334,6 @@ void check_serial_commands() {
             }  
           }
 
-
           else if (command.equalsIgnoreCase("START THOR")) {  
             if (is_transmitting) {  
               Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  

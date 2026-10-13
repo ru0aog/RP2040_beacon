@@ -69,7 +69,7 @@
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;
 extern void check_serial_commands();   // Ссылка на проверку команд из Serial
-extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
+extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 extern volatile uint32_t RTTY_BIT_TIME_US;
 
 static MTK2_STATE current_reg = LAT;
@@ -155,8 +155,8 @@ void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) 
   if (device_SI[0]) {
     uint64_t space_mHz = (uint64_t)space_hz * 1000ULL;
     uint64_t mark_mHz  = (uint64_t)mark_hz * 1000ULL;
-    calculate_freq_bytes_mHz(space_mHz, rtty_reg_space);
-    calculate_freq_bytes_mHz(mark_mHz,  rtty_reg_mark);
+    si_calculate_freq_bytes_mHz(space_mHz, rtty_reg_space); // считаем таблицу байт частоты для СПЕЙС
+    si_calculate_freq_bytes_mHz(mark_mHz,  rtty_reg_mark);  // считаем таблицу байт частоты для МАРК
     if (debug_flag) {
         Serial.println(F("[RTTY_ГОТОВ] Сетка частот RTTY для Si5351 готова.")); 
         Serial.print(F("            F_MARK : ")); Serial.print(mark_hz); Serial.println(F(" Hz"));

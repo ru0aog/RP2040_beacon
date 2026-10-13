@@ -79,17 +79,17 @@ extern void prepare_ifkp_frequencies(uint32_t base_hz);
 extern bool soft_restart_flag; 
 extern volatile bool pc_file_written;
 extern void check_serial_commands(); 
-extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
+extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 
 // Запись рассчитанного тона в MultiSynth регистры Si5351
-static void set_ifkp_tone(uint8_t tone_index) {
+static void si_set_tone_instant(uint8_t tone_index) {
     if (tone_index > 32) return;
     uint8_t* data = DATA_IFKP[tone_index];
     setFrq_si5351(data); // установить частоту
 }
 
 // Передача разницы (дельта) частоты с микрозадержками и мгновенным выходом
-void send_delta(uint8_t delta) {
+void send_ifkp_delta(uint8_t delta) {
     // Прерываем работу, если зафиксирована активность ПК или подан сигнал рестарта
     if (pc_file_written || soft_restart_flag) {
       VFO_TX_OFF();            // отключить выход частоты TX
@@ -100,7 +100,7 @@ void send_delta(uint8_t delta) {
 
     // Установка тона в зависимости от доступного железа
     if (device_SI[0] && SI_FAIL == false) {
-      set_ifkp_tone(current_tone);
+      si_set_tone_instant(current_tone);
     } else {
       vfo_set_tone_instant(current_tone); // Мгновенный фазонепрерывный прыжок частоты
     }
@@ -151,13 +151,13 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
         return; 
     }
 
-    // Родной код расчета байт для Si5351 (выполняется, только если чип на месте)
+    // Если синтезатор установлен - расчет байт для Si5351
     uint64_t base_mHz = (uint64_t)base_hz * 1000ULL;
     Serial.println(F("[IFKP_СЕТКА] Расчет тонов и вывод основных частот IFKP:"));
     for (int i = 0; i < 33; i++) {
         // Шаг 386/33 = 11.697 Гц
         uint64_t freq_mHz = base_mHz + ((uint64_t)i * 11697ULL);
-        calculate_freq_bytes_mHz(freq_mHz, DATA_IFKP[i]);
+        si_calculate_freq_bytes_mHz(freq_mHz, DATA_IFKP[i]);
     }
     uint32_t base_hz_part = (uint32_t)(base_mHz / 1000ULL);
     uint32_t span_hz_part = (uint32_t)((((uint64_t)32 * 11697ULL)) / 1000ULL);
@@ -178,63 +178,63 @@ void send_ifkp_char(char c) {
 
     if (c != '\r' && c != '\n') {Serial.print(c);} // не печатать в командной строке перевод каретки
 
-    if (c >= 'a' && c <= 'z') send_delta((c - 'a' + 1) + 1); 
-    else if (c == '.')  { send_delta(27 + 1);}
-    else if (c == ' ')  { send_delta(28 + 1);}
+    if (c >= 'a' && c <= 'z') send_ifkp_delta((c - 'a' + 1) + 1); 
+    else if (c == '.')  { send_ifkp_delta(27 + 1);}
+    else if (c == ' ')  { send_ifkp_delta(28 + 1);}
     else if (c >= 'A' && c <= 'Z') {
-        send_delta((c - 'A' + 1) + 1); 
-        if (!pc_file_written && !soft_restart_flag) send_delta(29 + 1); // ИСПРАВЛЕНО: Защита второго байта
+        send_ifkp_delta((c - 'A' + 1) + 1); 
+        if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(29 + 1); // ИСПРАВЛЕНО: Защита второго байта
     }
     else if (c >= '1' && c <= '9') {
-        send_delta((c - '1' + 1) + 1); 
-        if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); 
+        send_ifkp_delta((c - '1' + 1) + 1); 
+        if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); 
     }
     else if (c == '0') {
-        send_delta(10 + 1); 
-        if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); 
+        send_ifkp_delta(10 + 1); 
+        if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); 
     }
-    else if (c == '\n')  { send_delta(28 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1);}
-    else if (c == '@')  { send_delta(0 + 1);   if (!pc_file_written && !soft_restart_flag) send_delta(29 + 1); }
-    else if (c == ',')  { send_delta(27 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(29 + 1); }
-    else if (c == '?')  { send_delta(28 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(29 + 1); }
-    else if (c == '~')  { send_delta(0 + 1);   if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '!')  { send_delta(11 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '"')  { send_delta(12 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '#')  { send_delta(13 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '$')  { send_delta(14 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '%')  { send_delta(15 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '&')  { send_delta(16 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '\'') { send_delta(17 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '(')  { send_delta(18 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == ')')  { send_delta(19 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '*')  { send_delta(20 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '+')  { send_delta(21 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '-')  { send_delta(22 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '/')  { send_delta(23 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == ':')  { send_delta(24 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == ';')  { send_delta(25 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '<')  { send_delta(26 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '>')  { send_delta(27 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(30 + 1); }
-    else if (c == '=')  { send_delta(0 + 1);   if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '[')  { send_delta(1 + 1);   if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\\') { send_delta(2 + 1);   if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
+    else if (c == '\n')  {send_ifkp_delta(28 + 1); if (!pc_file_written && !soft_restart_flag)  send_ifkp_delta(30 + 1);}
+    else if (c == '@')  { send_ifkp_delta(0 + 1);   if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(29 + 1); }
+    else if (c == ',')  { send_ifkp_delta(27 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(29 + 1); }
+    else if (c == '?')  { send_ifkp_delta(28 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(29 + 1); }
+    else if (c == '~')  { send_ifkp_delta(0 + 1);   if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '!')  { send_ifkp_delta(11 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '"')  { send_ifkp_delta(12 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '#')  { send_ifkp_delta(13 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '$')  { send_ifkp_delta(14 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '%')  { send_ifkp_delta(15 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '&')  { send_ifkp_delta(16 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '\'') { send_ifkp_delta(17 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '(')  { send_ifkp_delta(18 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == ')')  { send_ifkp_delta(19 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '*')  { send_ifkp_delta(20 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '+')  { send_ifkp_delta(21 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '-')  { send_ifkp_delta(22 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '/')  { send_ifkp_delta(23 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == ':')  { send_ifkp_delta(24 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == ';')  { send_ifkp_delta(25 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '<')  { send_ifkp_delta(26 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '>')  { send_ifkp_delta(27 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(30 + 1); }
+    else if (c == '=')  { send_ifkp_delta(0 + 1);   if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '[')  { send_ifkp_delta(1 + 1);   if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\\') { send_ifkp_delta(2 + 1);   if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
     else if (c == ']')  { 
-        send_delta(3 + 1);  
-        if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); 
-        if (!pc_file_written && !soft_restart_flag) send_delta(4 + 1);  
-        if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1);
+        send_ifkp_delta(3 + 1);  
+        if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); 
+        if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(4 + 1);  
+        if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1);
     }
-    else if (c == '_')  { send_delta(5 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '{')  { send_delta(6 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '|')  { send_delta(7 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '}')  { send_delta(8 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '`')  { send_delta(9 + 1);  if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\xB1') { send_delta(10 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\xF7') { send_delta(11 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\xB0') { send_delta(12 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\xD7') { send_delta(13 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\xA3') { send_delta(14 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
-    else if (c == '\x7F') { send_delta(28 + 1); if (!pc_file_written && !soft_restart_flag) send_delta(31 + 1); }
+    else if (c == '_')    { send_ifkp_delta(5 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '{')    { send_ifkp_delta(6 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '|')    { send_ifkp_delta(7 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '}')    { send_ifkp_delta(8 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '`')    { send_ifkp_delta(9 + 1);  if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\xB1') { send_ifkp_delta(10 + 1); if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\xF7') { send_ifkp_delta(11 + 1); if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\xB0') { send_ifkp_delta(12 + 1); if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\xD7') { send_ifkp_delta(13 + 1); if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\xA3') { send_ifkp_delta(14 + 1); if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
+    else if (c == '\x7F') { send_ifkp_delta(28 + 1); if (!pc_file_written && !soft_restart_flag) send_ifkp_delta(31 + 1); }
 
 }
 
@@ -387,7 +387,7 @@ void send_ifkp_calibration_ladder() {
 
         // Физическое переключение частоты
         if (device_SI[0] && SI_FAIL == false) {
-            set_ifkp_tone(current_tone);
+            si_set_tone_instant(current_tone);
         } else {
             vfo_set_tone_instant(current_tone);
         }

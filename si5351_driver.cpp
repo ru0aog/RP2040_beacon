@@ -63,7 +63,7 @@ extern int  pin_pwr_si;
 
 bool SI_FAIL = true;
 uint64_t Xtal_freq  = 25000000;
-extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
+extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 
 void I2C_SI_restart() {
   if (device_SI[0]) {
@@ -270,7 +270,7 @@ void init_si5351() {
 }
 
 // Функция расчета регистров si5351
-void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
+void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data) {
   if (freq_mHz == 0) return;
     const uint32_t pll_multiplier = 36;
     uint64_t f_pll_mHz = (uint64_t)Xtal_freq * pll_multiplier * 1000ULL;

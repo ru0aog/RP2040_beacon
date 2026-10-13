@@ -37,7 +37,7 @@ static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорос�
 #define OLIVIA_PREAMBLE_BLOCKS 10   // блоков NUL-преамбулы  
 // A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона  
 #define OLIVIA_INVERT_TONES 0  
-  
+
 uint32_t OLIVIA_Base_freq = 3601307; // базовая частота по умолчанию  
   
 // --- Переключатель режима: false = Olivia, true = Contestia ---  
@@ -48,7 +48,119 @@ static inline uint16_t mode_spb()      { return g_contestia ? 32u : 64u; }
 static inline uint64_t mode_scramble() { return g_contestia ? 0xEDB88320ULL  
                                                             : 0xE257E6D0291574ECULL; }  
 static inline uint8_t  mode_nshift()   { return g_contestia ? 5u : 13u; }  
+
+
+
+// --- RSID (Reed-Solomon ID) ---  
+// Параметры fldigi: 64 MFSK-тона, шаг 11025/1024 = 10.7666 Гц,  
+// символ = 1024/11025 = 92.88 мс, последовательность = 15 символов RS(15,5).  
+// Коды мод из rsid_defs.cxx:  
+#define RSID_CODE_OLIVIA_8_250    69  
+#define RSID_CODE_CONTESTIA_8_250 49  
+#define RSID_SYMS        15  
+#define RSID_SYMBOL_US   92880L   // 1024/11025 с  
+static const double RSID_STEP_HZ = 11025.0 / 1024.0; // 10.7666 Гц  
+// Центр RSID-полосы = центр сетки данных = base + 109.375 Гц  
+// (8 тонов * 31.25 / 2). Тон sym -> base_center + (sym - 31.5)*RSID_STEP_HZ,  
+// т.е. базовая частота таблицы = center - 31.5*step.  
+static inline double rsid_base_hz(uint32_t center_hz) {  
+    return (double)center_hz + 109.375 - 31.5 * RSID_STEP_HZ;  
+}  
   
+// GF(64), примитивный полином x^6+x+1 = 0x43 — как в rsid.cxx fldigi  
+static uint8_t gf64_exp[128];  
+static uint8_t gf64_log[64];  
+static bool    gf64_ready = false;  
+  
+static void gf64_init() {  
+    uint8_t x = 1;  
+    for (int i = 0; i < 63; i++) {  
+        gf64_exp[i] = x;  
+        gf64_log[x] = (uint8_t)i;  
+        x <<= 1;  
+        if (x & 0x40) x ^= 0x43;  
+    }  
+    for (int i = 63; i < 128; i++) gf64_exp[i] = gf64_exp[i - 63];  
+    gf64_ready = true;  
+}  
+static inline uint8_t gf64_mul(uint8_t a, uint8_t b) {  
+    return (a && b) ? gf64_exp[gf64_log[a] + gf64_log[b]] : 0;  
+}  
+  
+// RS(15,5): 5 инфо-символов + 10 чётных. Полином-генератор  
+// g(x) = prod_{i=0..9} (x - alpha^i), порядок/корни — по rsid.cxx.  
+static void rsid_encode(uint16_t code, uint8_t* out /*15*/) {  
+    if (!gf64_ready) gf64_init();  
+    // генератор g[0..10]  
+    uint8_t g[11] = {1,0,0,0,0,0,0,0,0,0,0};  
+    uint8_t deg = 1;  
+    for (uint8_t r = 0; r < 10; r++) {          // корни alpha^0..alpha^9  
+        uint8_t a = gf64_exp[r];  
+        for (int j = deg; j > 0; j--)  
+            g[j] = g[j - 1] ^ gf64_mul(g[j], a);  
+        g[0] = gf64_mul(g[0], a);  
+        deg++;  
+    }  
+    // данные: {code,0,0,0,0} — первичная таблица (коды <256 не требуют ESCAPE)  
+    uint8_t msg[5] = { (uint8_t)code, 0, 0, 0, 0 };  
+    uint8_t par[10] = {0};  
+    for (int i = 0; i < 5; i++) {  
+        uint8_t fb = msg[i] ^ par[0];  
+        memmove(par, par + 1, 9);  
+        par[9] = 0;  
+        if (fb) {  
+            uint8_t k = gf64_log[fb];  
+            for (int j = 0; j < 10; j++)  
+                if (g[10 - j - 1])   // коэффициенты g без старшего  
+                    par[j] ^= gf64_exp[(k + gf64_log[g[10 - j - 1]]) % 63];  
+        }  
+    }  
+    // порядок передачи: данные, затем чётность (сверить с rsid.cxx!)  
+    memcpy(out, msg, 5);  
+    memcpy(out + 5, par, 10);  
+}  
+  
+// Выдача одного RSID-тона: длительность 92.88 мс, тон = индекс в  
+// временной 64-тонной сетке (vfo_hardware_init уже вызван с RSID_STEP_HZ)  
+static bool rsid_emit_tone(uint8_t sym) {  
+    vfo_set_tone_instant(sym);  
+    uint32_t dl = micros() + RSID_SYMBOL_US;  
+    while ((int32_t)(micros() - dl) < 0) {  
+        if (pc_file_written || soft_restart_flag) { ZERO_LED_OFF(); return false; }  
+        delayMicroseconds(50);  
+        watchdog_update();  
+    }  
+    return true;  
+}  
+  
+// Полная RSID-последовательности для текущего режима (g_contestia)  
+static bool rsid_send() {  
+    if (device_SI[0]) return true;          // Si5351-ветка: пропускаем (см. ниже)  
+    uint16_t code = g_contestia ? RSID_CODE_CONTESTIA_8_250  
+                                : RSID_CODE_OLIVIA_8_250;  
+    uint8_t syms[RSID_SYMS];  
+    rsid_encode(code, syms);  
+  
+    // перестроить сетку на 64 RSID-тона, от центра полосы данных  
+    vfo_hardware_init((unsigned int)(rsid_base_hz(OLIVIA_Base_freq) + 0.5),  
+                      RSID_STEP_HZ);  
+    for (int i = 0; i < RSID_SYMS; i++)  
+        if (!rsid_emit_tone(syms[i])) return false;  
+  
+    // вернуть сетку данных 8/31.25  
+    vfo_hardware_init(OLIVIA_Base_freq, OLIVIA_STEP_HZ);  
+    vfo_set_tone_instant(0);  
+    return true;  
+}
+
+
+
+
+
+
+
+
+
 // --- Матрицы Уолша-Адамара: 64x64 (Olivia) и 32x32 (Contestia) ---  
 static uint64_t walsh64[64];  
 static uint64_t walsh32[32];  
@@ -231,11 +343,15 @@ static void send_string_common(const char* str) {
         VFO_TX_ON();  
     }  
   
+    // RSID-маркер режима ДО преамбулы: fldigi сам переключит  
+    // Olivia<->Contestia и отцентрует приём (RxID)  
+    if (!rsid_send()) goto tx_done;  
+  
     olivia_next_deadline_us = micros() + (uint32_t)OLIVIA_SYMBOL_MS * 1000UL;  
   
     // Преамбула — idle-символы NUL (0x00)  
     for (int i = 0; i < OLIVIA_BITS * OLIVIA_PREAMBLE_BLOCKS; i++)  
-        olivia_send_char((char)0);  
+        olivia_send_char((char)0); 
   
     // Полезная нагрузка  
     while (*str && !pc_file_written && !soft_restart_flag) {  
@@ -248,7 +364,8 @@ static void send_string_common(const char* str) {
     for (int i = 0; i < OLIVIA_BITS * 2 && !pc_file_written && !soft_restart_flag; i++)  
         olivia_send_char((char)0);  
     if (block_count > 0) olivia_flush_block();  
-  
+
+    tx_done:  
     if (device_SI[0]) VFO_TX_OFF();  
     else              vfo_operation_set(false);  
     vfo_set_narrowband(false);  

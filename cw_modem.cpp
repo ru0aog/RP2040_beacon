@@ -65,7 +65,7 @@
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;
 extern void check_serial_commands();
-extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
+extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 
 static uint32_t cw_frequency_hz = 3601000;
 
@@ -95,7 +95,7 @@ void prepare_cw_frequency(uint32_t freq_hz) {
   if (device_SI[0]) {
     uint64_t freq_mHz = (uint64_t)freq_hz * 1000ULL;
     static uint8_t cw_reg_buffer[8]; 
-    calculate_freq_bytes_mHz(freq_mHz, cw_reg_buffer);
+    si_calculate_freq_bytes_mHz(freq_mHz, cw_reg_buffer);
     setFrq_si5351(cw_reg_buffer); // установить частоту
     if (debug_flag) {
         Serial.println(F("[RTTY_ГОТОВ] Аппаратный VFO CW инициализирован!"));
@@ -147,17 +147,15 @@ static void send_cw_element(bool is_dash) {
     if (pc_file_written || soft_restart_flag) return;
 
     // НАЖАТИЕ КЛЮЧА: Открываем выход генерации
-    if (device_SI[0]) { VFO_TX_ON();   }        // запустить выход частоты TX
-        else { vfo_operation_set(true); }    // запустить генерацию программного VFO для CW
+    VFO_TX_ON();     // запустить выход частоты TX
     ZERO_LED_RED_ON();
 
-    // Длина тире равна 3-м точкам
+    // если точка - то точка, если тире - то три точки
     uint32_t duration = is_dash ? (CW_DOT_TIME_MS * 3) : CW_DOT_TIME_MS;
     cw_delay(duration);
 
     // ОТЖАТИЕ КЛЮЧА: Глушим выход генерации
-    if (device_SI[0]) { VFO_TX_OFF();   }       // отключить выход частоты TX
-        else { vfo_operation_set(false); }   // отключить генерацию программного VFO для CW
+    VFO_TX_OFF();    // отключить выход частоты TX
     ZERO_LED_OFF();
 
     // Обязательная пауза между элементами одного знака = 1 точка

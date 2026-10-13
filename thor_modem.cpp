@@ -21,17 +21,17 @@ extern volatile bool pc_file_written;
 extern bool soft_restart_flag;  
 extern void check_serial_commands();  
 extern bool debug_flag;  
-extern uint8_t device_SI[5];  
-extern void calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);  
+extern uint8_t device_SI[5];
+extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);  
   
 // ---------------- Константы подрежимов (из thor.cxx / thor.h) -------------  
-#define THOR_NUMTONES   18            // THORNUMTONES  
+#define THOR_NUMTONES   18            // число тонов
 #define THOR_K          7             // THOR_K  
 #define THOR_POLY1      0x6d          // THOR_POLY1  
 #define THOR_POLY2      0x4f          // THOR_POLY2  
 #define THOR_IL_SIZE    4             // interleave size  
-#define THOR_IL_DEPTH   10            // <<< СВЕРИТЬ с thor.cxx (конструктор interleave)  
-#define THOR_INVERT_TONES 0           // A/B боковой полосы (как OLIVIA_INVERT_TONES)  
+#define THOR_IL_DEPTH   10            // 
+#define THOR_INVERT_TONES 0           // A/B боковой полосы
   
 #if THOR_MODE == 8  
   static const double   THOR_STEP_HZ   = 15.625;        // 8000*2/1024  
@@ -462,22 +462,25 @@ static void il_bits(uint32_t* pbits) {
 }  
   
 // ---------------- Сетка частот (18 тонов) --------------------------------  
-void prepare_thor_frequencies(uint32_t base_hz) {  
-    THOR_Base_freq = base_hz;  
-    if (!device_SI[0]) {  
-        vfo_hardware_init(base_hz, THOR_STEP_HZ);  
+void prepare_thor_frequencies(uint32_t base_hz) {
+    THOR_Base_freq = base_hz;
+		// ЕСЛИ СИНТЕЗАТОР ОТСУТСТВУЕТ - ИНИЦИАЛИЗИРУЕМ PIO ЯДРО И ВЫХОДИМ
+    if (!device_SI[0]) {
+        vfo_hardware_init(base_hz, THOR_STEP_HZ);
         vfo_set_tone_instant(0);  
-        if (debug_flag) {  
-            Serial.print(F("[THOR] PIO готов, база "));  
-            Serial.print(base_hz); Serial.print(F(" Гц, шаг "));  
-            Serial.print(THOR_STEP_HZ, 4); Serial.println(F(" Гц"));  
-        }  
+        if (debug_flag) {
+            Serial.print(F("[THOR] PIO готов, база "));
+            Serial.print(base_hz); Serial.print(F(" Гц, шаг "));
+            Serial.print(THOR_STEP_HZ, 4); Serial.println(F(" Гц"));
+        }
         return;  
-    }  
+    }
+
+    // Если синтезатор установлен - расчет байт для Si5351
     uint64_t base_mHz = (uint64_t)base_hz * 1000ULL;  
     uint64_t step_mHz = (uint64_t)(THOR_STEP_HZ * 1000.0);  
     for (int i = 0; i < THOR_NUMTONES; i++)  
-        calculate_freq_bytes_mHz(base_mHz + (uint64_t)i * step_mHz, DATA_THOR[i]);  
+        si_calculate_freq_bytes_mHz(base_mHz + (uint64_t)i * step_mHz, DATA_THOR[i]);  
 }  
   
 static void thor_set_tone(uint8_t tone) {  

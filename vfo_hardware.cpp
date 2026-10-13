@@ -140,7 +140,7 @@ static const pio_program_t pio_square_program = {
 };
 
 // Физическое размещение массива в RAM. Секция .time_critical гарантирует нахождение в ОЗУ
-VfoParameters __attribute__((section(".time_critical.ifkp_tones"))) ifkp_tones[VFO_IFKP_TONES_COUNT];
+VfoParameters __attribute__((section(".time_critical.vfo_tones"))) vfo_tones[VFO_TONES_COUNT];
 
 // Доступ к глобальному состоянию усилителя мощности для манипуляции ключом CW
 extern bool dev_TX_state; 
@@ -495,8 +495,8 @@ void vfo_clk_boost_exit(void) {
     uint32_t save = spin_lock_blocking(vfo_spin_lock);    
     uint64_t base_mhz = (uint64_t)cached_base_freq_hz * 1000ULL;    
     uint64_t step_mhz = (uint64_t)(cached_step_hz * 1000.0);    
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {    
-        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,    
+    for (int i = 0; i < VFO_TONES_COUNT; i++) {    
+        vfo_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz,    
                                                  base_mhz + (uint64_t)i * step_mhz);    
     }    
     current_active_tone = VFO_TONE_NONE;    
@@ -1246,9 +1246,9 @@ for (uint32_t refdiv = 1; refdiv <= 3; refdiv++) {
 
 // vfo_hardware.cpp — вынести блок заполнения в функцию:  
 static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {  
-    for (int i = 0; i < VFO_IFKP_TONES_COUNT; i++) {  
+    for (int i = 0; i < VFO_TONES_COUNT; i++) {  
         uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);  
-        ifkp_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
+        vfo_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
     }  
     // Сбросить кэш активного тона, чтобы следующий vfo_set_tone_instant применил новые значения  
     current_active_tone = VFO_TONE_NONE;  
@@ -1361,7 +1361,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
 
 // Диагностический вывод рантайм-телеметрии в Serial  
     #if VFO_PLL_DEBUG  
-        VfoParameters real_base_params = ifkp_tones[0];  
+        VfoParameters real_base_params = vfo_tones[0];  
         Serial.printf("\n--- VFO Runtime Diagnostics ---\n");  
         Serial.printf("Target Freq: %u Hz (Grid: %.2f Hz)\n", base_freq_hz, (double)real_base_params.target_freq_chz / 100.0);  
         Serial.printf("clk_sys    : %u Hz (Физический захват PLL: refdiv=%lu, fbdiv=%lu, p1=%lu, p2=%lu)\n",  
@@ -2250,8 +2250,8 @@ void vfo_encoder_poll(void) {
                             (unsigned long)clkdiv_now,  
                             (unsigned long)(clkdiv_now >> 16),  
                             (unsigned long)((clkdiv_now >> 8) & 0xFF),  
-                            (unsigned long)ifkp_tones[0].pio_int,  
-                            (unsigned long)ifkp_tones[0].pio_frac,  
+                            (unsigned long)vfo_tones[0].pio_int,  
+                            (unsigned long)vfo_tones[0].pio_frac,  
                             (int)current_active_tone, (int)tone_changed,  
                             (unsigned long)(meas_clk / 1000u),  
                             (unsigned long)pll_sys_hw->cs,  
@@ -2326,8 +2326,8 @@ void vfo_encoder_poll(void) {
                     (unsigned long)clkdiv_now,  
                     (unsigned long)(clkdiv_now >> 16),  
                     (unsigned long)((clkdiv_now >> 8) & 0xFF),  
-                    (unsigned long)ifkp_tones[0].pio_int,  
-                    (unsigned long)ifkp_tones[0].pio_frac,  
+                    (unsigned long)vfo_tones[0].pio_int,  
+                    (unsigned long)vfo_tones[0].pio_frac,  
                     (int)current_active_tone, (int)tone_changed,  
                     (unsigned long)(meas_clk / 1000u),  
                     (unsigned long)pll_sys_hw->cs,  
@@ -2367,13 +2367,13 @@ void vfo_set_narrowband(bool on) {
  *  
  */
 void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
-    if (tone_index >= VFO_IFKP_TONES_COUNT) return; 
+    if (tone_index >= VFO_TONES_COUNT) return; 
     if (tone_index == current_active_tone) return;
 
     uint32_t save = spin_lock_blocking(vfo_spin_lock);  
-    target_pio_int   = ifkp_tones[tone_index].pio_int;  
-    target_pio_frac8 = ifkp_tones[tone_index].pio_frac;  
-    dds_step         = ifkp_tones[tone_index].dds_step;  
+    target_pio_int   = vfo_tones[tone_index].pio_int;  
+    target_pio_frac8 = vfo_tones[tone_index].pio_frac;  
+    dds_step         = vfo_tones[tone_index].dds_step;  
   
     // Маску выбираем здесь же, в атомарной сессии — чтобы Core1 прочитал  
     // консистентный снимок (int/frac/step/mask) в одном захвате лока.  

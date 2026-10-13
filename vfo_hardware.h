@@ -3,20 +3,6 @@
 
 #include <Arduino.h>
 
-// --- Квадратурный выход I/Q (сдвиг 90°) ---  
-extern int pin_i_out;                    // I-канал (физический пин, новый)  
-extern int pin_q_out;                    // Q-канал (следующий за pin_i_out GPIO!)  
-/*
-Важно: 
-для режима div4 пины должны быть pin_i_out и pin_i_out+1 
-(программа использует set pins, N на 2 последовательных пина). 
-Поэтому pin_q_out = pin_i_out + 1 — обязательное ограничение разводки.
-*/
-
-extern volatile bool vfo_quadrature;     // 1 = квадратурный режим включён  
-#define VFO_QUAD_THRESHOLD_HZ 15000000UL // граница гибрида: ниже — задержка, выше — div4  
-void vfo_quadrature_set(bool on);        // включение/выключение квадратурного режима
-
 // Лимиты частотного плана
 // vfo_hardware.h  
 #define VFO_CLK_SYS_NOMINAL_HZ  133000000ULL  // электрический номинал без вольтмода  

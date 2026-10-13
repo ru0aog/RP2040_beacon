@@ -21,10 +21,25 @@
 
 #include <Arduino.h>
 
+// функции инициализации и базового управления
 void ZERO_LED_init();
+void set_rgb_parallel(uint8_t r, uint8_t g, uint8_t b);
+void ZERO_LED_OFF();
+
+// Базовые цвета (модернизированные под мягкую яркость)
 void ZERO_LED_RED_ON();
 void ZERO_LED_GREEN_ON();
 void ZERO_LED_BLUE_ON();
-void ZERO_LED_OFF();
 
-#endif
+// --- ДОБАВЛЕННЫЕ ПРИЯТНЫЕ ОТТЕНКИ И КЛИНИЧЕСКИЕ ЦВЕТА СТАТУСА ---
+void ZERO_LED_AMBER_ON();       // Янтарный / Теплый оранжевый (отлично для режима ожидания/сканирования)
+void ZERO_LED_CYAN_ON();        // Приятный бирюзовый / Аквамарин (режим приема RX цифровых мод)
+void ZERO_LED_MAGENTA_ON();     // Пурпурный / Мягкий фиолетовый (индикация активного оверклока)
+void ZERO_LED_YELLOW_ON();      // Мягкий лимонно-желтый (индикация предупреждений или термотроттлинга)
+void ZERO_LED_WHITE_LOW() ;     // Лунно-белый сниженной яркости (нейтральный системный статус)
+void ZERO_LED_PURPLE_DEEP();    // Глубокий индиго / Фиолетовый (для отображения режима Olivia/узкой полосы)
+void ZERO_LED_EMERALD_ON();     // Изумрудно-зеленый (приятный мягкий цвет для индикации "Захват частоты OK")
+
+
+
+#endif // LED_BLINK_H

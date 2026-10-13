@@ -73,15 +73,18 @@ static inline uint8_t  mode_nshift()   { return g_contestia ? 5u : 13u; }
 #define RSID_CODE_OLIVIA_8_250    69  
 #define RSID_CODE_CONTESTIA_8_250 49  
 
-// RSID для текущего режима (g_contestia); центр полосы = base + 109.375 Гц
+// RSID для текущего режима (g_contestia)
+// центр полосы по конвенции fldigi = нижний тон + N/2·шаг = base + 125 Гц
 static bool olivia_rsid() {  
     if (device_SI[0]) return true;          // Si5351-ветка: Olivia работает только через PIO
     uint16_t code = g_contestia ? RSID_CODE_CONTESTIA_8_250  
                                 : RSID_CODE_OLIVIA_8_250;  
-    if (!rsid_send(code, (double)OLIVIA_Base_freq + 109.375)) return false;
+
+    // Base_freq = центр полосы 8/250  
+    if (!rsid_send(code, (double)OLIVIA_Base_freq + (OLIVIA_TONES / 2.0) * OLIVIA_STEP_HZ)) return false;
   
-    // вернуть сетку данных 8/31.25  
-    vfo_hardware_init(OLIVIA_Base_freq, OLIVIA_STEP_HZ);  
+    // вернуть сетку данных 8/31.25 (нижний тон = центр - 109.375 Гц)  
+    vfo_hardware_init(OLIVIA_Base_freq - OLIVIA_CENTER_OFFSET_HZ, OLIVIA_STEP_HZ);
     vfo_set_tone_instant(0);  
     return true;  
 }

@@ -905,9 +905,9 @@ void mfsk16_send_string(const char* str) {
     if (str == nullptr) return;
     fec_reset();
     mfsk_tx_begin();
-
-    if (!rsid_send(MFSK16_RSID_CODE, MFSK16_Base_freq + 7.5 * MFSK16_STEP_HZ)) goto done;
-    mfsk_prepare(MFSK16_Base_freq, MFSK16_STEP_HZ, MFSK16_NUMTONES);
+		// Base_freq теперь = центр полосы (prepare_* вычитает CENTER_OFFSET)  
+    if (!rsid_send(MFSK16_RSID_CODE, MFSK16_Base_freq)) goto done;  
+    mfsk_prepare(MFSK16_Base_freq - MFSK16_CENTER_OFFSET_HZ, MFSK16_STEP_HZ, MFSK16_NUMTONES);
     mfsk_sync_deadline();
 
     // TX_STATE_PREAMBLE: clearbits() + preamble/3 нулевых бит
@@ -969,8 +969,8 @@ void dominoex_send_string(const char* str) {
     domex_prevtone = 0;
     mfsk_tx_begin();
 
-    if (!rsid_send(DOMEX8_RSID_CODE, DOMINOEX_Base_freq + 8.5 * DOMEX8_STEP_HZ)) goto done;
-    mfsk_prepare(DOMINOEX_Base_freq, DOMEX8_STEP_HZ, DOMEX_NUMTONES);
+		if (!rsid_send(DOMEX8_RSID_CODE, DOMINOEX_Base_freq)) goto done;  
+    mfsk_prepare(DOMINOEX_Base_freq - DOMEX_CENTER_OFFSET_HZ, DOMEX8_STEP_HZ, DOMEX_NUMTONES);
     mfsk_sync_deadline();
 
     if (!domex_send_idle()) goto done;                                      // PREAMBLE

@@ -163,17 +163,20 @@ VfoParameters __attribute__((section(".time_critical.vfo_tones"))) vfo_tones[VFO
 
 // Доступ к глобальному состоянию усилителя мощности для манипуляции ключом CW
 extern bool dev_TX_state; 
-
 static PIO lo_pio = pio0;
 static unsigned int lo_sm = 0;
-
 static unsigned int lo_offset = 0;
 static bool pio_program_loaded = false;
-
-
 static uint8_t current_active_tone = VFO_TONE_NONE;
 static volatile bool tone_changed = false;
 
+// --- Квадратурный канал Q ---  
+uint lo_sm_q = 0;                        // SM для Q (занимается лениво)  
+static int  q_sm_claimed = -1;  
+volatile bool vfo_quadrature = false;  
+volatile uint32_t vfo_delay_sysclk = 0;  // задержка старта Q-SM, тактов clk_sys  
+volatile uint8_t  vfo_quad_div4    = 0;  // 1 = режим div4 (высокие частоты)  
+volatile uint8_t  quad_resync      = 0;  // core1 должен перезапустить пару SM  
 
 // Межъядерный аппаратный спинлок
 static spin_lock_t* vfo_spin_lock = nullptr;
@@ -1268,11 +1271,55 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
     for (int i = 0; i < VFO_TONES_COUNT; i++) {  
         uint64_t tone_freq_mhz = base_freq_mhz + ((uint64_t)i * step_mhz);  
         vfo_tones[i] = calculate_raw_params_mhz(current_clk_sys_hz, tone_freq_mhz);  
-    }  
+    }
+    // --- Гибридная квадратура: ниже 15 МГц — задержка старта Q-SM, ---  
+    // --- выше — программа div4 на двух последовательных пинах       ---  
+    if (vfo_quadrature) {  
+        uint64_t base_hz = base_freq_mhz / 1000ULL;  
+        vfo_quad_div4 = (base_hz >= VFO_QUAD_THRESHOLD_HZ);  
+        if (!vfo_quad_div4) {  
+            // n = round(clk_sys / (4·F)) тактов clk_sys — целочисленная  
+            // задержка старта Q-SM относительно I-SM.  
+            uint64_t n = (current_clk_sys_hz + 2 * base_hz) / (4 * base_hz);  
+            vfo_delay_sysclk = (n > 4) ? (uint32_t)(n - 2) : 1u; // -2: компенсация ~2 тактов на старт SM  
+            quad_resync = 1;   // core1 применит на следующей итерации  
+        }  
+    }
     // Сбросить кэш активного тона, чтобы следующий vfo_set_tone_instant применил новые значения  
     current_active_tone = VFO_TONE_NONE;  
 }
 
+
+
+// Порог перехода задержка->div4 зависит от фактической частоты шины:  
+// n_ideal = clk_sys/(4·F); ошибка фазы растёт как ~45°/n.  
+// 133 МГц -> 7.5 МГц (n≈4.4, ~±10°), 300+ МГц -> 15 МГц (n≈5+, ~±9°).  
+#define VFO_QUAD_CLKSYS_BOOST_HZ   200000000u   // выше = считаем разгоном  
+#define VFO_QUAD_THRESH_LOW_HZ      7500000ULL  // штатная шина  
+#define VFO_QUAD_THRESH_HIGH_HZ    15000000ULL  // разогнанная шина  
+  
+
+  
+static void vfo_quad_update(uint64_t base_hz) {  
+    // фактическая частота шины: берём из живого состояния PLL,  
+    // а не из константы — буст Термогуарда меняет её на лету  
+    uint32_t clk_sys = (pll_overclock > VFO_CLK_SYS_NOMINAL_HZ)  
+                       ? pll_overclock : VFO_CLK_SYS_NOMINAL_HZ;  
+  
+    uint64_t threshold = (clk_sys > VFO_QUAD_CLKSYS_BOOST_HZ)  
+                         ? VFO_QUAD_THRESH_HIGH_HZ  
+                         : VFO_QUAD_THRESH_LOW_HZ;  
+  
+    vfo_quad_div4 = (base_hz >= threshold) ? 1 : 0;  
+  
+    if (!vfo_quad_div4) {  
+        // n = round(clk_sys / (4·F)) тактов clk_sys до старта Q-SM;  
+        // -2 компенсирует ~2 такта на рестарт SM из core1  
+        uint64_t n = ((uint64_t)clk_sys + 2 * base_hz) / (4 * base_hz);  
+        vfo_delay_sysclk = (n > 2) ? (uint32_t)(n - 2) : 1u;  
+    }  
+    quad_resync = 1;   // core1 применит на следующей итерации цикла  
+}
 
 
 // === ИНИЦИАЛИЗАЦИЯ И СТАРТ СИСТЕМЫ ===
@@ -1377,6 +1424,16 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // Синхронный потокобезопасный расчет всей FSK/IFKP таблицы тонов
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz); 
     vfo_set_tone_instant(0);
+
+    // --- Гибридная квадратура I/Q ---  
+    // Ниже порога — вторая SM с задержкой n тактов clk_sys (~90°);  
+    // выше порога — программа div4 на одной SM (идеальные 90°,  
+    // но сетка частот ×0.5). Порог адаптивен: без разгона шины  
+    // допустимая фазовая ошибка достигается только до ~7.5 МГц,  
+    // при разгоне (clk_sys > 200 МГц) — до ~15 МГц.  
+    if (vfo_quadrature) {  
+        vfo_quad_update(base_freq_mhz / 1000ULL);  
+    }  
 
 // Диагностический вывод рантайм-телеметрии в Serial  
     #if VFO_PLL_DEBUG  

@@ -6,11 +6,11 @@
  *  
  *  НАЗНАЧЕНИЕ  
  *  ----------  
- *  Организует виртуальную USB-флешку (128 КБ) в ОЗУ микроконтроллера для ПК,  
- *  обеспечивая прозрачное чтение/запись файлов конфигурации INFO.TXT,  
+ *  Организует виртуальную USB-флешку (128 КБ) в ОЗУ микроконтроллера для ПК,
+ *  обеспечивая прозрачное чтение/запись файлов конфигурации INFO.TXT,
  *  инженерных параметров SET.TXT и файла журнала LOG.TXT без сторонних библиотек.
  *  
- *  АРХИТЕКТУРА «RAM-ДИСК + FLASH»  
+ *  АРХИТЕКТУРА «RAM-ДИСК + FLASH»
  *  ------------------------------  
  *  Диск целиком живёт в ОЗУ (ram_disk_buffer, 256 секторов × 512 Б = 128 КБ) и  
  *  вручную размечен под FAT12 (Boot Sector + BPB, таблица FAT, корневой каталог,  
@@ -66,6 +66,24 @@
  *  my_freq_*_var, my_rtty_space/mark_var, my_*_wpm/baud_var — читаются другими  
  *  модулями. CW_DOT_TIME_MS и RTTY_BIT_TIME_US — тайминги для модуляторов.  
  *  pc_file_written — флаг активности ПК для прерывания передач.  
+ *  
+ *  ИСПОЛЬЗУЕМЫЕ БИБЛИОТЕКИ И МОДУЛИ  
+ *  -------------------------------  
+ *  - Adafruit TinyUSB Library (MIT): Adafruit_USBD_MSC, колбэки  
+ *    msc_read_cb/msc_write_cb/msc_flush_cb, setUnitReady  
+ *  - Raspberry Pi Pico SDK (BSD-3): hardware/flash.h  
+ *    (flash_range_erase/program/flush_cache), hardware/sync.h  
+ *    (save_and_disable_interrupts/restore_interrupts),  
+ *    hardware/structs/ssi.h (регистры ssi_hw)  
+ *  - Arduino core RP2040 (LGPL-2.1): String, Serial, millis(), strtoul,  
+ *    snprintf  
+ *  - Модули проекта: file_manager.h, scheduler.h, vfo_hardware.h  
+ *  - Сторонний код отсутствует: разметка FAT12, парсеры тегов и  
+ *    wear-leveling со слотами — оригинальная разработка автора проекта,  
+ *    без использования готовых файловых библиотек (FatFS и т.п.).  
+ *  
+ *  Этот файл — часть RP2040_beacon, распространяется под GPLv3  
+ *  (см. LICENSE в корне репозитория).  
  * ============================================================================  
  */
 

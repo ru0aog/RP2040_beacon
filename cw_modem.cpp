@@ -50,6 +50,20 @@
  *    prepare_cw_frequency(freq_hz)     — установка частоты несущей (Si5351 или  
  *                                        программный VFO на PIO).  
  *    send_cw_string(const char*) / (String) — передача текста кодом Морзе.  
+ *  
+ *  ИСПОЛЬЗУЕМЫЕ БИБЛИОТЕКИ И МОДУЛИ  
+ *  -------------------------------  
+ *  - Raspberry Pi Pico SDK (BSD-3): hardware/watchdog.h (watchdog_update)  
+ *  - Arduino core RP2040 (LGPL-2.1): Serial, micros(), snprintf, String,  
+ *    GPIO (pinMode/digitalWrite)  
+ *  - Модули проекта: cw_modem.h, si5351_driver.h, scheduler.h,  
+ *    file_manager.h, lcd.h, vfo_hardware.h, led_blink.h  
+ *  - Сторонний код отсутствует: таблица международного кода Морзе —  
+ *    открытый стандарт (ITU-R M.1677), реализация кодера и таймингов —  
+ *    оригинальная разработка автора проекта.  
+ *  
+ *  Этот файл — часть RP2040_beacon, распространяется под GPLv3  
+ *  (см. LICENSE в корне репозитория).  
  * ============================================================================  
  */
 

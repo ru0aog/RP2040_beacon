@@ -127,6 +127,8 @@ volatile bool vfo_auto_boost = false;    // авто-разгон, вычисл�
 // последовательным диапазоном). Если pin_freq_out = 21, то Q = GP22.
 uint8_t pin_freq_out_i = 1;
 uint8_t pin_freq_out_q = 2;
+static_assert(pin_freq_out_q == pin_freq_out_i + 1,  
+              "PIO set pins: Q должен быть следующим GPIO после I");
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -2450,7 +2452,7 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
  * @brief Перевести VFO в RX-режим квадратурного LO (I/Q для SDR-смесителя).  
  *  
  * Одна SM переконфигурируется на 4-тактовую программу, выдающую код Грея  
- * на пины pin_freq_out (I) и pin_freq_out+1 (Q). Делитель считается как  
+ * на пины pin_freq_I и pin_freq_Q. Делитель считается как  
  * для частоты 2*F в штатной схеме — программа из 4 тактов даёт F.  
  * Таблица тонов перестраивается под 2F, дизеринг core1 продолжает работать.  
  */  
@@ -2459,29 +2461,41 @@ void vfo_quadrature_start(uint32_t freq_hz) {
         quad_offset = pio_add_program(lo_pio, &pio_quad_program);  
         quad_program_loaded = true;  
     }  
-  
+    
+    quad_active = false;   // взводим до завершения переконфигурации —  
+                           // если rebuild где-то проверяет флаг, не сработает  
+                           // в середине пути  
     pio_sm_set_enabled(lo_pio, lo_sm, false);  
-  
+    
+    // TX-пин: SM его больше не обслуживает — уводим в input,  
+    // иначе на pin_freq_out останется защемлённый последний уровень.
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, false);  
+    gpio_set_dir(pin_freq_out, GPIO_IN);  
+    
     pio_sm_config cq = pio_get_default_sm_config();  
-    sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3); 
-
-    sm_config_set_set_pins(&cq, pin_freq_out_i, 2);  
+    sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3);  
+    sm_config_set_set_pins(&cq, pin_freq_out_i, 2);   // Q = pin_freq_out_i + 1  
     pio_gpio_init(lo_pio, pin_freq_out_i);  
     pio_gpio_init(lo_pio, pin_freq_out_q);  
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);
-
-    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
-  
-    // Таблица под 2*F: clkdiv = clk_sys/(2*2F) = clk_sys/(4F) — ровно то,  
+    // Направление ставим ПОСЛЕДНИМ, после sm_init — пины не должны  
+    // выпускать полуинициализированные переходы в смеситель.  
+    
+    // Таблица под 2*F: clkdiv = clk_sys/(2·2F) = clk_sys/(4F) — ровно то,  
     // что нужно 4-тактовой программе для выходной частоты F.  
+    // rebuild внутри сам перезапускает core1 (как в vfo_hardware_init).  
     vfo_base_mhz = (uint64_t)freq_hz * 2ULL * 1000ULL;  
     vfo_step_mhz = 0;  
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);  
-    vfo_set_tone_instant(0);  
+    
+    // Тон 0 -> target_* для core1; set_tone_instant уже заполнил clkdiv.  
+    // SM конфигурируем после rebuild: clkdiv на момент старта уже валиден.  
+    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);  
+    pio_sm_restart(lo_pio, lo_sm);          // PC -> wrap_target, чистая фаза  
     pio_sm_set_enabled(lo_pio, lo_sm, true);  
-  
+    
     quad_active = true;  
-}  
+}
   
 /**  
  * @brief Вернуть VFO в штатный TX-режим (2-тактовый меандр на одном пине).  
@@ -2489,7 +2503,9 @@ void vfo_quadrature_start(uint32_t freq_hz) {
  */  
 void vfo_quadrature_stop(uint32_t freq_hz, double step_hz) {  
     pio_sm_set_enabled(lo_pio, lo_sm, false);  
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_q, 1, false); // Q в input  
+    // оба квадратурных пина в input до переконфигурации SM под передачу  
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, false);  
+    pio_sm_set_enabled(lo_pio, lo_sm, false);
     quad_active = false;  
     vfo_hardware_init(freq_hz, step_hz);   // вернёт square-программу и TX-сетку  
 }

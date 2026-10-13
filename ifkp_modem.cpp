@@ -92,6 +92,7 @@ uint8_t DATA_IFKP[33][8];
 uint8_t current_tone = 0; // Индекс текущего тона в сетке (0 - 32)
 extern uint8_t device_SI[5]; // Экспорт флага сканера I2C устройств
 const double IFKP_STEP_HZ = 11.697; // Задаем шаг вашей сетки (соответствует 386/33 Гц)
+const double IFKP_CENTER_OFFSET_HZ = 16.0 * IFKP_STEP_HZ; // 187.15
 
 // Объявление функции расчета частот из соседнего модуля модема, чтобы вызвать её при включении питания
 extern void prepare_ifkp_frequencies(uint32_t base_hz);
@@ -159,7 +160,7 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
 
     // ЕСЛИ СИНТЕЗАТОР ОТСУТСТВУЕТ - ИНИЦИАЛИЗИРУЕМ PIO ЯДРО И ВЫХОДИМ
     if (!device_SI[0] || SI_FAIL == true) {
-        vfo_hardware_init(base_hz, IFKP_STEP_HZ);
+        vfo_hardware_init(base_hz - IFKP_CENTER_OFFSET_HZ, IFKP_STEP_HZ);
         vfo_operation_set(true);    // запустить генерацию программного VFO
         vfo_set_tone_instant(0);
         if (debug_flag) {
@@ -171,7 +172,7 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
     }
 
     // Если синтезатор установлен - расчет байт для Si5351
-    uint64_t base_mHz = (uint64_t)base_hz * 1000ULL;
+    uint64_t base_mHz = (uint64_t)(base_hz - IFKP_CENTER_OFFSET_HZ) * 1000ULL;
     Serial.println(F("[IFKP_СЕТКА] Расчет тонов и вывод основных частот IFKP:"));
     for (int i = 0; i < 33; i++) {
         // Шаг 386/33 = 11.697 Гц

@@ -156,8 +156,10 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
 }
 
 // Подготовка сетки частот на основе MARK, SHIFT и флага INVERT
-void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) {
+void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert) {
+  uint32_t mark_hz = rtty_freq + (shift_hz + 1) / 2;
   uint32_t space_hz;
+    Serial.println(invert); 
 
   // Расчет частоты SPACE на основе флага инверсии
   if (invert) {
@@ -165,8 +167,10 @@ void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) 
   } else {
     space_hz = mark_hz - shift_hz; // Нормальный режим: Space ниже Mark
   }
-
+    Serial.println(mark_hz); 
+    Serial.println(space_hz); 
   if (device_SI[0]) {
+    // аппаратный генератор
     uint64_t space_mHz = (uint64_t)space_hz * 1000ULL;
     uint64_t mark_mHz  = (uint64_t)mark_hz * 1000ULL;
     si_calculate_freq_bytes_mHz(space_mHz, rtty_reg_space); // считаем таблицу байт частоты для СПЕЙС
@@ -178,12 +182,8 @@ void prepare_rtty_frequencies(uint32_t mark_hz, uint32_t shift_hz, bool invert) 
     }
   }
   else {
-    // Для аппаратного VFO RP2040:
-    // Так как vfo_hardware_init(base, shift) принимает базовую частоту и ВЧ-сдвиг между тонами 0 и 1:
-    // Настраиваем фазонепрерывную сетку, учитывая знак инверсии.
-    double rtty_shift = invert ? -(double)shift_hz : (double)shift_hz;
-    
-    vfo_hardware_init(mark_hz, rtty_shift);
+    // Для программного VFO RP2040
+    vfo_hardware_init(mark_hz, shift_hz);
     vfo_set_tone_instant(1);
     vfo_operation_set(true);    // запустить генерацию программного VFO
     if (debug_flag) {

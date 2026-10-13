@@ -63,6 +63,7 @@ extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 #define THOR_IL_SIZE    4             // interleave size  
 #define THOR_IL_DEPTH   10            // 
 #define THOR_INVERT_TONES 0           // A/B боковой полосы
+
   
 #if THOR_MODE == 8  
   static const double   THOR_STEP_HZ   = 15.625;        // 8000*2/1024  
@@ -73,7 +74,7 @@ extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
 #else  
   #error "THOR_MODE must be 8 or 11"  
 #endif  
-  
+
 // Длины преамбулы/хвоста для сброса FEC+перемежителя (мимикрия thor tx_process)  
 #define THOR_PREAMBLE_CHARS  4        // <<< СВЕРИТЬ с thor::tx_process (preamble)  
 #define THOR_FLUSH_CHARS     8        // <<< СВЕРИТЬ (FLUSHLENGTH)  
@@ -110,7 +111,12 @@ uint32_t MFSK16_Base_freq   = 3601307;
 uint32_t DOMINOEX_Base_freq = 3601307;
 uint32_t FSQ_Base_freq      = 3601307;
 uint8_t  DATA_MFSK[MFSK_MAX_TONES][8];  // регистровые пакеты Si5351 текущей сетки
-  
+
+static const double THOR_CENTER_OFFSET_HZ   = (THOR_NUMTONES-1)/2.0 * THOR_STEP_HZ;    // 132.81  
+static const double MFSK16_CENTER_OFFSET_HZ = (MFSK16_NUMTONES-1)/2.0 * MFSK16_STEP_HZ; // 117.19  
+static const double DOMEX_CENTER_OFFSET_HZ  = (DOMEX_NUMTONES-1)/2.0 * DOMEX8_STEP_HZ;  // 132.81  
+static const double FSQ_CENTER_OFFSET_HZ    = (FSQ_NUMTONES-1)/2.0 * FSQ_STEP_HZ;       // 140.63
+
 // ---------------- Varicode (ВЕРБАТИМ из fldigi) --------------------------  
 // MFSKvaricode.cxx: varicode[256] (строки '0'/'1'), + varienc()/varidec()  
 // thorvaricode.cxx: thor_varicode[] + thorvarienc()  
@@ -820,7 +826,7 @@ bool rsid_send(uint16_t code, double center_hz) {
 // =========================================================================
 void prepare_thor_frequencies(uint32_t base_hz) {
     THOR_Base_freq = base_hz;
-    mfsk_prepare(base_hz, THOR_STEP_HZ, THOR_NUMTONES);
+    mfsk_prepare(base_hz - THOR_CENTER_OFFSET_HZ, THOR_STEP_HZ, THOR_NUMTONES);
 }  
   
 static uint8_t thor_prevtone = 0;  
@@ -873,7 +879,7 @@ void thor_send_string(String str) { thor_send_string(str.c_str()); }
 // =========================================================================
 void prepare_mfsk16_frequencies(uint32_t base_hz) {
     MFSK16_Base_freq = base_hz;
-    mfsk_prepare(base_hz, MFSK16_STEP_HZ, MFSK16_NUMTONES);
+    mfsk_prepare(base_hz - MFSK16_CENTER_OFFSET_HZ, MFSK16_STEP_HZ, MFSK16_NUMTONES);
 }
 
 // misc.cxx: grayencode
@@ -934,7 +940,7 @@ void mfsk16_send_string(String str) { mfsk16_send_string(str.c_str()); }
 // =========================================================================
 void prepare_dominoex_frequencies(uint32_t base_hz) {
     DOMINOEX_Base_freq = base_hz;
-    mfsk_prepare(base_hz, DOMEX8_STEP_HZ, DOMEX_NUMTONES);
+    mfsk_prepare(base_hz - DOMEX_CENTER_OFFSET_HZ, DOMEX8_STEP_HZ, DOMEX_NUMTONES);
 }
 
 static uint8_t domex_prevtone = 0;
@@ -994,7 +1000,7 @@ void dominoex_send_string(String str) { dominoex_send_string(str.c_str()); }
 
 void prepare_fsq_frequencies(uint32_t base_hz) {
     FSQ_Base_freq = base_hz;
-    mfsk_prepare(base_hz, FSQ_STEP_HZ, FSQ_NUMTONES);
+    mfsk_prepare(base_hz - FSQ_CENTER_OFFSET_HZ, FSQ_STEP_HZ, FSQ_NUMTONES);
 }
 
 static uint8_t fsq_prevtone = 0;

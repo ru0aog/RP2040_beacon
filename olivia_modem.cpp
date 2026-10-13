@@ -51,6 +51,8 @@ static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорос�
 #define OLIVIA_PREAMBLE_BLOCKS 10   // блоков NUL-преамбулы  
 // A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона  
 #define OLIVIA_INVERT_TONES 0  
+// Центр полосы Olivia 8/250: 3.5 тона от нижнего  
+static const double OLIVIA_CENTER_OFFSET_HZ = 3.5 * OLIVIA_STEP_HZ; // 109.375
 
 uint32_t OLIVIA_Base_freq = 3601307; // базовая частота по умолчанию  
   
@@ -131,17 +133,17 @@ static uint8_t block_count = 0;
   
 // Общая подготовка сетки из 8 тонов (PIO-VFO или Si5351)  
 static void prepare_common(uint32_t base_hz, const char* tag) {  
-    OLIVIA_Base_freq = base_hz;  
+    OLIVIA_Base_freq = base_hz;
     if (!walsh_ready) olivia_build_walsh();  
     block_count = 0;  
   
     if (!device_SI[0]) {  
-        vfo_hardware_init(base_hz, OLIVIA_STEP_HZ);  
+        vfo_hardware_init(OLIVIA_Base_freq - OLIVIA_CENTER_OFFSET_HZ, OLIVIA_STEP_HZ);  
         vfo_set_tone_instant(0);  
         if (debug_flag) {  
             Serial.print('['); Serial.print(tag);  
-            Serial.print(F("] PIO готов, база "));  
-            Serial.print(base_hz); Serial.print(F(" Гц, шаг "));  
+            Serial.print(F("] PIO готов, центр "));  
+            Serial.print(OLIVIA_Base_freq); Serial.print(F(" Гц, шаг "));  
             Serial.print(OLIVIA_STEP_HZ, 3); Serial.println(F(" Гц"));  
         }  
     }  

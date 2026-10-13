@@ -72,7 +72,7 @@ struct VfoParameters {
 // паспортный номинал кварца + относительная коррекция в ppb
 // (1 ppm = 1000 ppb; ppb выбран для целочисленной точности без float)
 #define VFO_XOSC_NOMINAL_HZ   12000000ULL   // кварц 12.000000 МГц  
-#define VFO_XOSC_CORR_PPB     (+29167LL)    // +29.167 ppm -> 12000350 Гц
+#define VFO_XOSC_CORR_PPB     (+42800LL)    // +29.167 ppm -> 12000350 Гц
 // вычисление скорректированной опоры
 inline constexpr uint64_t VFO_CALIBRATED_XOSC_HZ =  
     (uint64_t)((int64_t)VFO_XOSC_NOMINAL_HZ +  

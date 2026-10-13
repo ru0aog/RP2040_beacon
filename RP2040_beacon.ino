@@ -94,7 +94,7 @@
 #include "vfo_hardware.h"
 #include <Adafruit_TinyUSB.h>
 
-String BCN_VER = "2.22";
+String BCN_VER = "2.23";
 String BCN_DAT = "2026-10-13";
 
 bool dev_TX_state  = false;

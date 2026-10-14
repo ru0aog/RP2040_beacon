@@ -1,7 +1,7 @@
 ﻿/**  
  * ============================================================================  
  *  vfo_hardware.cpp — Дизеринг-движок программного DDS VFO на автоматах PIO  
- *  Версия 2.20 от 2026-10-10, автор RU0AOG  
+ *  Версия 2.23 от 2026-10-14, автор RU0AOG  
  * ============================================================================ 
  *  
  *  МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL И ДВУХЪЯДЕРНЫЙ ДИЗЕРИНГ
@@ -9,16 +9,8 @@
  *  
  *  ИСПОЛЬЗУЕМЫЕ БИБЛИОТЕКИ И МОДУЛИ  
  *  -------------------------------  
- *  - Raspberry Pi Pico SDK (BSD-3-Clause):  
- *      hardware/pio.h, hardware/clocks.h, hardware/pll.h,  
- *      hardware/sync.h (spin-locks), hardware/resets.h,  
- *      hardware/timer.h, hardware/vreg.h, hardware/watchdog.h,  
- *      hardware/adc.h, hardware/divider.h, hardware/structs/*,  
- *      pico/multicore.h (multicore_launch_core1),  
- *      __not_in_flash_func (исполнение из RAM на Core 1)  
- *  - Arduino core RP2040 (LGPL-2.1): Serial, micros(), snprintf, GPIO  
- *  - Модули проекта: vfo_hardware.h, file_manager.h,  
- *    si5351_driver.h, cw_modem.h  
+ *  - Raspberry Pi Pico SDK (BSD-3-Clause) 
+ *  - Arduino core RP2040 (LGPL-2.1)
  *  - Сторонний код отсутствует: дизеринг-движок (MASH/FRAC-дизер,  
  *    автотюн PLL с метрикой спуров, PIO-программы) — оригинальная  
  *    разработка автора проекта.  
@@ -29,6 +21,7 @@
  * Добавления и изменения:
  *  2026-10-13:
  * - добавлен квадратурный генератор
+ * - убран сброс накопителей МЭШ-дизера при смене тона
  *  2026-10-09:
  * - Калибровка frac_spur_level_db (−21 dB)
  * - Уровень спура в метрике + FORB-арбитраж с 2⁴⁰-штрафом
@@ -96,6 +89,7 @@ struct MetricBreakdown {
 // ============================================================================
 static void detach_peripheral_clock();
 static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg, uint32_t vsel);
+void __not_in_flash_func(vfo_dither_reset)(void);
 static VfoParameters calculate_raw_params_mhz(uint64_t clk_sys_hz, uint64_t mhz_target);
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit);
 // Упреждающий прототип для verbose-метрики (чтобы find_optimal_pll видела её выше по коду)
@@ -198,7 +192,7 @@ static bool pio_program_loaded = false;
 
 static uint8_t current_active_tone = VFO_TONE_NONE;
 static volatile bool tone_changed = false;
-
+static volatile bool dither_reset_pending = false;  // флаг сброса накопителей фазы MASH-дизера
 
 // Межъядерный аппаратный спинлок
 static spin_lock_t* vfo_spin_lock = nullptr;
@@ -636,11 +630,15 @@ static void __not_in_flash_func(vfo_core1_entry)() {
                 l_int   = (int32_t)target_pio_int;
                 l_frac  = (int32_t)target_pio_frac8;
                 l_dmask = vfo_frac_dither_mask;
-                
-                loc_acc1 = 0;
-                loc_acc2 = 0;
-                loc_m2_carry_prev = 0;
-                loc_rand_state = xorshift_state;
+                if (dither_reset_pending) {  
+                    // Полный сброс: только при инициализации/перестройке VFO  
+                    loc_acc1 = 0;  
+                    loc_acc2 = 0;  
+                    loc_m2_carry_prev = 0;  
+                    loc_rand_state = xorshift_state;  
+                    dither_reset_pending = false;  
+                }  
+                // При обычной смене тона аккумуляторы сохраняются — фаза не прыгает.
                 tone_changed = false; 
                 spin_unlock(vfo_spin_lock, save);
             }  
@@ -1402,7 +1400,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // Синхронный потокобезопасный расчет всей FSK/IFKP таблицы тонов
     vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz); 
     vfo_set_tone_instant(0);
-
+    vfo_dither_reset();         // сброс накопителей фазы MASH-дизера
 // Диагностический вывод рантайм-телеметрии в Serial  
     #if VFO_PLL_DEBUG  
         VfoParameters real_base_params = vfo_tones[0];  
@@ -1488,10 +1486,10 @@ void vfo_clk_thermal_guard(void) {
     if (!thermal_throttled && temp >= VFO_THROTTLE_HI_C) {  
         // Аварийный откат на номинал
         vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-        //vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);  
         vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,  
                             (uint64_t)(cached_step_hz * 1000.0));
-        vfo_set_tone_instant(0);  
+        vfo_set_tone_instant(0);
+        vfo_dither_reset();         // сброс накопителей фазы MASH-дизера
         clk_boosted = false;  
         thermal_throttled = true;
 #if BOOST_DEBUG 
@@ -1503,10 +1501,10 @@ void vfo_clk_thermal_guard(void) {
     else if (thermal_throttled && temp <= VFO_THROTTLE_LO_C) {  
         // Кристалл остыл — ВОЗВРАЩАЕМ АКТИВНЫЙ ПРОФИЛЬ ТЕКУЩЕЙ СЕССИИ (pll_overclock) [Исправлено]
         vfo_set_clk_sys(pll_overclock, pll_overclock.vsel);  
-        //vfo_rebuild_tone_table(cached_base_freq_hz, cached_step_hz);
         vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,  
                             (uint64_t)(cached_step_hz * 1000.0));
-        vfo_set_tone_instant(0);  
+        vfo_set_tone_instant(0);
+        vfo_dither_reset();         // сброс накопителей фазы MASH-дизера
         clk_boosted = true;  
         thermal_throttled = false;
 #if BOOST_DEBUG 
@@ -2136,15 +2134,39 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
         vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤18)  
     }
 
+/*
     // Все накопители сбрасываем
     dds_accum_m2    = 0;  
     m2_carry_prev   = 0;  
     dds_accumulator = 0;  
   
     tone_changed    = true;        // ← поднимаем флаг последним  
-    spin_unlock(vfo_spin_lock, save);  
+    spin_unlock(vfo_spin_lock, save);
+*/
+
+    // Накопители НЕ сбрасываем: переход mark/space фазово-непрерывный,  
+    // спектрального всплеска на битовых границах RTTY больше нет.  
+    tone_changed    = true;        // ← поднимаем флаг последним    
+    spin_unlock(vfo_spin_lock, save); 
   
     current_active_tone = tone_index;
+}
+
+
+/**  
+ * @brief Полный сброс состояния MASH-дизера и накопителей фазы.  
+ *  
+ * Вызывается только при (пере)инициализации VFO — vfo_hardware_init(),  
+ * vfo_quadrature_start(), после перестройки таблицы/clk_sys (термогуард).  
+ * НЕ вызывать при манипуляции тонов внутри передачи.  
+ */  
+void __not_in_flash_func(vfo_dither_reset)(void) {  
+    uint32_t save = spin_lock_blocking(vfo_spin_lock);  
+    dds_accum_m2    = 0;  
+    m2_carry_prev   = 0;  
+    dds_accumulator = 0;  
+    dither_reset_pending = true;   // новый volatile-флаг  
+    spin_unlock(vfo_spin_lock, save);  
 }
 
 
@@ -2189,6 +2211,7 @@ void vfo_quadrature_start(uint32_t freq_hz) {
   
     // Явно загружаем тон 0 в target_* — rebuild сам НЕ применяет тон    
     vfo_set_tone_instant(0);    
+    vfo_dither_reset();         // сброс накопителей фазы MASH-дизера
   
     // Core1 в квадратурном пути мог быть мёртв (init/stop делали reset).    
     // Гарантированно поднимаем дизеринг-конвейер — он будет писать clkdiv.    

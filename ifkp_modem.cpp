@@ -339,12 +339,11 @@ void send_ifkp_string(const char* str) {
   if (str == nullptr) return;
   
   // Включаем физический выход ВЧ генерации
-      // Включаем ШИМ и плавно открываем фронт один раз ДО старта преамбулы
     vfo_set_narrowband(true);
     if (!device_SI[0]) {
         vfo_operation_set(false);
-        vfo_set_tone_instant(0); // Стартуем с MARK
-        vfo_operation_set(true); // Плавно поднимаем амплитуду за 500 мкс
+        vfo_set_tone_instant(0);
+        vfo_operation_set(true);
     } else { VFO_TX_ON(); }      // запустить выход частоты TX
     
     int i = 0;
@@ -375,7 +374,7 @@ void send_ifkp_string(const char* str) {
     if (device_SI[0]) {
         VFO_TX_OFF(); 
     } else {
-        vfo_operation_set(false); // Плавно опускаем амплитуду до 0% в конце постамбулы
+        vfo_operation_set(false);
     }
     ZERO_LED_OFF();
     vfo_set_narrowband(false);   // возвращаем штатный дизер
@@ -391,11 +390,10 @@ void send_ifkp_string(String str) {
 // Передача калибровочной лесенки (Свип-тест от 0 до 32 тона с миганием)
 void send_ifkp_calibration_ladder() {
   // Включаем физический выход ВЧ генерации
-      // Включаем ШИМ и плавно открываем фронт один раз ДО старта преамбулы
     if (!device_SI[0]) {
         vfo_operation_set(false);
-        vfo_set_tone_instant(0); // Стартуем с MARK
-        vfo_operation_set(true); // Плавно поднимаем амплитуду за 500 мкс
+        vfo_set_tone_instant(0);
+        vfo_operation_set(true);
     } else { VFO_TX_ON(); }      // запустить выход частоты TX
 
     // Последовательный перебор всех тонов вверх
@@ -443,7 +441,7 @@ void send_ifkp_calibration_ladder() {
     if (device_SI[0]) {
         VFO_TX_OFF(); 
     } else {
-        vfo_operation_set(false); // Плавно опускаем амплитуду до 0% в конце постамбулы
+        vfo_operation_set(false);
     }
     ZERO_LED_OFF();
 }

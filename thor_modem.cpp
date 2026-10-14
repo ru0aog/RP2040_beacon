@@ -103,6 +103,7 @@ static const uint32_t FSQ_SYMBOL_US    = 256000;         // FSQ-4.5: 3072/12000 
 #define RSID_NSYMBOLS        15
 static const double   RSID_STEP_HZ     = 11025.0 / 1024.0; // 10.7666 Гц
 static const uint32_t RSID_SYMBOL_US   = 92880;            // 1024/11025 с
+#define THOR11_RSID_CODE  	143
 
 #define MFSK_MAX_TONES       33
 
@@ -802,23 +803,32 @@ void rsid_encode(uint16_t code, uint8_t* rsid /*15*/) {
     }
 }
 
-// 5 символов тишины + 15 тонов: f = center - 7*step + tone*step.
-// Оставляет в mfsk_prepare сетку RSID — вызывающий восстанавливает свою.
-bool rsid_send(uint16_t code, double center_hz) {
-    uint8_t rsid[RSID_NSYMBOLS];
-    rsid_encode(code, rsid);
-    mfsk_prepare((uint32_t)(center_hz - 7.0 * RSID_STEP_HZ + 0.5), RSID_STEP_HZ, 16);
-
-    mfsk_carrier(false);
-    mfsk_sync_deadline();
-    for (int i = 0; i < 5; i++)
-        if (!mfsk_wait_symbol(RSID_SYMBOL_US, false)) return false;
-
-    mfsk_set_tone(rsid[0]);
-    mfsk_carrier(true);
-    for (int i = 0; i < RSID_NSYMBOLS; i++)
-        if (!mfsk_emit_tone(rsid[i], RSID_SYMBOL_US)) return false;
-    return true;
+// 5 символов тишины + 15 тонов: f = center - 7*step + tone*step.  
+// Оставляет в mfsk_prepare сетку RSID — вызывающий восстанавливает свою.  
+// Несущая гасится на границе последнего символа: между RSID и данными  
+// в эфир не уходит «хвост» последнего тона на время перестройки сетки.  
+bool rsid_send(uint16_t code, double center_hz) {  
+    uint8_t rsid[RSID_NSYMBOLS];  
+    rsid_encode(code, rsid);  
+    mfsk_prepare((uint32_t)(center_hz - 7.0 * RSID_STEP_HZ + 0.5), RSID_STEP_HZ, 16);  
+  
+    // 5 символов тишины — несущая выключена  
+    mfsk_carrier(false);  
+    mfsk_sync_deadline();  
+    for (int i = 0; i < 5; i++)  
+        if (!mfsk_wait_symbol(RSID_SYMBOL_US, false)) return false;  
+  
+    // 15 символов RSID  
+    mfsk_set_tone(rsid[0]);  
+    mfsk_carrier(true);  
+    for (int i = 0; i < RSID_NSYMBOLS; i++)  
+        if (!mfsk_emit_tone(rsid[i], RSID_SYMBOL_US)) { mfsk_carrier(false); return false; }  
+  
+    // Последний тон отзвучал ровно на дедлайне — выключаем несущую,  
+    // иначе rsid[14] продолжит звучать всё время vfo_hardware_init  
+    // вызывающей стороны и декодер увидит лишний символ после RSID.  
+    mfsk_carrier(false);  
+    return true;  
 }
 
 // =========================================================================
@@ -856,7 +866,14 @@ void thor_send_string(const char* str) {
     fec_reset();
     thor_prevtone = 0;  
     mfsk_tx_begin();
-  
+
+    // RSID-маркер ДО преамбулы: fldigi переключит режим и отцентрует приём.  
+    // Base_freq = центр полосы THOR (prepare_thor_frequencies уже вычла CENTER_OFFSET).  
+    if (!rsid_send(THOR11_RSID_CODE, THOR_Base_freq)) goto done;  
+    mfsk_prepare(THOR_Base_freq - THOR_CENTER_OFFSET_HZ, THOR_STEP_HZ, THOR_NUMTONES);  
+    mfsk_sync_deadline();  
+    mfsk_carrier(true);              // несущая гасится внутри rsid_send — включить для данных  
+
     // Преамбула (idle) — захват синхронизации декодером  
     for (int i = 0; i < THOR_PREAMBLE_CHARS && !mfsk_abort(); i++)  
         thor_send_coded(0, 0);  
@@ -868,8 +885,8 @@ void thor_send_string(const char* str) {
     // Хвост — сброс перемежителя и свёрточного кодера  
     for (int i = 0; i < THOR_FLUSH_CHARS && !mfsk_abort(); i++)  
         thor_send_coded(0, 0);  
-  
-    mfsk_tx_end();
+done:  
+    mfsk_tx_end(); 
 }  
   
 void thor_send_string(String str) { thor_send_string(str.c_str()); }

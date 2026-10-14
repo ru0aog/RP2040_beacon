@@ -77,6 +77,7 @@
 #include "lcd.h"
 #include "led_blink.h"
 #include "vfo_hardware.h"
+#include "thor_modem.h"
 #include <hardware/watchdog.h>
 
 // Внешние ссылки на глобальные переменные управления
@@ -157,6 +158,7 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
 
 // Подготовка сетки частот на основе MARK, SHIFT и флага INVERT
 void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert) {
+  static uint32_t rtty_mark_hz = 0, rtty_shift_hz = 0;   // для восстановления сетки после RSID
   uint32_t mark_hz;
   uint32_t space_hz;
   // Расчет частоты SPACE на основе флага инверсии
@@ -167,6 +169,8 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
     mark_hz = rtty_freq + (shift_hz + 1) / 2; // Нормальный режим: Mark выше Space
     space_hz = mark_hz - shift_hz;
   }
+  rtty_mark_hz = mark_hz;  
+  rtty_shift_hz = shift_hz;   // знак сдвига уже учтён при расчёте space
 
   if (device_SI[0]) {
     // аппаратный генератор
@@ -182,6 +186,14 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
   }
   else {
     // Для программного VFO RP2040
+    vfo_set_narrowband(true);
+    // RSID-маркер режима до пилот-тона: fldigi переключит декодер на RTTY.  
+    // Центр полосы RTTY = mark - shift/2.  
+    rsid_send(39 /*RSID_RTTY45*/, (double)rtty_mark_hz - (double)rtty_shift_hz / 2.0);  
+    // rsid_send перенастроила VFO на свою сетку — вернуть RTTY-сетку  
+    vfo_hardware_init(rtty_mark_hz, rtty_shift_hz);  
+    vfo_set_tone_instant(1);   // MARK = тон 1  
+    vfo_set_narrowband(true);  // mfsk_prepare мог сбросить narrowband  
     vfo_hardware_init(mark_hz, shift_hz);
     vfo_set_tone_instant(1);
     vfo_operation_set(true);    // запустить генерацию программного VFO

@@ -48,7 +48,7 @@ extern uint8_t device_SI[5];
 #define OLIVIA_BITS       3        // log2(8) — бит на символ = число символов в блоке  
 #define OLIVIA_SYMBOL_MS  32       // 1000 / 31.25 = 32 мс на тон  
 static const double OLIVIA_STEP_HZ = 31.25; // шаг сетки = скорость = 250/8  
-#define OLIVIA_PREAMBLE_BLOCKS 10   // блоков NUL-преамбулы  
+#define OLIVIA_PREAMBLE_BLOCKS 6   // блоков NUL-преамбулы  
 // A/B-тест боковой полосы: 0 = как есть, 1 = зеркалировать номер тона  
 #define OLIVIA_INVERT_TONES 0  
 // Центр полосы Olivia 8/250: 3.5 тона от нижнего  

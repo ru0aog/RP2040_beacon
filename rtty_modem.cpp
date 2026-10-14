@@ -137,6 +137,7 @@ const mtk2_map_t table_rus[] PROGMEM = {
 // Буферы частот RTTY (8 байт частоты)
 static uint8_t rtty_reg_space[8];
 static uint8_t rtty_reg_mark[8];
+static bool rtty_inverted = false;   // флаг инверсии MARK/SPACE, запоминается в prepare
 
 // Внутренняя функция поиска совпадений по таблицам
 static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code, int &len) {
@@ -158,6 +159,7 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
 
 // Подготовка сетки частот на основе MARK, SHIFT и флага INVERT
 void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert) {
+  rtty_inverted = invert;
   static uint32_t rtty_mark_hz = 0, rtty_shift_hz = 0;   // для восстановления сетки после RSID
   uint32_t mark_hz;
   uint32_t space_hz;
@@ -191,10 +193,7 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
     // Центр полосы RTTY = mark - shift/2.  
     rsid_send(39 /*RSID_RTTY45*/, (double)rtty_mark_hz - (double)rtty_shift_hz / 2.0);  
     // rsid_send перенастроила VFO на свою сетку — вернуть RTTY-сетку  
-    vfo_hardware_init(rtty_mark_hz, rtty_shift_hz);  
-    vfo_set_tone_instant(1);   // MARK = тон 1  
     vfo_set_narrowband(true);  // mfsk_prepare мог сбросить narrowband  
-
     // Сетка растёт вверх от базы: base = min(mark, space), step = shift.  
     // Нормальный режим: tone0=SPACE, tone1=MARK. Инверсия — наоборот.  
     uint32_t base_hz = invert ? mark_hz : space_hz;  
@@ -220,8 +219,9 @@ static void send_rtty_bit(TransmitterState state) {
       }
       else {
         // Сетка: норма tone0=SPACE/tone1=MARK; инверсия — зеркально.  
-        static uint8_t rtty_tone_mark = 1, rtty_tone_space = 0; // см. ниже  
-        vfo_set_tone_instant(state == MARK ? rtty_tone_mark : rtty_tone_space);
+        uint8_t tone = (state == MARK) ? (rtty_inverted ? 0 : 1)  
+                                       : (rtty_inverted ? 1 : 0);  
+        vfo_set_tone_instant(tone);
       }
 
     if (state == MARK) {
@@ -337,6 +337,11 @@ void send_rtty_string(String str) {
   if (pc_file_written == false && soft_restart_flag == false) {
 
     vfo_set_narrowband(true);
+    if (!device_SI[0]) {  
+        vfo_operation_set(false);  
+        vfo_set_tone_instant(rtty_inverted ? 0 : 1); // стартовый тон = MARK
+        vfo_operation_set(true);   // ← обратное включение выхода  
+    }
     // СТАРТОВЫЙ ПИЛОТ-ТОН (PREAMBLE): Включаем частоту MARK на 500 мс
     uint32_t preamble_start = millis();
     while (millis() - preamble_start < 500) {

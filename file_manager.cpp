@@ -254,6 +254,7 @@ static void save_ram_to_flash() {
   meta->seq = next_seq;  
   meta->max_clk_sys_hz = vfo_max_clk_sys_hz;   // лимиты путешествуют вместе со слотом  
   meta->max_pll_vco_hz = vfo_max_pll_vco_hz;
+  meta->xosc_corr_ppb  = vfo_xosc_corr_ppb;    // коррекция кварца — туда же
 
   // Флэш нельзя программировать на разогнанной clk_sys — откатываем частоту на номинал  
   bool was_boosted = clk_boosted;  
@@ -520,6 +521,8 @@ static void create_default_fat_with_info_file() {
   content += "=== ПЕРИОДИЧНОСТЬ КЛИМАТИЧЕСКОГО МОНИТОРИНГА ===\r\n";
   content += "[CLIM_SAMPLE_MIN]=" + String(climate_sample_interval_min) + "\r\n";
   content += "[CLIM_REPORT_MIN]=" + String(climate_report_interval_min) + "\r\n\r\n";
+  content += "// Коррекция кварцевого генератора в ppb (применяется при старте)\r\n";  
+  content += "[XOSC_PPB]=" + String((long)vfo_xosc_corr_ppb) + "\r\n\r\n";  
   content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
   content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
   content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";
@@ -1163,10 +1166,11 @@ void init_file_manager() {
         // Коррекция кварца: стёртая flash даёт 0xFFFFFFFF (-1) или мусор —  
         // принимаем только физически разумный диапазон ±500 ppm,  
         // иначе остаётся дефолтный 0 (без коррекции)  
-        if (checked_meta.xosc_corr_ppb > -500000 &&  
-            checked_meta.xosc_corr_ppb <  500000) {  
-          vfo_xosc_corr_ppb = checked_meta.xosc_corr_ppb;  
-        }  
+        if (checked_meta.xosc_corr_ppb > -500000 &&    
+            checked_meta.xosc_corr_ppb <  500000 &&  
+            checked_meta.xosc_corr_ppb != -1) {  // -1 = 0xFFFFFFFF, поле стёрто    
+          vfo_xosc_corr_ppb = checked_meta.xosc_corr_ppb;    
+        } 
       }  
     }
   }
@@ -1566,7 +1570,8 @@ void save_hardware_settings_to_file(String scan_results) {
   // СОХРАНЕНИЕ ТЕКУЩИХ ИНТЕРВАЛОВ ПРИ ПЕРЕЗАПИСИ ИЛИ ИНИЦИАЛИЗАЦИИ ДИСКА
   content += "=== ПЕРИОДИЧНОСТЬ КЛИМАТИЧЕСКОГО МОНИТОРИНГА ===\r\n";
   content += "[CLIM_SAMPLE_MIN]=" + String(climate_sample_interval_min) + "\r\n";
-  content += "[CLIM_REPORT_MIN]=" + String(climate_report_interval_min) + "\r\n\r\n";
+  content += "[CLIM_REPORT_MIN]=" + String(climate_report_interval_min) + "\r\n\r\n";  
+  content += "[XOSC_PPB      ]=" + String((long)vfo_xosc_corr_ppb) + "\r\n\r\n";
   content += "=== СТАТИСТИКА ИЗНОСА ФЛЭШ-ПАМЯТИ ===\r\n";
   content += "[FLASH_SLOT   ]=" + String(current_active_slot != -1 ? current_active_slot : 0) + "\r\n";
   content += "[FLASH_SEQ    ]=" + String(current_max_seq != 0 ? current_max_seq : 1) + "\r\n\r\n";

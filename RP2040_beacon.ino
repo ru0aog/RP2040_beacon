@@ -151,10 +151,32 @@ UsrChainState usr_chain_state = USR_IDLE;  // Текущий статус авт
 uint32_t usr_timer_ms = 0;                 // Таймер неблокирующей паузы
 bool old_button_state = HIGH;              // Предыдущее состояние кнопки для отслеживания клика
 
+// Приёмный тракт  
+void     rx_capture_start(void);
+void     rx_capture_stop(void);  
+void     rx_dsp_start(float f_target_hz);  
+void     rx_dsp_stop(void);  
+void     rx_decoders_start(uint8_t mode, float center_hz);  
+void     rx_decoders_stop(void);  
+uint32_t vfo_quadrature_lo_hz(void);  
+void     ZERO_LED_CYAN_ON(void);  
+void     ZERO_LED_OFF(void);  
+  
+// Режимы приёма (зеркало enum rx_mode_t из rx_decoders.cpp)  
+enum {  
+    RX_MODE_NONE = 0, RX_MODE_RTTY, RX_MODE_CW,  
+    RX_MODE_OLIVIA, RX_MODE_CONTESTIA, RX_MODE_THOR,  
+    RX_MODE_MFSK16, RX_MODE_DOMINOEX, RX_MODE_FSQ, RX_MODE_IFKP  
+};
+
+bool is_transmitting = false; // Флаг передачи 
+bool rx_active = false;       // Флаг приёма (заняты: LO, ADC, DMA, core1)  
+uint32_t rx_freq_hz = 0;      // частота, на которую настроен приёмник  
+uint8_t  rx_mode  = 0;        // RX_MODE_*
+
 bool soft_restart_flag = false;
 static bool wd_reboot_detected = false;
 extern bool pc_activity_detected; 
-bool is_transmitting = false; // Флаг передачи 
 String rtc_chip_name = "Неизвестный RTC"; // Сюда сканер запишет точное имя чипа
 
 extern uint8_t rtc_sec;
@@ -428,7 +450,69 @@ void check_serial_commands() {
               }    
           }
 
-          // --- НОВАЯ КОРРЕКТИРОВКА: ОЧИСТКА ЖУРНАЛА LOG.TXT ИЗ КОНСОЛИ ---
+          else if (command.equalsIgnoreCase("rx off")) {  
+              // ПЕРВОЙ — иначе startsWith("rx ") перехватит  
+              if (!rx_active) {  
+                  Serial.println(F("[RX] Приёмник не был запущен"));  
+              } else {  
+                  rx_decoders_stop();  
+                  rx_dsp_stop();          // сначала гасим потребителя буферов  
+                  rx_capture_stop();      // потом источник (DMA + ADC)  
+                  uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);  
+                  if (cw_hz == 0) cw_hz = 3600000;  
+                  vfo_quadrature_stop(cw_hz, 1.0);  // LO выключаем последним
+                  rx_active = false;  
+                  ZERO_LED_OFF();  
+                  Serial.println(F("[RX] OFF"));  
+              }  
+          }  
+          else if (command.startsWith("rx ")) {  
+              // rx <mode> [freq]  — пример: rx rtty 3608000  
+              if (is_transmitting || tx_launching) {  
+                  Serial.println(F("[Ошибка] Идёт передача — приём заблокирован"));  
+              } else if (rx_active) {  
+                  Serial.println(F("[Ошибка] Приёмник уже активен. Сначала: rx off"));  
+              } else {  
+                  String rest = command.substring(3); rest.trim();  
+                  int sp = rest.indexOf(' ');  
+                  String mode_s = (sp < 0) ? rest : rest.substring(0, sp);  
+                  uint32_t f = (sp < 0) ? 0 : strtoul(rest.substring(sp+1).c_str(), NULL, 10);  
+                  if (f == 0) f = 3608000;  
+                  mode_s.toLowerCase();  
+  
+                  uint8_t mode = RX_MODE_NONE;  
+                  if      (mode_s == "rtty")   mode = RX_MODE_RTTY;  
+                  else if (mode_s == "cw")     mode = RX_MODE_CW;  
+                  else if (mode_s == "olivia") mode = RX_MODE_OLIVIA;  
+                  else if (mode_s == "contestia") mode = RX_MODE_CONTESTIA;  
+                  else if (mode_s == "thor")   mode = RX_MODE_THOR;  
+                  else if (mode_s == "mfsk16") mode = RX_MODE_MFSK16;  
+                  else if (mode_s == "dominoex" || mode_s == "dom") mode = RX_MODE_DOMINOEX;  
+                  else if (mode_s == "fsq")    mode = RX_MODE_FSQ;  
+                  else if (mode_s == "ifkp")   mode = RX_MODE_IFKP;  
+  
+                  if (mode == RX_MODE_NONE) {  
+                    Serial.println(F("[RX] Неизвестный режим. Доступны: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp"));  
+                  } else {  
+                    // 1. LO: целочисленный clkdiv, дизеринг/core1 выключены  
+                    vfo_quadrature_start(f);  
+                    uint32_t lo = vfo_quadrature_lo_hz();  
+                    // 2. ADC+DMA поток  
+                    rx_capture_start();
+                    // 3. DSP на core1: NCO садится на (f_target − f_lo_actual)  
+                    rx_dsp_start((float)f);  
+                    rx_decoders_start(mode, (float)f - (float)lo);  
+                    rx_active = true;  
+                    rx_freq_hz = f;  
+                    rx_mode = mode;  
+                    ZERO_LED_CYAN_ON();  
+                    Serial.printf("[RX] %s @ %lu Гц | LO=%lu Гц, IF=%.1f Гц\n",  
+                                  mode_s.c_str(), (unsigned long)f,  
+                                  (unsigned long)lo, (float)f - (float)lo);  
+                  }  
+              }  
+          }
+
           else if (command.equalsIgnoreCase("clear log")) {
             if (is_transmitting) {
               Serial.println(F("[Ошибка] Нельзя стирать журнал во время активной передачи в эфир!"));
@@ -574,6 +658,8 @@ void check_serial_commands() {
           Serial.println(F("start mfsk16    - Немедленно запустить внеочередной сеанс MFSK16"));
           Serial.println(F("start dominoex  - Немедленно запустить внеочередной сеанс DominoEX 8"));
           Serial.println(F("start fsq       - Немедленно запустить внеочередной сеанс FSQ"));
+          Serial.println(F("rx <mod> <f>    - Приём: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp"));  
+          Serial.println(F("rx off          - Остановить приёмник"));
           Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
           Serial.println(F("clim            - Вывод таблицы климатических замеров"));
           Serial.println(F("format disk     - Полностью стереть диск и записать дефолтные INFO.TXT, SET.TXT, LOG.TXT"));

@@ -178,6 +178,13 @@ void rx_dsp_release_output(void) {
 // Возвращает Fs выхода базовой полосы — нужна декодерам для таймингов  
 float rx_dsp_fs_out(void) { return RX_FS_OUT_HZ; }
 
-
+// Останавливает DSP-тракт: снимает core1 и гасит выходные буферы.  
+// Вызывается из rx off до rx_capture_stop — иначе core1 продолжит  
+// крутиться на освобождённых DMA-буферах.  
+void rx_dsp_stop(void) {  
+    multicore_reset_core1();   // гасим DSP-ядро (дизеринг VFO тоже жил бы здесь — в RX он не нужен)  
+    out_ready = 0;  
+    out_wr = out_read = 0;  
+}
 
 

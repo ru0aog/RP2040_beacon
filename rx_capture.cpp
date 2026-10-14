@@ -44,7 +44,10 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
     // Канал A завершил блок: hardware сама запустила B через chain_to,  
     // канал A остановлен. Аборт не нужен — он и создавал гонку.  
     if (dma_channel_get_irq0_status(rx_dma_a)) {  
-        dma_channel_acknowledge_irq0(rx_dma_a);  
+        dma_channel_acknowledge_irq0(rx_dma_a);
+        // WRITE_ADDR не перезагружается по chain_to — вернуть до следующего  
+        // триггера A (он придёт только после завершения B, время есть)  
+        dma_channel_set_write_addr(rx_dma_a, (void*)rx_buf_a, false);
         if (rx_buf_a_busy) {  
             rx_dropped++;               // consumer не успел — buf_a перезаписан  
         } else {  
@@ -57,7 +60,8 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
         }  
     }  
     if (dma_channel_get_irq0_status(rx_dma_b)) {  
-        dma_channel_acknowledge_irq0(rx_dma_b);  
+        dma_channel_acknowledge_irq0(rx_dma_b);
+        dma_channel_set_write_addr(rx_dma_b, (void*)rx_buf_b, false);
         if (rx_buf_b_busy) {  
             rx_dropped++;  
         } else {  

@@ -495,13 +495,13 @@ void check_serial_commands() {
                     Serial.println(F("[RX] Неизвестный режим. Доступны: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp"));  
                   } else {  
                     // 1. LO: целочисленный clkdiv, дизеринг/core1 выключены  
-                    vfo_quadrature_start(f);  
-                    uint32_t lo = vfo_quadrature_lo_hz();  
-                    // 2. ADC+DMA поток  
+                    vfo_quadrature_start(f);
+                    uint32_t lo = vfo_quadrature_lo_hz();
+                    // 2. ADC+DMA поток
                     rx_capture_start();
                     // 3. DSP на core1: NCO садится на (f_target − f_lo_actual)  
-                    rx_dsp_start((float)f);  
-                    rx_decoders_start(mode, (float)f - (float)lo);  
+                    //rx_dsp_start((float)f);  
+                    //rx_decoders_start(mode, (float)f - (float)lo);  
                     rx_active = true;  
                     rx_freq_hz = f;  
                     rx_mode = mode;  
@@ -783,7 +783,7 @@ void setup() {
     digitalWrite(pin_amp_act, dev_TX_state);
   }
 
-  watchdog_enable(15000, true);   // 15 сек; true = не тикать при остановке по отладчику
+  watchdog_enable(8000, true);   // 8 сек; true = не тикать при остановке по отладчику
 
   if (debug_flag) {
     // вывод сообщения

@@ -40,6 +40,14 @@ extern bool     rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t*
 extern void     rx_dsp_release_output(void);  
 extern void     rx_dsp_set_nco_hz(float f_hz);  
 extern float    rx_dsp_fs_out(void);  
+
+static rx_mode_t  dec_mode = RX_MODE_NONE;  
+static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
+static uint32_t   sym_acc = 0;        // накоплено в окне  
+static uint32_t   sample_idx = 0;  
+static float      fs_out = 15625.0f;  
+static float      f_center_hz = 0;    // для AFC  
+static bool       afc_on = false;  
   
 // ============================================================================  
 // 1. Goertzel-детектор одиночного тона (накопление за символьное окно)  
@@ -158,30 +166,41 @@ typedef struct {
     uint8_t  state;             // 0=idle, 1=start, 2=биты, 3=стоп  
     uint8_t  bit_cnt;  
     uint8_t  shreg;  
-    uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах)  
+    uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах)
+    uint32_t bit_period;        // отсчётов на бит  
+    bool     prev_mark;         // предыдущее решение (для фронта) 
 } rtty_dec_t;  
 static rtty_dec_t rt;  
   
 #define RTTY_FIGS 0x1F  
 #define RTTY_LTRS 0x1B  
-  
-static void rtty_bit(bool mark, uint32_t sample_idx, uint32_t bit_period) {  
+
+static inline bool sample_idx_ge(uint32_t a, uint32_t b) {  
+    return (int32_t)(a - b) >= 0;  
+}
+
+// RTTY: решение о тоне каждые bit_period/8 отсчётов (subwin ~2.75 мс при 45.45 бод).  
+// Старт-бит ловим по фронту mark→space, датабиты читаем в их середине.  
+static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {  
+    // bit_period в отсчётах храним в rt.bit_period (заполняется в start)  
     switch (rt.state) {  
-    case 0:  
-        if (!mark) { rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
-                     rt.next_sample = sample_idx + bit_period + bit_period/2; }  
-        break;  
-    case 1:  
-        if (sample_idx >= rt.next_sample) {  
-            rt.shreg |= (mark ? 1 : 0) << rt.bit_cnt;  
-            if (++rt.bit_cnt == 5) rt.state = 2;  
-            rt.next_sample += bit_period;  
+    case 0:                                  // ждём space-фронт (старт-бит)  
+        if (!mark && rt.prev_mark) {  
+            rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
+            rt.next_sample = idx + rt.bit_period + rt.bit_period/2; // сер. бита 0  
         }  
         break;  
-    case 2:  
-        if (sample_idx >= rt.next_sample) {  
+    case 1:                                  // читаем 5 датабитов в серединах  
+        while (sample_idx_ge(idx, rt.next_sample)) {  
+            rt.shreg |= (mark ? 1u : 0u) << rt.bit_cnt;  
+            rt.next_sample += rt.bit_period;  
+            if (++rt.bit_cnt == 5) { rt.state = 2; break; }  
+        }  
+        break;  
+    case 2:                                  // стоп-бит: просто закрыть символ  
+        if (sample_idx_ge(idx, rt.next_sample)) {  
             rt.state = 0;  
-            uint8_t c = rt.shreg;  
+            uint8_t c = rt.shreg & 0x1F;  
             if (c == RTTY_FIGS) rt.figs = 1;  
             else if (c == RTTY_LTRS) rt.figs = 0;  
             else {  
@@ -191,56 +210,49 @@ static void rtty_bit(bool mark, uint32_t sample_idx, uint32_t bit_period) {
         }  
         break;  
     }  
-}  
+    rt.prev_mark = mark;  
+}
   
 // ============================================================================  
-// 4. CW — тональный детектор + тайминг (ITU: точка=1, тире=3, паузы 1/3/7)  
+// 4. CW — тональный детектор + тайминг (точка=1, тире=3, паузы 1/3/7)  
 // ============================================================================  
 typedef struct {  
-    uint32_t on_start;         // индекс отсчёта начала тона  
-    uint32_t off_start;  
+    uint32_t on_start;          // отсчёт начала тона  
+    uint32_t off_start;         // отсчёт начала паузы  
     bool     tone_on;  
-    uint32_t dot_ms;           // оценка длительности точки (автоподстройка)  
+    float    dot_us;            // оценка точки в МИКРОсекундах (автоподстройка)  
     char     elem_buf[64];  
     uint8_t  elem_n;  
-    int32_t  threshold;        // порог мощности (авто)  
     int32_t  noise_floor;  
 } cw_dec_t;  
 static cw_dec_t cw;  
   
-static void cw_decode_elements(void);  // fwd  
+static void cw_decode_elements(void);  
   
-static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
-    uint32_t dur_ms = (on ? (idx - cw.on_start) : (idx - cw.off_start)) * 1000 / fs_x1000 * 1000;  
-    dur_ms = (on ? (idx - cw.on_start) : (idx - cw.off_start)); // в отсчётах  
-    float dot = (float)cw.dot_ms;  
-    if (on) {  
-        // конец тона: классифицировать . или —  
-        if (dur_ms < 2 * dot) cw.elem_buf[cw.elem_n++] = '.';  
-        else                  cw.elem_buf[cw.elem_n++] = '-';  
+// idx — индекс отсчёта Fs_out; dur переводим в микросекунды  
+static void cw_on_edge(bool ended_tone, uint32_t idx) {  
+    uint32_t dur_smp = ended_tone ? (idx - cw.on_start) : (idx - cw.off_start);  
+    float dur_us = (float)dur_smp * 1.0e6f / fs_out;  
+    float dot = cw.dot_us;  
+  
+    if (ended_tone) {  
+        // конец посылки: < 2·dot → точка, иначе тире; подстройка dot по точкам  
+        if (dur_us < 2.0f * dot) {  
+            cw.elem_buf[cw.elem_n++] = '.';  
+            cw.dot_us += (dur_us - cw.dot_us) * 0.25f;     // EMA-слежение  
+        } else {  
+            cw.elem_buf[cw.elem_n++] = '-';  
+            cw.dot_us += (dur_us/3.0f - cw.dot_us) * 0.1f; // медленнее по тире  
+        }  
+        if (cw.dot_us < 20000)  cw.dot_us = 20000;         // не ниже ~60 WPM  
+        if (cw.dot_us > 400000) cw.dot_us = 400000;        // не выше ~3 WPM  
         if (cw.elem_n >= sizeof(cw.elem_buf)-1) cw.elem_n = 0;  
     } else {  
-        // конец паузы: 3·dot → конец знака, 7·dot → конец слова  
-        if (dur_ms > 6 * dot) { cw_decode_elements(); Serial.write(' '); }  
-        else if (dur_ms > 2.5f * dot) cw_decode_elements();  
+        // конец паузы: >2.5·dot → конец знака, >6·dot → конец слова  
+        if (dur_us > 6.0f * dot) { cw_decode_elements(); Serial.write(' '); }  
+        else if (dur_us > 2.5f * dot) cw_decode_elements();  
     }  
-}  
-  
-// Таблица Морзе: двоичный код elem_buf (точка=0... используем классический trick:  
-// строка ".-..-" сводится в индекс дерева)  
-static const char cw_tree[] =  
-    " ETIANMSURWDKGOHVVF L  PJBXCYZQ  54 3   2       16       7   8 90";  
-  
-static void cw_decode_elements(void) {  
-    if (!cw.elem_n) return;  
-    cw.elem_buf[cw.elem_n] = 0;  
-    int idx = 1;  
-    for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
-        idx = idx * 2 + (cw.elem_buf[i] == '-' ? 1 : 0);  
-    char c = (idx < 64) ? cw_tree[idx] : '?';  
-    if (c && c != ' ') Serial.write(c);  
-    cw.elem_n = 0;  
-}  
+}
   
 // ============================================================================  
 // 5. MFSK/IFK-разностный детектор (THOR/DominoEX/FSQ/IFKP)  
@@ -272,22 +284,15 @@ typedef enum {
     RX_MODE_THOR, RX_MODE_MFSK16, RX_MODE_DOMEX, RX_MODE_FSQ, RX_MODE_IFKP  
 } rx_mode_t;  
   
-static rx_mode_t  dec_mode = RX_MODE_NONE;  
-static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
-static uint32_t   sym_acc = 0;        // накоплено в окне  
-static uint32_t   sample_idx = 0;  
-static float      fs_out = 15625.0f;  
-static float      f_center_hz = 0;    // для AFC  
-static bool       afc_on = false;  
-  
 void rx_decoders_start(uint8_t mode, float center_hz) {  
     dec_mode = (rx_mode_t)mode;  
     fs_out = rx_dsp_fs_out();  
     f_center_hz = center_hz;  
     sym_acc = 0; sample_idx = 0;  
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
-    memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));  
-    cw.dot_ms = 60;  cw.threshold = 0; cw.noise_floor = 0;  
+    memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));
+    cw.dot_us = 60000.0f; // (60 мс ≈ 20 WPM — стартовая точка, EMA подстроится)
+    cw.noise_floor = 0;  
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
@@ -295,10 +300,12 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         sym_samples = (uint32_t)(fs_out * 0.005f);        // окно 5 мс  
         break;  
     case RX_MODE_RTTY:  
-        gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out); // mark/space ±85  
-        sym_samples = (uint32_t)(fs_out / 45.45f);        // 22 мс бит  
-        rt.state = 0;  
-        break;  
+        gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out);  
+        sym_samples = (uint32_t)(fs_out / 45.45f) / 8;   // подокно = бит/8 ≈ 43 отсчёта  
+        if (sym_samples < 8) sym_samples = 8;  
+        rt.bit_period = (uint32_t)(fs_out / 45.45f);     // полный бит в отсчётах  
+        rt.state = 0; rt.prev_mark = true;  
+        break;
     case RX_MODE_OLIVIA:  
     case RX_MODE_CONTESTIA:  
         // нижний тон = центр - 3.5·31.25  
@@ -358,7 +365,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         cw.noise_floor += ((p - cw.noise_floor) >> 4);  
         bool on = p > (cw.noise_floor * 4 + 1024);  
         if (on != cw.tone_on) {  
-            cw_on_edge(!on, sample_idx, (uint32_t)fs_out);  
+            cw_on_edge(!on, sample_idx);   // !on = завершившийся интервал
             cw.tone_on = on;  
             if (on) cw.on_start = sample_idx; else cw.off_start = sample_idx;  
         }  
@@ -376,7 +383,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
     switch (dec_mode) {  
     case RX_MODE_RTTY:  
-        rtty_bit(tone == 1, sample_idx, sym_samples);  
+        rtty_bit(tone == 1, sample_idx);  
         break;  
     case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
         olivia_on_tone(tone);  

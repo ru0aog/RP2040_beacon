@@ -41,6 +41,12 @@ extern void     rx_dsp_release_output(void);
 extern void     rx_dsp_set_nco_hz(float f_hz);  
 extern float    rx_dsp_fs_out(void);  
 
+typedef enum {  
+    RX_MODE_NONE=0, RX_MODE_CW, RX_MODE_RTTY,  
+    RX_MODE_OLIVIA, RX_MODE_CONTESTIA,  
+    RX_MODE_THOR, RX_MODE_MFSK16, RX_MODE_DOMEX, RX_MODE_FSQ, RX_MODE_IFKP  
+} rx_mode_t;  
+
 static rx_mode_t  dec_mode = RX_MODE_NONE;  
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
 static uint32_t   sym_acc = 0;        // накоплено в окне  
@@ -278,12 +284,6 @@ static void ifk_on_tone(uint8_t tone) {
 // ============================================================================  
 // 6. Верхний уровень: конфигурация режима + главный цикл  
 // ============================================================================  
-typedef enum {  
-    RX_MODE_NONE=0, RX_MODE_CW, RX_MODE_RTTY,  
-    RX_MODE_OLIVIA, RX_MODE_CONTESTIA,  
-    RX_MODE_THOR, RX_MODE_MFSK16, RX_MODE_DOMEX, RX_MODE_FSQ, RX_MODE_IFKP  
-} rx_mode_t;  
-  
 void rx_decoders_start(uint8_t mode, float center_hz) {  
     dec_mode = (rx_mode_t)mode;  
     fs_out = rx_dsp_fs_out();  

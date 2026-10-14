@@ -1,6 +1,6 @@
 /**  
  * ============================================================================  
- *  rx_capture.cpp — Приёмная часть (Двухканальный бесшовный Ping-Pong DMA)
+ *  rx_capture.cpp — DMA-движок приёмной части (Двухканальный бесшовный Ping-Pong DMA)
  *  Версия 2.24 от 2026-10-14, автор RU0AOG  
  * ============================================================================ 
  *  
@@ -42,6 +42,10 @@ static volatile uint32_t* rx_queue[RX_QUEUE_DEPTH];
 static volatile uint8_t   rx_q_head = 0;   // пишет IRQ  
 static volatile uint8_t   rx_q_tail = 0;   // читает consumer  
 static volatile uint32_t  rx_dropped = 0;  // счётчик переполнений (диагностика)  
+
+// Флаги «буфер ещё у потребителя» — детект перезаписи  
+static volatile bool rx_buf_a_busy = false;  
+static volatile bool rx_buf_b_busy = false; 
   
 static int rx_dma_a = -1, rx_dma_b = -1;  
 static volatile bool rx_running = false;  
@@ -53,35 +57,40 @@ static volatile bool rx_running = false;
 // до возврата буфера потребителем, пушим буфер в очередь.  
 // ---------------------------------------------------------------  
 static void __not_in_flash_func(rx_dma_irq)(void) {  
-    // Канал A завершил буфер A  
+    // Канал A завершил блок: hardware сама запустила B через chain_to,  
+    // канал A остановлен. Аборт не нужен — он и создавал гонку.  
     if (dma_channel_get_irq0_status(rx_dma_a)) {  
         dma_channel_acknowledge_irq0(rx_dma_a);  
-        dma_channel_abort(rx_dma_a);              // затормозить до освобождения буфера  
-        uint8_t next = (rx_q_head + 1) % RX_QUEUE_DEPTH;  
-        if (next != rx_q_tail) {  
-            rx_queue[rx_q_head] = (uint32_t*)rx_buf_a;  
-            rx_q_head = next;  
+        if (rx_buf_a_busy) {  
+            rx_dropped++;               // consumer не успел — buf_a перезаписан  
         } else {  
-            rx_dropped++;  
+            rx_buf_a_busy = true;  
+            uint8_t next = (rx_q_head + 1) % RX_QUEUE_DEPTH;  
+            if (next != rx_q_tail) {  
+                rx_queue[rx_q_head] = (uint32_t*)rx_buf_a;  
+                rx_q_head = next;  
+            } else { rx_dropped++; rx_buf_a_busy = false; }  
         }  
     }  
-    // Канал B завершил буфер B  
     if (dma_channel_get_irq0_status(rx_dma_b)) {  
         dma_channel_acknowledge_irq0(rx_dma_b);  
-        dma_channel_abort(rx_dma_b);  
-        uint8_t next = (rx_q_head + 1) % RX_QUEUE_DEPTH;  
-        if (next != rx_q_tail) {  
-            rx_queue[rx_q_head] = (uint32_t*)rx_buf_b;  
-            rx_q_head = next;  
-        } else {  
+        if (rx_buf_b_busy) {  
             rx_dropped++;  
+        } else {  
+            rx_buf_b_busy = true;  
+            uint8_t next = (rx_q_head + 1) % RX_QUEUE_DEPTH;  
+            if (next != rx_q_tail) {  
+                rx_queue[rx_q_head] = (uint32_t*)rx_buf_b;  
+                rx_q_head = next;  
+            } else { rx_dropped++; rx_buf_b_busy = false; }  
         }  
     }  
-}  
+}
   
 void rx_capture_start(void) {  
-    rx_q_head = rx_q_tail = 0;  
-    rx_dropped = 0;  
+    rx_q_head = rx_q_tail = 0;  // сброс флагов
+    rx_dropped = 0;
+    rx_buf_a_busy = rx_buf_b_busy = false;
   
     adc_init();  
     adc_gpio_init(RX_ADC_PIN_I);  
@@ -145,17 +154,18 @@ const volatile uint32_t* rx_capture_get_block(void) {
     return rx_queue[rx_q_tail];  
 }  
   
-// Освобождает блок и перезапускает соответствующий DMA-канал.  
+// Освобождает блок. DMA здесь НЕ трогаем: канал будет перезапущен  
+// аппаратно по chain_to при завершении напарника — ручной старт  
+// вызывал двойной запуск и запись в занятый буфер.  
 void rx_capture_release(void) {  
     const volatile uint32_t* buf = rx_queue[rx_q_tail];  
     rx_q_tail = (rx_q_tail + 1) % RX_QUEUE_DEPTH;  
-    if (buf == rx_buf_a && rx_running) {  
-        dma_channel_set_write_addr(rx_dma_a, (void*)rx_buf_a, RX_BLOCK_SAMPLES);  
-        dma_channel_start(rx_dma_a);   // вручную — цепочка его уже прошла  
-    } else if (buf == rx_buf_b && rx_running) {  
-        dma_channel_set_write_addr(rx_dma_b, (void*)rx_buf_b, RX_BLOCK_SAMPLES);  
-        dma_channel_start(rx_dma_b);  
-    }  
-}  
+    if (buf == rx_buf_a)      rx_buf_a_busy = false;  
+    else if (buf == rx_buf_b) rx_buf_b_busy = false;  
+}
   
 uint32_t rx_capture_dropped(void) { return rx_dropped; }
+
+
+
+

@@ -277,7 +277,7 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t cw_hz = (my_freq_cw_var.length() > 0) ? strtoul(my_freq_cw_var.c_str(), NULL, 10) : 3601000;  
               if (cw_hz == 0) cw_hz = 3601000;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
                       "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир CW на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(cw_hz).c_str());  
@@ -292,7 +292,7 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t rtty_hz = strtoul(my_rtty_mark_var.c_str(), NULL, 10);  
               if (rtty_hz == 0) rtty_hz = 3601585;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
                       "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир RTTY на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(rtty_hz).c_str());  
@@ -307,9 +307,9 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t ifkp_hz = strtoul(my_freq_ifkp_var.c_str(), NULL, 10);  
               if (ifkp_hz == 0) ifkp_hz = 3601307;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
-                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир IFKP на частоте %s Гц...",  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир IFKP-0.5 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(ifkp_hz).c_str());  
               Serial.println(buf);  
               force_ifkp_transmission = true;  
@@ -322,25 +322,25 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t olivia_hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10);  
               if (olivia_hz == 0) olivia_hz = 3601307;  
-              char buf[136];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
-                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир OLIVIA на частоте %s Гц...",  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир OLIVIA 8/250 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(olivia_hz).c_str());  
               Serial.println(buf);  
               force_olivia_transmission = true;  
             }  
           }
 
-          else if (command.equalsIgnoreCase("START CONTESTIA")) {  
+          else if (command.equalsIgnoreCase("START CONTESTIA") || command.equalsIgnoreCase("START CONT") || command.equalsIgnoreCase("START CONTEST")) {  
             if (is_transmitting) {  
               Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
             } else {  
               update_scheduler();  
               uint32_t contestia_hz = strtoul(my_freq_contestia_var.c_str(), NULL, 10);  
               if (contestia_hz == 0) contestia_hz = 3601307;  
-              char buf[136];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
-                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир CONTESTIA на частоте %s Гц...",  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир CONTESTIA 8/250 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(contestia_hz).c_str());  
               Serial.println(buf);  
               force_contestia_transmission = true;  
@@ -354,22 +354,22 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t thor_hz = strtoul(my_freq_thor_var.c_str(), NULL, 10);  
               if (thor_hz == 0) thor_hz = 3601307;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
-                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир THOR на частоте %s Гц...",  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир THOR 11 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(thor_hz).c_str());  
               Serial.println(buf);  
               force_thor_transmission = true;  
             }  
           }
-          else if (command.equalsIgnoreCase("START MFSK16")) {  
+          else if (command.equalsIgnoreCase("START MFSK16") || command.equalsIgnoreCase("START MFSK")) {  
             if (is_transmitting) {  
               Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
             } else {  
               update_scheduler();  
               uint32_t mfsk16_hz = strtoul(my_freq_mfsk16_var.c_str(), NULL, 10);  
               if (mfsk16_hz == 0) mfsk16_hz = 3601307;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
                       "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир MFSK16 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(mfsk16_hz).c_str());  
@@ -377,16 +377,16 @@ void check_serial_commands() {
               force_mfsk16_transmission = true;  
             }  
           }
-          else if (command.equalsIgnoreCase("START DOMINOEX")) {  
+          else if (command.equalsIgnoreCase("START DOMINOEX") || command.equalsIgnoreCase("START DOMINO") || command.equalsIgnoreCase("START DOM")) {  
             if (is_transmitting) {  
               Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
             } else {  
               update_scheduler();  
               uint32_t dominoex_hz = strtoul(my_freq_dominoex_var.c_str(), NULL, 10);  
               if (dominoex_hz == 0) dominoex_hz = 3601307;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
-                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир DOMINOEX на частоте %s Гц...",  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир DOMINOEX 8 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(dominoex_hz).c_str());  
               Serial.println(buf);  
               force_dominoex_transmission = true;  
@@ -399,9 +399,9 @@ void check_serial_commands() {
               update_scheduler();  
               uint32_t fsq_hz = strtoul(my_freq_fsq_var.c_str(), NULL, 10);  
               if (fsq_hz == 0) fsq_hz = 3601307;  
-              char buf[128];  
+              char buf[148];  
               snprintf(buf, sizeof(buf),  
-                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир FSQ на частоте %s Гц...",  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир FSQ-4.5 на частоте %s Гц...",  
                       rtc_hour, rtc_min, rtc_sec, format_freq(fsq_hz).c_str());  
               Serial.println(buf);  
               force_fsq_transmission = true;  
@@ -675,10 +675,10 @@ void setup() {
   // Авто-BOOST: включаем разгон на каждую передачу, если flash-частоты выше стандартных  
   vfo_auto_boost = vfo_flash_allows_boost();  
   if (vfo_auto_boost) {  
-    Serial.printf("[BOOST] Авто-разгон ВКЛ: flash clk_sys<=%.1f МГц, VCO<=%.0f МГц (стандарт 133/1600)\n",  
+    Serial.printf("[BOOST  ] Авто-разгон ВКЛ: flash clk_sys<=%.1f МГц, VCO<=%.0f МГц (стандарт 133/1600)\n",  
                   vfo_effective_clk_max() / 1e6, vfo_effective_pll_max() / 1e6);  
   } else {  
-    Serial.println(F("[BOOST] Авто-разгон ВЫКЛ: flash-паспорт не выше стандартных 133 МГц."));  
+    Serial.println(F("[BOOST  ] Авто-разгон ВЫКЛ: flash-паспорт не выше стандартных 133 МГц."));  
   }
 
   ZERO_LED_init();     // инициализировать WS2812B

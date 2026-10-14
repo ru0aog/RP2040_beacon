@@ -1,3 +1,13 @@
+/**  
+ * ============================================================================  
+ *  rx_dsp.cpp — модуль децимирующего DSP-тракта 
+ *  Версия 2.24 от 2026-10-14, автор RU0AOG  
+ * ============================================================================ 
+ *  
+ *  
+ * ============================================================================  
+ */
+
 #include <Arduino.h>  
 #include "vfo_hardware.h"  
 #include "pico/multicore.h"  
@@ -35,26 +45,27 @@ static const int16_t hb_taps[15] = {
   
 typedef struct {  
     int32_t d[HB_NTAPS];   // линия задержки (накопленные I или Q)  
-    uint8_t w;             // указатель записи  
+    uint8_t w;             // указатель записи
+    uint8_t phase;         // свой бит чётности на каждый канал 
 } hb_state_t;  
   
 static hb_state_t hb_i[RX_DECIM_STAGES], hb_q[RX_DECIM_STAGES];  
   
 // Один отсчёт через HB-фильтр; возвращает true, когда на выходе  
 // готов прореженный отсчёт (каждый второй вход).  
-static inline bool hb_push(hb_state_t* st, int32_t x, int32_t* out, uint8_t* phase) {  
+static inline bool hb_push(hb_state_t* st, int32_t x, int32_t* out) {  
     st->d[st->w] = x;  
     st->w = (st->w + 1) % HB_NTAPS;  
-    (*phase) ^= 1;  
-    if (*phase) return false;               // нечётный вход — выхода нет  
+    st->phase ^= 1;  
+    if (st->phase) return false;      // нечётный вход — выхода нет  
     int32_t acc = 0;  
     for (int k = 0; k < HB_NTAPS; k++) {  
         int idx = (int)st->w + k; if (idx >= HB_NTAPS) idx -= HB_NTAPS;  
         acc += (int32_t)st->d[idx] * hb_taps[k];  
     }  
-    *out = acc >> 15;                       // Q15 → int  
+    *out = acc >> 15;  
     return true;  
-}  
+}
   
 // ---- Выходные буферы базовой полосы ----  
 #define RX_OUT_SAMPLES   (RX_BLOCK_SAMPLES / 8)   // 64 пары I/Q за блок  
@@ -63,7 +74,6 @@ static volatile uint8_t out_ready = 0;
   
 // Точка входа DSP на core1  
 static void __not_in_flash_func(rx_dsp_entry)(void) {  
-    uint8_t ph[RX_DECIM_STAGES] = {0};  
     while (true) {  
         const volatile uint32_t* blk = rx_capture_get_block();  
         if (!blk) { tight_loop_contents(); continue; }  
@@ -87,11 +97,11 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
             bool emit = true;  
             for (int s = 0; s < RX_DECIM_STAGES; s++) {  
                 int32_t oi, oq;  
-                bool ri = hb_push(&hb_i[s], vi, &oi, &ph[s]);  
-                hb_push(&hb_q[s], vq, &oq, &ph[s]);            // тот же фазовый бит  
-                if (!ri) { emit = false; break; }  
+                bool ri = hb_push(&hb_i[s], vi, &oi);  
+                bool rq = hb_push(&hb_q[s], vq, &oq);  
+                if (!ri || !rq) { emit = false; break; }  // фазы I/Q синхронны — флаги равны  
                 vi = oi; vq = oq;  
-            }  
+            }
             if (emit && n_out < RX_OUT_SAMPLES) {  
                 // Насыщение к int16 (аналог __SSAT(16)), без зависимости от CMSIS  
                 out_i[n_out] = (int16_t)(vi > 32767 ? 32767 : (vi < -32768 ? -32768 : vi));  

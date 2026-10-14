@@ -14,6 +14,11 @@
 #define VFO_THROTTLE_LO_C   60.0f
 #define VFO_SIMPLE_FRAC_INT_MAX 50   // выше этого int вето простых дробей не применяется (НЧ: 1/2 на железе чисто)
 
+void rx_capture_start(void);  
+void rx_capture_stop(void);  
+bool rx_capture_get_block(const uint16_t** buf);  
+void rx_capture_release(void);
+
 // рабочий лимит как переменные — min(дефайн, flash-значение)
 extern uint32_t vfo_max_clk_sys_hz;   // из Flash, паспорт=133 МГц  
 extern uint32_t vfo_max_pll_vco_hz;   // из Flash, паспорт=1600 МГц 

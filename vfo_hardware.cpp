@@ -56,6 +56,32 @@
 #define VFO_PLL_DEBUG            0         // 0 — выключить отладочную печать подбора кандидатов
 #define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать блока PLL
 
+
+// --- Приёмная часть (RX) ---  
+// Сдвиг ПЧ: LO ставится ниже частоты приёма на эту величину,  
+// сигнал оказывается в базовой полосе на +RX_IF_SHIFT_HZ —  
+// в стороне от DC-пика и 1/f-шума ADC в нуле частот.  
+#define RX_IF_SHIFT_HZ        3000UL    // Гц, промежуточная частота  
+#define RX_ADC_PIN_I          26        // GPIO26 = ADC0, канал I  
+#define RX_ADC_PIN_Q          27        // GPIO27 = ADC1, канал Q  
+#define RX_ADC_SAMPLE_RATE_HZ 250000UL  // суммарная частота дискретизации (125 ksps на канал)
+// ADC работает на 48 МГц. adc_set_clkdiv(48000000/250000) даст 192.0 → 250 ksps суммарно = 125 ksps/канал. 
+// Младшие 12 бит каждого слова — отсчёт, формат FIFO [I0,Q0,I1,Q1,...].
+  
+void vfo_quadrature_start(uint32_t freq_hz);   // freq_hz = частота ПРИЁМА (LO ставится на freq−IF)  
+void vfo_quadrature_stop(uint32_t freq_hz, double step_hz);  
+uint32_t vfo_quadrature_lo_hz(void);           // фактическая частота LO после квантования clkdiv
+
+static unsigned int quad_offset = 0;  
+static bool quad_program_loaded = false;  
+static bool quad_active = false;          // true = SM сконфигурирована под RX-квадратуру
+  
+// Фактическая квантованная частота LO (для NCO)  
+static uint32_t quad_lo_actual_hz = 0;  
+uint32_t vfo_quadrature_lo_hz(void) { return quad_lo_actual_hz; }
+
+
+
 // ============================================================================
 // МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
 // ============================================================================
@@ -172,9 +198,7 @@ static const pio_program_t pio_quad_program = {
     .origin = -1,  
     .pio_version = 0  
 };  
-static unsigned int quad_offset = 0;  
-static bool quad_program_loaded = false;  
-static bool quad_active = false;          // true = SM сконфигурирована под RX-квадратуру
+
 
 
 // Физическое размещение массива в RAM. Секция .time_critical гарантирует нахождение в ОЗУ
@@ -2174,60 +2198,64 @@ void __not_in_flash_func(vfo_dither_reset)(void) {
  * @brief Перевести VFO в RX-режим квадратурного LO (I/Q для SDR-смесителя).  
  *  
  * Одна SM переконфигурируется на 4-тактовую программу, выдающую код Грея  
- * на пины pin_freq_I и pin_freq_Q. Делитель считается как  
- * для частоты 2*F в штатной схеме — программа из 4 тактов даёт F.  
- * Таблица тонов перестраивается под 2F, дизеринг core1 продолжает работать.  
+ * на пины pin_freq_out_i / pin_freq_out_q (I/Q, сдвиг 90°).  
+ * LO ставится на (freq_hz - RX_IF_SHIFT_HZ) — принимаемый сигнал ложится  
+ * на +IF в базовой полосе, вне DC-пика и 1/f-шума ADC.  
+ *  
+ * Дизеринг ВЫКЛЮЧЕН: clkdiv пишется один раз, целочисленно, прямой записью  
+ * в регистр — спектр LO чистый, без гребёнки MASH. Ошибка квантования  
+ * (до ±F²·2/clk_sys) компенсируется NCO в приёмном DSP.  
+ * core1 НЕ запускается — ядро полностью свободно под обработку I/Q.  
  */  
 void vfo_quadrature_start(uint32_t freq_hz) {  
+    // Целевая частота LO — ниже настраиваемой на величину ПЧ  
+    uint32_t lo_hz = (freq_hz > RX_IF_SHIFT_HZ) ? (freq_hz - RX_IF_SHIFT_HZ) : freq_hz;  
+  
+    // Целочисленный делитель для 4-тактовой программы:  
+    // F_out = clk_sys / (4 * div)  =>  div = round(clk_sys / (4 * lo_hz))  
+    uint32_t div = (uint32_t)((current_clk_sys_hz + 2ULL * lo_hz) / (4ULL * lo_hz));  
+    if (div < 1) div = 1;  
+    if (div > 65535) div = 65535;  
+  
+    // Фактическая частота после квантования делителя — для NCO-компенсации  
+    quad_lo_actual_hz = (uint32_t)(current_clk_sys_hz / (4ULL * div));  
+  
     if (!quad_program_loaded) {  
         quad_offset = pio_add_program(lo_pio, &pio_quad_program);  
         quad_program_loaded = true;  
     }  
-    
-    quad_active = false;   // взводим до завершения переконфигурации —  
-                           // если rebuild где-то проверяет флаг, не сработает  
-                           // в середине пути  
+  
+    quad_active = false;   // взводим до завершения переконфигурации  
+  
+    // Останавливаем SM и гасим core1 — дизеринг в RX не нужен,  
+    // ядро уходит под DSP приёмника.  
     pio_sm_set_enabled(lo_pio, lo_sm, false);  
-    
+    multicore_reset_core1();  
+    tone_changed = false;  
+  
     // TX-пин: SM его больше не обслуживает — уводим в input,  
-    // иначе на pin_freq_out останется защемлённый последний уровень.
+    // иначе на pin_freq_out останется защемлённый последний уровень.  
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, false);  
     gpio_set_dir(pin_freq_out, GPIO_IN);  
-    
+  
     pio_sm_config cq = pio_get_default_sm_config();  
     sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3);  
     sm_config_set_set_pins(&cq, pin_freq_out_i, 2);   // Q = pin_freq_out_i + 1  
     pio_gpio_init(lo_pio, pin_freq_out_i);  
     pio_gpio_init(lo_pio, pin_freq_out_q);  
+  
+    // Записываем целочисленный делитель ДО запуска SM — frac = 0, дизера нет.  
+    // Прямая запись в регистр, минуя конвейер core1 (он остановлен).  
+    lo_pio->sm[lo_sm].clkdiv = ((uint32_t)div << 16);  
+  
+    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
     // Направление ставим ПОСЛЕДНИМ, после sm_init — пины не должны  
     // выпускать полуинициализированные переходы в смеситель.  
-    
-    // Таблица под 2*F: clkdiv = clk_sys/(2·2F) = clk_sys/(4F) — ровно то,  
-    // что нужно 4-тактовой программе для выходной частоты F.  
-    // rebuild внутри сам перезапускает core1 (как в vfo_hardware_init).  
-    vfo_base_mhz = (uint64_t)freq_hz * 2ULL * 1000ULL;    
-    vfo_step_mhz = 0;    
-    vfo_rebuild_tone_table(vfo_base_mhz, vfo_step_mhz);    
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);  
+    pio_sm_restart(lo_pio, lo_sm);          // PC -> wrap_target, чистая фаза  
+    pio_sm_set_enabled(lo_pio, lo_sm, true);  
   
-    // Явно загружаем тон 0 в target_* — rebuild сам НЕ применяет тон    
-    vfo_set_tone_instant(0);    
-    vfo_dither_reset();         // сброс накопителей фазы MASH-дизера
-  
-    // Core1 в квадратурном пути мог быть мёртв (init/stop делали reset).    
-    // Гарантированно поднимаем дизеринг-конвейер — он будет писать clkdiv.    
-    multicore_reset_core1();    
-    tone_changed = true;    
-    multicore_launch_core1(vfo_core1_entry);    
-  
-    // Дать core1 записать первый clkdiv до старта SM    
-    sleep_us(50);    
-  
-    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);    
-    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);    
-    pio_sm_restart(lo_pio, lo_sm);          // PC -> wrap_target, чистая фаза    
-    pio_sm_set_enabled(lo_pio, lo_sm, true);    
-      
-    quad_active = true;
+    quad_active = true;  
 }
   
 /**  

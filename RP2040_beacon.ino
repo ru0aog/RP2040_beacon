@@ -464,8 +464,8 @@ void check_serial_commands() {
                   rx_active = false;  
                   ZERO_LED_OFF();  
                   Serial.println(F("[RX] OFF"));  
-              }  
-          }  
+              }
+          }
           else if (command.startsWith("rx ")) {  
               // rx <mode> [freq]  — пример: rx rtty 3608000  
               if (is_transmitting || tx_launching) {  

@@ -88,7 +88,8 @@ static volatile uint8_t out_read = 0;    // индекс буфера, отда�
   
 // Точка входа DSP на core1  
 static void __not_in_flash_func(rx_dsp_entry)(void) {  
-    while (true) {  
+    while (true) {
+      watchdog_update();                          // кормим WDT: блоки приходят ~2 мс
         const volatile uint32_t* blk = rx_capture_get_block();  
         if (!blk) { tight_loop_contents(); continue; }  
   

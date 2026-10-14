@@ -2199,14 +2199,16 @@ void vfo_quadrature_start(uint32_t freq_hz) {
     // Целевая частота LO — ниже настраиваемой на величину ПЧ  
     uint32_t lo_hz = (freq_hz > RX_IF_SHIFT_HZ) ? (freq_hz - RX_IF_SHIFT_HZ) : freq_hz;  
   
-    // Целочисленный делитель для 4-тактовой программы:  
-    // F_out = clk_sys / (4 * div)  =>  div = round(clk_sys / (4 * lo_hz))  
-    uint32_t div = (uint32_t)((current_clk_sys_hz + 2ULL * lo_hz) / (4ULL * lo_hz));  
-    if (div < 1) div = 1;  
-    if (div > 65535) div = 65535;  
+    // Дробный clkdiv: 24.8 fixed-point. Аппаратный дробный делитель PIO,  
+    // без дизеринга и без core1.  
+    // div_q8 = clk_sys*256 / (4*lo_hz)  
+    uint64_t num    = (uint64_t)current_clk_sys_hz * 256;  
+    uint32_t div_q8 = (uint32_t)(num / (4ull * lo_hz));  
+    if (div_q8 < (2u << 8))                    div_q8 = 2u << 8;  
+    if (div_q8 > (0xFFFFu << 8) + 0xFF)        div_q8 = (0xFFFFu << 8) + 0xFF;  
   
-    // Фактическая частота после квантования делителя — для NCO-компенсации  
-    quad_lo_actual_hz = (uint32_t)(current_clk_sys_hz / (4ULL * div));  
+    // Фактическая частота LO: f = clk_sys / (4 * div_q8/256) = num / (4*div_q8)  
+    quad_lo_actual_hz = (uint32_t)(num / (div_q8 * 4ull));  
   
     if (!quad_program_loaded) {  
         quad_offset = pio_add_program(lo_pio, &pio_quad_program);  
@@ -2232,9 +2234,10 @@ void vfo_quadrature_start(uint32_t freq_hz) {
     pio_gpio_init(lo_pio, pin_freq_out_i);  
     pio_gpio_init(lo_pio, pin_freq_out_q);  
   
-    // Записываем целочисленный делитель ДО запуска SM — frac = 0, дизера нет.  
-    // Прямая запись в регистр, минуя конвейер core1 (он остановлен).  
-    lo_pio->sm[lo_sm].clkdiv = ((uint32_t)div << 16);  
+    // Дробный делитель ДО запуска SM — прямая запись в регистр,  
+    // минуя конвейер core1 (он остановлен).  
+    // Регистр: INT[31:16] | FRAC[15:8] == div_q8 << 8  
+    lo_pio->sm[lo_sm].clkdiv = (div_q8 << 8);  
   
     pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
     // Направление ставим ПОСЛЕДНИМ, после sm_init — пины не должны  

@@ -57,17 +57,6 @@
 #define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать блока PLL
 
 
-// --- Приёмная часть (RX) ---  
-// Сдвиг ПЧ: LO ставится ниже частоты приёма на эту величину,  
-// сигнал оказывается в базовой полосе на +RX_IF_SHIFT_HZ —  
-// в стороне от DC-пика и 1/f-шума ADC в нуле частот.  
-#define RX_IF_SHIFT_HZ        3000UL    // Гц, промежуточная частота  
-#define RX_ADC_PIN_I          26        // GPIO26 = ADC0, канал I  
-#define RX_ADC_PIN_Q          27        // GPIO27 = ADC1, канал Q  
-#define RX_ADC_SAMPLE_RATE_HZ 250000UL  // суммарная частота дискретизации (125 ksps на канал)
-// ADC работает на 48 МГц. adc_set_clkdiv(48000000/250000) даст 192.0 → 250 ksps суммарно = 125 ksps/канал. 
-// Младшие 12 бит каждого слова — отсчёт, формат FIFO [I0,Q0,I1,Q1,...].
-  
 void vfo_quadrature_start(uint32_t freq_hz);   // freq_hz = частота ПРИЁМА (LO ставится на freq−IF)  
 void vfo_quadrature_stop(uint32_t freq_hz, double step_hz);  
 uint32_t vfo_quadrature_lo_hz(void);           // фактическая частота LO после квантования clkdiv

@@ -4,34 +4,18 @@
  *  Версия 2.24 от 2026-10-14, автор RU0AOG  
  * ============================================================================ 
  *  
- *  single DMA channel, 256×2 ping-pong, 250 ksps total - ?
+ *  Два DMA-канала (A→B→A по chain_to), блоки по 512 32-битных слов [I|Q].  
+ *  Скорость = RX_ADC_SAMPLE_RATE_HZ слов/с (480k по умолчанию = 240 ksps/канал).
  * 
- *  Для гарантированного исключения джиттера и фазовых сдвигов I/Q на RP2040 
- *  в режиме пинг-понга используется классическая пара из двух каналов DMA, 
- *  которые поочередно чейнятся друг на друга. 
- *  Пока один канал аппаратно и молча пишет в rx_buf[0], 
- *  второй канал ждет своей очереди, 
- *  а процессор в прерывании спокойно забирает данные без гонки за адреса.
- *  
  * ============================================================================  
  */
-
-// Пины АЦП: I-канал GP26 (ADC0), Q-канал GP27 (ADC1)  
-#define RX_ADC_PIN_I          26  
-#define RX_ADC_PIN_Q          27  
   
 #include <Arduino.h>  
 #include "vfo_hardware.h"  
 #include "hardware/adc.h"  
 #include "hardware/dma.h"  
 #include "hardware/irq.h"  
-  
-// ---- Параметры захвата ----  
-// Пины заданы в vfo_hardware.cpp: RX_ADC_PIN_I=26 (ADC0), RX_ADC_PIN_Q=27 (ADC1)  
-// FIFO 32-битное слово: [31:16] — канал Q (ADC1), [15:0] — I (ADC0),  
-// т.к. round-robin выдаёт отсчёты по возрастанию канала и FIFO пакует по 2.  
-#define RX_BLOCK_SAMPLES   512          // отсчётов I/Q на блок (пар в 32-бит словах)  
-  
+
 // Два буфера ping-pong: каждый — RX_BLOCK_SAMPLES слов по 32 бита  
 static volatile uint32_t __attribute__((aligned(4))) rx_buf_a[RX_BLOCK_SAMPLES];  
 static volatile uint32_t __attribute__((aligned(4))) rx_buf_b[RX_BLOCK_SAMPLES];  

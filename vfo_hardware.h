@@ -14,27 +14,52 @@
 #define VFO_THROTTLE_LO_C   60.0f
 #define VFO_SIMPLE_FRAC_INT_MAX 50   // выше этого int вето простых дробей не применяется (НЧ: 1/2 на железе чисто)
 
-// Скорость потокового захвата, отсчётов/с  
-#define RX_ADC_SAMPLE_RATE_HZ 480000.0f   // 480 ksps — потолок SAR при 48 МГц клока
+// --- Приёмная часть (RX) ---  
+// Сдвиг ПЧ: LO ставится ниже частоты приёма на эту величину,  
+// сигнал оказывается в базовой полосе на +RX_IF_SHIFT_HZ —  
+// в стороне от DC-пика и 1/f-шума ADC в нуле частот.  
+#define RX_IF_SHIFT_HZ        3000UL    // Гц, промежуточная частота  
+#define RX_ADC_SAMPLE_RATE_HZ 250000UL  // суммарная частота дискретизации (125 ksps на канал)
+// ADC работает на 48 МГц. adc_set_clkdiv(48000000/250000) даст 192.0 → 250 ksps суммарно = 125 ksps/канал. 
+// Младшие 12 бит каждого слова — отсчёт, формат FIFO [I0,Q0,I1,Q1,...].
 
-void rx_capture_start(void);  
-void rx_capture_stop(void);  
-bool rx_capture_get_block(const uint16_t** buf);  
-void rx_capture_release(void);
+// ---- Параметры захвата ----  
+// FIFO 32-битное слово: [31:16] — канал Q (ADC1), [15:0] — I (ADC0),  
+// т.к. round-robin выдаёт отсчёты по возрастанию канала и FIFO пакует по 2.  
+#define RX_BLOCK_SAMPLES      512         // отсчётов I/Q на блок (пар в 32-бит словах) 
+#define RX_ADC_PIN_I          26          // GPIO26 = ADC0, канал I  
+#define RX_ADC_PIN_Q          27          // GPIO27 = ADC1, канал Q  
 
-void  rx_dsp_start(float if_hz);  
-void  rx_dsp_set_nco_hz(float f_hz);  
+// --- RX-тракт ---  
+void     rx_capture_start(void);  
+void     rx_capture_stop(void);  
+const volatile uint32_t* rx_capture_get_block(void);  
+void     rx_capture_release(void);  
+uint32_t rx_capture_dropped(void);  
+  
+void  rx_dsp_start(float f_target_hz);      // целевая частота приёма, Гц  
+void  rx_dsp_set_nco_hz(float f_hz);        // AFC  
 bool  rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t* n);  
 void  rx_dsp_release_output(void);  
-const volatile uint32_t* rx_capture_get_block(void);   // сигнатуру обновить на 32-бит  
-uint32_t rx_capture_dropped(void);
+float rx_dsp_fs_out(void);
+
+void     vfo_quadrature_start(uint32_t freq_hz);  
+void     vfo_quadrature_stop(uint32_t freq_hz, double step_hz);  
+uint32_t vfo_quadrature_lo_hz(void);   // фактическая квантованная частота LO (для NCO)
+
+
+
+
+
+
+
+
+
+
 
 // рабочий лимит как переменные — min(дефайн, flash-значение)
 extern uint32_t vfo_max_clk_sys_hz;   // из Flash, паспорт=133 МГц  
 extern uint32_t vfo_max_pll_vco_hz;   // из Flash, паспорт=1600 МГц 
-
-void vfo_quadrature_start(uint32_t freq_hz);  
-void vfo_quadrature_stop(uint32_t freq_hz, double step_hz);
 
 // Эффективный лимит поиска: flash-доказанный, но не выше аппаратного барьера  
 static inline uint64_t vfo_effective_clk_max(void) {  

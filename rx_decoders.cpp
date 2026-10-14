@@ -4,7 +4,13 @@
  *  Работает на core1 после rx_dsp (Goertzel-банк + per-mode обработчики).  
  *  Fs_in = rx_dsp_fs_out() ≈ 15.6 кс/с при RX_ADC_SAMPLE_RATE_HZ = 250 кГц.  
  * ============================================================================  
- */  
+ *
+ * для RTTY: 
+ * - автокорреляционный частотный дискриминатор (сross-product FMD) 
+ *   с сохранением фазы (prev_i, prev_q) через границы скользящих чанков.
+ * - деглитчинг старт-бита RTTY через счётчик rt.space_cnt >= 2 
+ *   с одновременным вычитанием аппаратной задержки фильтра из дедлайна считывания.
+ */
 
  /*
   Декодеры — большой объём
@@ -202,9 +208,12 @@ static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {
         if (!mark) {  
             if (++rt.space_cnt >= 2 && rt.prev_mark) {  
                 // space держится ≥2 подокон — фронт был на первом из них  
-                rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
-                rt.next_sample = idx + rt.bit_period  
-                               - rt.bit_period / 8;  // компенсация задержки деглитчинга  
+                rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;
+                // Фронт mark→space внутри первого space-подокна; опорная  
+                // точка = его середина = idx - 1.5·subwin = idx - T·3/16.  
+                // Центр бита 0 = +1.5·T от фронта → idx + T - T·3/16.  
+                // rt.next_sample = idx + rt.bit_period - rt.bit_period/4 - rt.bit_period/16;  // компенсация задержки деглитчинга 
+                rt.next_sample = idx + rt.bit_period - (3 * sym_samples) / 2; // устойчивее к смене размера подокна
             }  
         } else {  
             rt.space_cnt = 0;  

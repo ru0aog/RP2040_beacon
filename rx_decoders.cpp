@@ -236,30 +236,50 @@ static cw_dec_t cw;
 static void cw_decode_elements(void);  
   
 // idx — индекс отсчёта Fs_out; dur переводим в микросекунды  
-static void cw_on_edge(bool ended_tone, uint32_t idx) {  
-    uint32_t dur_smp = ended_tone ? (idx - cw.on_start) : (idx - cw.off_start);  
-    float dur_us = (float)dur_smp * 1.0e6f / fs_out;  
-    float dot = cw.dot_us;  
+static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
+    // dur в миллисекундах: отсчёты * 1e6 / (fs*1000)  
+    uint32_t dur_ms = (on ? (idx - cw.on_start) : (idx - cw.off_start)) * 1000000u / fs_x1000;  
   
-    if (ended_tone) {  
-        // конец посылки: < 2·dot → точка, иначе тире; подстройка dot по точкам  
-        if (dur_us < 2.0f * dot) {  
+    // Отброс импульсов короче 15 мс — статические разряды и дребезг порога.  
+    // Без этого 3–4 разряда по 1–5 мс сжимают dot_ms до нижнего лимита  
+    // и декодер слепнет: реальная точка начинает читаться как тире.  
+    if (dur_ms < 15) return;  
+  
+    float dot_us = (float)cw.dot_us;  
+    float dur_us = dur_ms * 1000.0f;  
+    if (on) {  
+        if (dur_us < 15000.0f) return;                      // игломет <15 мс — мусор  
+        if (dur_us < 2.0f * dot_us) {  
             cw.elem_buf[cw.elem_n++] = '.';  
-            cw.dot_us += (dur_us - cw.dot_us) * 0.25f;     // EMA-слежение  
+            float nd = cw.dot_us + (dur_us - cw.dot_us) * 0.25f;  
+            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd));  
         } else {  
             cw.elem_buf[cw.elem_n++] = '-';  
-            cw.dot_us += (dur_us/3.0f - cw.dot_us) * 0.1f; // медленнее по тире  
+            float nd = cw.dot_us + (dur_us / 3.0f - cw.dot_us) * 0.10f;  
+            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd));  
         }  
-        if (cw.dot_us < 20000)  cw.dot_us = 20000;         // не ниже ~60 WPM  
-        if (cw.dot_us > 400000) cw.dot_us = 400000;        // не выше ~3 WPM  
         if (cw.elem_n >= sizeof(cw.elem_buf)-1) cw.elem_n = 0;  
-    } else {  
-        // конец паузы: >2.5·dot → конец знака, >6·dot → конец слова  
-        if (dur_us > 6.0f * dot) { cw_decode_elements(); Serial.write(' '); }  
-        else if (dur_us > 2.5f * dot) cw_decode_elements();  
+    } else {
+        // Завершилась пауза: >2.5·dot — конец знака, >6·dot — конец слова  
+        if (dur_ms > 6.0f * dot) { cw_decode_elements(); Serial.write(' '); }  
+        else if (dur_ms > 2.5f * dot) cw_decode_elements();  
     }  
 }
+
+static const char cw_tree[] =  
+    " ETIANMSURWDKGOHVVF L  PJBXCYZQ  54 3   2       16       7   8 90";  
   
+static void cw_decode_elements(void) {  
+    if (!cw.elem_n) return;  
+    cw.elem_buf[cw.elem_n] = 0;  
+    int idx = 1;  
+    for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
+        idx = idx * 2 + (cw.elem_buf[i] == '-' ? 1 : 0);  
+    char c = (idx < 64) ? cw_tree[idx] : '?';  
+    if (c && c != ' ') Serial.write(c);  
+    cw.elem_n = 0;  
+}
+
 // ============================================================================  
 // 5. MFSK/IFK-разностный детектор (THOR/DominoEX/FSQ/IFKP)  
 // ============================================================================  
@@ -354,57 +374,67 @@ void rx_decoders_stop(void) { dec_mode = RX_MODE_NONE; }
   
 // Вызывается из цикла core1 (rx_dsp_entry) после заполнения out_i/out_q  
 void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {  
-    if (dec_mode == RX_MODE_NONE) return;  
-    gtz_push(xi, n);                      // энергетический детектор по I  
-    sym_acc += n;  
+    if (dec_mode == RX_MODE_NONE || n == 0) return;  
   
-    // CW — суб-символьный анализ: обрабатываем каждый блок как окно  
+    // ---------------- CW: блок = одно окно детектора огибающей ----------------  
     if (dec_mode == RX_MODE_CW) {  
+        gtz_push(xi, n);  
         int32_t p; gtz_winner(&p);  
-        // адаптивный порог: экспоненциальная оценка шума  
         cw.noise_floor += ((p - cw.noise_floor) >> 4);  
         bool on = p > (cw.noise_floor * 4 + 1024);  
         if (on != cw.tone_on) {  
-            cw_on_edge(!on, sample_idx);   // !on = завершившийся интервал
+            cw_on_edge(!on, sample_idx, (uint32_t)fs_out);  
             cw.tone_on = on;  
             if (on) cw.on_start = sample_idx; else cw.off_start = sample_idx;  
         }  
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
-        sym_acc = 0; sample_idx += n;  
+        sample_idx += n;  
         return;  
     }  
   
-    if (sym_acc < sym_samples) { sample_idx += n; return; }  
+    // ------------- Остальные моды: символьная синхронизация по блокам ----------  
+    // Блок (64 отсчёта) не кратен окну символа (напр. 43): разбираем по частям,  
+    // чтобы граница решения всегда совпадала с границей символа.  
+    uint8_t pos = 0;  
+    while (pos < n) {  
+        uint32_t remain_sym = sym_samples - sym_acc;  
+        uint8_t  chunk      = (uint8_t)((uint32_t)(n - pos) < remain_sym  
+                                        ? (n - pos) : remain_sym);  
   
-    // Граница символа: winner-take-all  
-    int32_t pmax;  
-    uint8_t tone = gtz_winner(&pmax);  
-    afc_update(tone, pmax);  
+        gtz_push(xi + pos, chunk);  
+        sym_acc    += chunk;  
+        pos        += chunk;  
+        sample_idx += chunk;  
   
-    switch (dec_mode) {  
-    case RX_MODE_RTTY:  
-        rtty_bit(tone == 1, sample_idx);  
-        break;  
-    case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
-        olivia_on_tone(tone);  
-        break;  
-    case RX_MODE_MFSK16: {  
-        // абсолютный тон: undo gray → nibble → буфер битов → varicode (TODO: FEC)  
-        uint8_t nib = tone; // graydecode: xor-fold  
-        nib ^= nib >> 2; nib ^= nib >> 1;  
-        // TODO: побитовый склейщик → varicode[] lookup (таблица в thor_modem.cpp  
-        // static — экспортировать или дублировать; см. примечание ниже)  
-        (void)nib;  
-        break;  
+        if (sym_acc < sym_samples) break;        // окно не закрыто — выходим  
+  
+        // Граница символа: winner-take-all  
+        int32_t pmax;  
+        uint8_t tone = gtz_winner(&pmax);  
+        afc_update(tone, pmax);  
+  
+        switch (dec_mode) {  
+        case RX_MODE_RTTY:  
+            rtty_bit(tone == 1, sample_idx);
+            break;  
+        case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
+            olivia_on_tone(tone);  
+            break;  
+        case RX_MODE_MFSK16: {  
+            uint8_t nib = tone;               // gray → bin  
+            nib ^= nib >> 2; nib ^= nib >> 1;  
+            // TODO: склейщик битов → varicode[] (таблица static в thor_modem.cpp)  
+            (void)nib;  
+            break;  
+        }  
+        case RX_MODE_THOR: case RX_MODE_DOMEX:  
+        case RX_MODE_FSQ:  case RX_MODE_IFKP:  
+            ifk_on_tone(tone);                // TODO: varicode/FEC  
+            break;  
+        default: break;  
+        }  
+  
+        for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
+        sym_acc = 0;  
     }  
-    case RX_MODE_THOR: case RX_MODE_DOMEX:  
-    case RX_MODE_FSQ:  case RX_MODE_IFKP:  
-        ifk_on_tone(tone);                 // sym → дальше varicode/FEC (TODO)  
-        break;  
-    default: break;  
-    }  
-  
-    for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
-    sym_acc = 0;  
-    sample_idx += sym_samples;  
 }

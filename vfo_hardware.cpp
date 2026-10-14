@@ -52,9 +52,9 @@
 
 
 // ДИАГНОСТИКА
-#define BOOST_DEBUG              0         // 0 — выключить отладочную печать блока разгона
-#define VFO_PLL_DEBUG            0         // 0 — выключить отладочную печать подбора кандидатов
-#define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать блока PLL
+#define BOOST_DEBUG              1         // 0 — выключить отладочную печать блока разгона
+#define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать подбора кандидатов
+#define PLL_RUNTIME_DEBUG        1         // 0 — выключить отладочную печать блока PLL
 
 
 void vfo_quadrature_start(uint32_t freq_hz);   // freq_hz = частота ПРИЁМА (LO ставится на freq−IF)  
@@ -284,8 +284,17 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
                     vfo_calibrated_xosc_hz(), vfo_calibrated_xosc_hz());  
-  
-    uint32_t vco_nominal_hz = (uint32_t)((vfo_calibrated_xosc_hz() * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);  
+    //uint32_t vco_nominal_hz = (uint32_t)((vfo_calibrated_xosc_hz() * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);
+    // Округление ВВЕРХ до следующего кратного ref_hz: гарантирует, что внутреннее  
+    // целочисленное деление pll_init даст ровно cfg.fbdiv, а не fbdiv-1  
+    // (иначе при скорректированном XOSC < 12 МГц произведение падает ниже порога).  
+    //uint64_t ref_hz = ((uint64_t)vfo_calibrated_xosc_hz() + cfg.refdiv - 1u) / cfg.refdiv;  
+    //uint32_t vco_nominal_hz = (uint32_t)(ref_hz * (uint64_t)cfg.fbdiv);
+
+    // pll_init вычисляет fbdiv = vco / (XOSC_HZ/refdiv) с НОМИНАЛЬНЫМИ 12 МГц.  
+    // Передаём VCO, кратный номинальной опоре — иначе усечение при делении  
+    // съедает один шаг fbdiv (198.99 -> 198) и clk_sys уходит на ~660 кГц.  
+    uint32_t vco_nominal_hz = (uint32_t)((vfo_calibrated_xosc_hz() / (uint64_t)cfg.refdiv) * (uint64_t)cfg.fbdiv);
 
 
 // перед pll_init — что реально стоит в опоре PLL (CS bits 5:0 = refdiv)  
@@ -349,8 +358,8 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
     for (int attempt = 0; attempt < 3; attempt++) {    
             busy_wait_us(300);    
             meas_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);   // без uint32_t!  
-            if (meas_khz > expect_khz * 97u / 100u &&    
-                meas_khz < expect_khz * 103u / 100u) {    
+            if (meas_khz > expect_khz * 997u / 1000u &&      
+                meas_khz < expect_khz * 1003u / 1000u) {  
                 locked_ok = true;    
                 break;    
             }
@@ -401,9 +410,13 @@ uint32_t meas_khz_final = meas_khz;
                         CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,    
                         CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,    
                         vfo_calibrated_xosc_hz(), vfo_calibrated_xosc_hz());    
-        pll_init(pll_sys, pll_nominal.refdiv,    
-                 (uint32_t)(vfo_calibrated_xosc_hz() * pll_nominal.fbdiv / pll_nominal.refdiv),    
-                 pll_nominal.p1, pll_nominal.p2);    
+
+        uint64_t ref_hz_fb = ((uint64_t)vfo_calibrated_xosc_hz() + pll_nominal.refdiv - 1u)  
+                            / pll_nominal.refdiv;  
+        pll_init(pll_sys, pll_nominal.refdiv,  
+                (uint32_t)(ref_hz_fb * (uint64_t)pll_nominal.fbdiv),  
+                pll_nominal.p1, pll_nominal.p2);
+
         timeout = 20000;    
         while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);    
         clock_configure(clk_sys,    
@@ -414,7 +427,9 @@ uint32_t meas_khz_final = meas_khz;
         return;    
     }
   
-    current_clk_sys_hz = cfg.clk_sys_hz;
+    //current_clk_sys_hz = cfg.clk_sys_hz;
+    current_clk_sys_hz = meas_khz * 1000u;   // реальность, а не желаемое cfg.clk_sys_hz
+
 
 
 #if PLL_RUNTIME_DEBUG

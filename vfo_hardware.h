@@ -119,8 +119,11 @@ extern int32_t vfo_xosc_corr_ppb;
   
 // Скорректированная частота кварца — считается в рантайме от flash-значения.  
 static inline uint64_t vfo_calibrated_xosc_hz(void) {  
-    return (uint64_t)((int64_t)VFO_XOSC_NOMINAL_HZ +  
-                      (int64_t)VFO_XOSC_NOMINAL_HZ * (int64_t)vfo_xosc_corr_ppb / 1000000000LL);  
+    // Всё в int64: знак коррекции должен сохраниться.  
+    // uint64-промоушен превращал отрицательный ppb в ~1.8e19.  
+    int64_t hz = (int64_t)VFO_XOSC_NOMINAL_HZ +  
+                 (int64_t)VFO_XOSC_NOMINAL_HZ * (int64_t)vfo_xosc_corr_ppb / 1000000000LL;  
+    return (hz > 0) ? (uint64_t)hz : (uint64_t)VFO_XOSC_NOMINAL_HZ;  
 }
 
 

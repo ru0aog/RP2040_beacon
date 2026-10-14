@@ -237,32 +237,32 @@ static void cw_decode_elements(void);
   
 // idx — индекс отсчёта Fs_out; dur переводим в микросекунды  
 static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
-    // dur в миллисекундах: отсчёты * 1e6 / (fs*1000)  
-    uint32_t dur_ms = (on ? (idx - cw.on_start) : (idx - cw.off_start)) * 1000000u / fs_x1000;  
+    // dur_ms — длительность завершившегося интервала (тона или паузы)  
+    uint32_t dur_smp = on ? (idx - cw.on_start) : (idx - cw.off_start);  
+    float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000 / 1000.0f;  
   
-    // Отброс импульсов короче 15 мс — статические разряды и дребезг порога.  
-    // Без этого 3–4 разряда по 1–5 мс сжимают dot_ms до нижнего лимита  
-    // и декодер слепнет: реальная точка начинает читаться как тире.  
-    if (dur_ms < 15) return;  
+    float dot_ms = cw.dot_us * 0.001f;      // оценка точки в мс  
   
-    float dot_us = (float)cw.dot_us;  
-    float dur_us = dur_ms * 1000.0f;  
     if (on) {  
-        if (dur_us < 15000.0f) return;                      // игломет <15 мс — мусор  
-        if (dur_us < 2.0f * dot_us) {  
+        // Конец тона: классификация точка/тире  
+        if (dur_ms < 15.0f) return;          // статический разряд — игнорировать  
+        if (dur_ms < 2.0f * dot_ms) {  
             cw.elem_buf[cw.elem_n++] = '.';  
-            float nd = cw.dot_us + (dur_us - cw.dot_us) * 0.25f;  
-            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd));  
+            // Автоподстройка: быстрая EMA по точкам, жёсткий кламп 20..150 мс (~8–60 WPM)  
+            float nd_ms = dot_ms + (dur_ms - dot_ms) * 0.25f;  
+            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd_ms * 1000.0f));  
         } else {  
             cw.elem_buf[cw.elem_n++] = '-';  
-            float nd = cw.dot_us + (dur_us / 3.0f - cw.dot_us) * 0.10f;  
-            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd));  
+            // Тире обновляет оценку точки в 3 раза медленнее (dur/3 vs dot)  
+            float nd_ms = dot_ms + (dur_ms / 3.0f - dot_ms) * 0.10f;  
+            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd_ms * 1000.0f));  
         }  
-        if (cw.elem_n >= sizeof(cw.elem_buf)-1) cw.elem_n = 0;  
-    } else {
-        // Завершилась пауза: >2.5·dot — конец знака, >6·dot — конец слова  
-        if (dur_ms > 6.0f * dot) { cw_decode_elements(); Serial.write(' '); }  
-        else if (dur_ms > 2.5f * dot) cw_decode_elements();  
+        if (cw.elem_n >= sizeof(cw.elem_buf) - 1) cw.elem_n = 0;  
+    } else {  
+        // Конец паузы: ~3·dot → конец знака, ~7·dot → конец слова  
+        if (dur_ms < 15.0f) return;          // щелчок-прореживание тона — не разрыв слова  
+        if      (dur_ms > 6.0f * dot_ms) { cw_decode_elements(); Serial.write(' '); }  
+        else if (dur_ms > 2.5f * dot_ms)   { cw_decode_elements(); }  
     }  
 }
 
@@ -362,7 +362,8 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
 }  
   
 // AFC: оценка расстройки = bin_max·step - expected; коррекция NCO  
-static void afc_update(uint8_t tone, int32_t pwr) {  
+static void afc_update(uint8_t tone, int32_t pwr) {
+    (void)tone;                                  // AFC-оценщик будет дописан отдельно
     if (!afc_on || gtz_ntones < 2) return;  
     static int32_t ema = 0;  
     ema += (pwr - ema) >> 4;  
@@ -373,7 +374,8 @@ static void afc_update(uint8_t tone, int32_t pwr) {
 void rx_decoders_stop(void) { dec_mode = RX_MODE_NONE; }  
   
 // Вызывается из цикла core1 (rx_dsp_entry) после заполнения out_i/out_q  
-void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {  
+void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
+  (void)xq;                                    // энергодетектор пока по I-каналу
     if (dec_mode == RX_MODE_NONE || n == 0) return;  
   
     // ---------------- CW: блок = одно окно детектора огибающей ----------------  

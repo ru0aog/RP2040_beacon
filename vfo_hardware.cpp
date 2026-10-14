@@ -6,13 +6,6 @@
  *  
  *  МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL И ДВУХЪЯДЕРНЫЙ ДИЗЕРИНГ
  *  Профилирование и ASM-оптимизация Core 1
- *
- *  Выполнено 2026-10-09:
- * - Калибровка frac_spur_level_db (−21 dB)
- * - Уровень спура в метрике + FORB-арбитраж с 2⁴⁰-штрафом
- * - Ненулевая монотонная метрика позиции/уровня спура
- * - Адаптивный гейт clk·int (устранил SCAN EMPTY на 21/28 МГц)
- * - Рантайм-маска FRAC-дизера по int (вернула ближнюю зону на ВЧ)
  *  
  *  ИСПОЛЬЗУЕМЫЕ БИБЛИОТЕКИ И МОДУЛИ  
  *  -------------------------------  
@@ -31,7 +24,17 @@
  *    разработка автора проекта.  
  *  
  *  Этот файл — часть RP2040_beacon, распространяется под GPLv3  
- *  (см. LICENSE в корне репозитория).  
+ *  (см. LICENSE в корне репозитория).
+ *
+ * Добавления и изменения:
+ *  2026-10-13:
+ * - добавлен квадратурный генератор
+ *  2026-10-09:
+ * - Калибровка frac_spur_level_db (−21 dB)
+ * - Уровень спура в метрике + FORB-арбитраж с 2⁴⁰-штрафом
+ * - Ненулевая монотонная метрика позиции/уровня спура
+ * - Адаптивный гейт clk·int (устранил SCAN EMPTY на 21/28 МГц)
+ * - Рантайм-маска FRAC-дизера по int (вернула ближнюю зону на ВЧ)
  * ============================================================================  
  */
 
@@ -55,12 +58,15 @@
 #include "cw_modem.h"
 
 
+// ДИАГНОСТИКА
 #define BOOST_DEBUG              0         // 0 — выключить отладочную печать блока разгона
 #define VFO_PLL_DEBUG            0         // 0 — выключить отладочную печать подбора кандидатов
 #define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать блока PLL
 
-#define VFO_INT_PENALTY   500000000ULL     // жёсткий запрет pio_int < 4
-
+// ============================================================================
+// МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
+// ============================================================================
+#define VFO_INT_PENALTY        500000000ULL // жёсткий запрет pio_int < 4
 #define VFO_SPUR_MIN_OFFSET_HZ 1000000ULL   // запретный пояс FRAC8-спура, Гц  
 #define VFO_DMIN_CEILING       280000000ULL // гейт близкой гребёнки дизера (~6.5% от 2^32)
 #define VFO_K8_BELT            (1u << 25)   // пояс отсечения у якорей k/8: 1u << 26 ±25% октавы
@@ -69,10 +75,6 @@
 #define VFO_SHELF_REF_CLK_HZ   400000000ULL // опора нормировки подошвы: 400M = нулевой штраф  
 #define VFO_SPUR_HORIZON_HZ    3000000ULL   // спур ближе 3 МГц — штраф за уровень
 #define VFO_CLK_SYS_PREF_MIN_HZ  250000000ULL   // минимум clk_sys: ниже — сильная близкая гребёнка
-
-// ============================================================================
-// МОДЕРНИЗИРОВАННЫЙ МНОГОКРИТЕРИАЛЬНЫЙ АВТОТЮН PLL (ВЕРСИЯ С REFDIV И CTZ-ФИЛЬТРОМ)
-// ============================================================================
 #define VFO_PREFERRED_MIN_CLK    320000000ULL  // Нижняя граница зоны чистого спектра
 
 // Структура детальной калькуляции штрафов
@@ -105,7 +107,6 @@ static float frac_spur_level_db(uint16_t pio_int, uint8_t pio_frac);
 // forward declaration  
 static uint64_t frac_spur_min_off_hz(uint16_t pio_int, uint8_t pio_frac,  
                                      uint64_t clk_sys_hz);
-
 void vfo_clk_boost_arm(void);
 
 static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz); 
@@ -127,10 +128,6 @@ volatile bool vfo_auto_boost = false;    // авто-разгон, вычисл�
 // последовательным диапазоном). Если pin_freq_out = 21, то Q = GP22.
 uint8_t pin_freq_out_i = 1;  
 uint8_t pin_freq_out_q = 2;  
-  
-// compile-time проверка невозможна — проверка при старте квадратуры:  
-// в vfo_quadrature_start() добавить:  
-//   if (pin_freq_out_q != pin_freq_out_i + 1) { quad_active = false; return; }
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -157,7 +154,10 @@ void vfo_clk_boost_arm(void) {
 }
 
 // Ассемблерная микропрограмма PIO для меандра (цикл из 2 тактов)  
-static const uint16_t pio_square_instructions[] = { 0xe001, 0xe000 };  
+static const uint16_t pio_square_instructions[] = {
+    0xe001,
+    0xe000 
+};
 static const pio_program_t pio_square_program = {   
     .instructions = pio_square_instructions,   
     .length = 2,   
@@ -165,11 +165,7 @@ static const pio_program_t pio_square_program = {
     .pio_version = 0   
 };  
   
-// Квадратурная программа для RX: 4 такта на период, два соседних пина.  
-// set pins — pin_freq_out (I, бит 0) и pin_freq_out+1 (Q, бит 1).  
-// Последовательность (I,Q): 01 -> 11 -> 10 -> 00 — код Грея,  
-// Q отстаёт от I ровно на 90°. Частота выхода = clk_sys / (4 * clkdiv),  
-// поэтому clkdiv считаем как для удвоенной частоты в обычной схеме.  
+// Ассемблерная микропрограмма PIO для меандра (цикл из 4 тактов) 
 static const uint16_t pio_quad_instructions[] = {  
     0xe001,  // set pins, 0b01  : I=0 Q=1  
     0xe003,  // set pins, 0b11  : I=1 Q=1  
@@ -1776,304 +1772,6 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
 }
 
 
-
-
-
-/**  
- * @brief Сверхглубокий хакерский СВЧ-штурм PLL за барьер 4 ГГц с использованием ROSC-опоры.
- * Удерживает ядро на безопасной частоте, выжимая из аналоговой петли абсолютный предел.
- */
-/*
-void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
-    // 1. ПЕРЕВОДИМ ПИТАНИЕ И СИСТЕМУ В ЭКСТРЕМАЛЬНЫЙ РЕЖИМ
-    vreg_set_voltage(VREG_VOLTAGE_1_30);  
-    busy_wait_us(2000);  
-    detach_peripheral_clock();  
-    busy_wait_us(2000);
-
-    Serial.printf("\n=================== ПРЕЦИЗИОННЫЙ КВАРЦЕВЫЙ СВЧ-ШТУРМ ГУН ===================\n");
-    Serial.printf("[КВАРЦ] Опора жестко зафиксирована на монолитных 12.000 МГц XOSC (±30 ppm)\n");
-    Serial.flush();
-
-    // Опора жестко завязана на стабильный кварц 12 МГц
-    uint32_t crystal_hz = VFO_CALIBRATED_XOSC_HZ; 
-
-    // Фиксированные делители вашего хака (Деление на 49 для удержания ядра в безопасности)
-    const uint32_t target_p1 = 7;
-    const uint32_t target_p2 = 7;
-    static volatile uint32_t stress_ram_block[512]; 
-
-    // Перманентная защелка фиксации аварии
-    bool hardware_failed = false; 
-
-    // Шагаем по fbdiv строго до физического упора регистра 320 (VCO от 1.08 ГГц до 3.84 ГГц)
-    for (uint32_t fb = 90; fb <= 320; fb++) {
-        uint64_t vco_hz = (uint64_t)fb * crystal_hz;
-        uint32_t clk_sys_hz = (uint32_t)(vco_hz / (target_p1 * target_p2));
-
-        // Вычисляем безопасный ssi_baud для Flash-контроллера под текущую частоту ядра
-        const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;
-        uint32_t ssi_baud = (clk_sys_hz + FLASH_SAFE_MAX_HZ - 1) / FLASH_SAFE_MAX_HZ;  
-        ssi_baud = (ssi_baud + 1u) & ~1u; 
-        if (ssi_baud < 2u)  ssi_baud = 2u;  
-        if (ssi_baud > 34u) ssi_baud = 34u;  
-
-        bool sram_failed = false;
-
-        // --- КРИТИЧЕСКАЯ СЕКЦИЯ ПРЯМОГО СДВИГА PLL НА КВАРЦЕ ---
-        uint32_t ints = save_and_disable_interrupts();  
-
-        // Прошиваем fbdiv и postdiv каскады (p1=7, p2=7) напрямую в регистры PLL
-        pll_sys_hw->fbdiv_int = fb;
-        pll_sys_hw->prim = (target_p1 << PLL_PRIM_POSTDIV1_LSB) | (target_p2 << PLL_PRIM_POSTDIV2_LSB);
-
-        // Физически корректируем делитель Flash-памяти до переключения clk_sys
-        ssi_hw->ssienr = 0; 
-        ssi_hw->baudr  = ssi_baud;  
-        ssi_hw->ssienr = 1; 
-
-        // Аппаратное ожидание стабилизации фазы СВЧ-контура ГУН от кварца
-        volatile uint32_t timeout = 30000;
-        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);
-
-        // Обновляем частоту системного ядра clk_sys
-        clock_configure(clk_sys,  
-                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                        clk_sys_hz, clk_sys_hz);  
-
-        // Верификационный тест ОЗУ
-        uint32_t pattern = 0x55AA55AAL ^ fb;
-        for (int w = 0; w < 512; w++) { stress_ram_block[w] = pattern + w; }
-        for (int w = 0; w < 512; w++) { if (stress_ram_block[w] != (pattern + w)) { sram_failed = true; break; } }
-
-        watchdog_update();  // Сброс сторожевого таймера
-        restore_interrupts(ints);
-        // --- ВЫХОД ИЗ КРИТИЧЕСКОЙ СЕКЦИИ ---
-
-        float current_temp = vfo_read_core_temp_c();
-        bool is_locked = (pll_sys_hw->cs & PLL_CS_LOCK_BITS) != 0;
-
-        // Если аналоговый ГУН потерял LOCK или посыпалась SRAM — взводим флаг отказа
-        if (!is_locked || sram_failed) {
-            hardware_failed = true;
-        }
-
-        // Печать строки лога — честный, жесткий кварцевый скан
-        Serial.printf("[СВЧ-ШТУРМ] FB=%3lu | VCO = %4lu MHz | Ядро = %3lu MHz | LOCK = %s | RAM = %s | T = %4.1f C | FLASH = %4.1f MHz\n", 
-                      (unsigned long)fb,
-                      (unsigned long)(vco_hz / 1000000ULL), 
-                      (unsigned long)(clk_sys_hz / 1000000ULL),
-                      is_locked ? "YES" : "LOST!",
-                      sram_failed ? "FAIL" : "OK",
-                      (double)current_temp,
-                      (double)clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr);
-        Serial.flush();
-
-        // === ПРЕЦИЗИОННАЯ ПОШАГОВАЯ ЗАПИСЬ ВО FLASH (РЕАЛЬНАЯ ЧАСТОТА В HZ БЕЗ ПОНИЖЕНИЯ) ===
-        if (!hardware_failed) {  
-            // Сохраняем чистую, реальную пройденную частоту ГУН в 64 битах
-            uint64_t proven_vco = vco_hz;  
-  
-            watchdog_update();
-
-            // Полный откат шины процессора на безопасный номинал 133 МГц от XOSC
-            vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-  
-            // Запись чистой частоты (Hz) во Flash-память
-            persist_clock_limits(0, (uint32_t)proven_vco);  
-  
-            Serial.printf("[ШТУРМ] flash: pll_vco_max=%lu Hz (чистая пройденная частота)\n", (unsigned long)proven_vco);  
-            Serial.flush();  
-
-            watchdog_update();
-            watchdog_enable(500, 1); // Возвращаем жесткое 500 мс окно для СВЧ-шага
-
-            // Возврат на текущую экспериментальную ступень штурма
-            vreg_set_voltage(VREG_VOLTAGE_1_30);  
-            busy_wait_us(500);  
-  
-            uint32_t ints2 = save_and_disable_interrupts();  
-            pll_sys_hw->fbdiv_int = fb;  
-            pll_sys_hw->prim = (target_p1 << PLL_PRIM_POSTDIV1_LSB) | (target_p2 << PLL_PRIM_POSTDIV2_LSB);  
-            ssi_hw->ssienr = 0; ssi_hw->baudr = ssi_baud; ssi_hw->ssienr = 1;  
-            timeout = 30000;  
-            while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);  
-            clock_configure(clk_sys,  
-                            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                            clk_sys_hz, clk_sys_hz);  
-            restore_interrupts(ints2);  
-        } else {
-            Serial.printf("[КРАХ] Истинный физический предел достигнут. Запись во Flash заморожена.\n");
-            Serial.flush();
-            break;
-        }
-    }
-    
-    // Возврат в безопасный номинал по завершении теста
-    watchdog_enable(10000, 1); 
-    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
-    Serial.println("===========================================================================");
-    Serial.println("[СВЧ-ШТУРМ] Тест завершён. Опора кварца восстановлена.");
-}
-*/
-
-/**  
- * @brief Сверхглубокий хакерский СВЧ-штурм PLL за барьер 4 ГГц с использованием ROSC-опоры.
- * Удерживает ядро на безопасной частоте, выжимая из аналоговой петли абсолютный предел.
- */
-
- /*
-void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
-    // 1. ПЕРЕВОДИМ ПИТАНИЕ И СИСТЕМУ В ЭКСТРЕМАЛЬНЫЙ РЕЖИМ
-    vreg_set_voltage(VREG_VOLTAGE_1_30);  
-    busy_wait_us(2000);  
-    detach_peripheral_clock();  
-    busy_wait_us(2000);
-
-    Serial.printf("\n=================== ТОТАЛЬНЫЙ ШТУРМ PLL ЗА БАРЬЕР 4 ГГЦ ===================\n");
-    Serial.printf("[ХАК] Переключаем опору PLL со скромных 12 МГц XOSC на разогнанный ROSC...\n");
-    Serial.flush();
-    busy_wait_us(10000);
-
-    // Разгоняем ROSC на полную мощность прямой записью в регистры через аппаратную структуру
-    rosc_hw->ctrl  = (0x272u << 12) | 0xD1E; // Запись пароля ENABLE + базовый разгон контура
-    rosc_hw->freqa = (0x9696u << 16) | 0xFFFFu; // Пароль PASSWD + максимальный сдвиг фазы каскадов A
-    rosc_hw->freqb = (0x9696u << 16) | 0xFFFFu; // Пароль PASSWD + максимальный сдвиг фазы каскадов B
-    busy_wait_us(2000);
-
-    // Измеряем получившуюся частоту с помощью встроенного частотомера (fc0) чипа
-    // Используем явный вызов функции SDK clocks_khz
-    uint32_t rosc_hz = clock_get_hz(clk_ref); // Базовое резервное чтение
-    uint32_t measured_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC);
-    if (measured_khz > 0) {
-        rosc_hz = measured_khz * 1000u;
-    }
-
-    Serial.printf("[ХАК] Частота ROSC-опоры стабилизирована на отметке: %7.3f MHz\n", rosc_hz / 1000000.0);
-    Serial.flush();
-
-    // Зажимаем postdiv делители на абсолютный максимум 7 x 7 = 49!
-    // Это позволит VCO штурмовать 5 ГГц, удерживая ядро ниже 110 МГц!
-    uint32_t target_p1 = 7;
-    uint32_t target_p2 = 7;
-    static volatile uint32_t stress_ram_block[512];
-
-    // Шагаем по fbdiv от 100 до упора (320). 
-    // При частоте ROSC ~24 МГц точка fbdiv=170 выдаст VCO = 4.0 ГГц!
-    // Финал fbdiv=210 выдаст VCO = 5.0 ГГц!
-    for (uint32_t fb = 90; fb <= 320; fb++) {
-        uint64_t vco_hz = (uint64_t)fb * rosc_hz;
-        uint32_t clk_sys_hz = (uint32_t)(vco_hz / (target_p1 * target_p2));
-
-        // Если из-за разгона ROSC частота ядра вылетит за безопасные 150 МГц — 
-        // аварийно завершаем, чтобы не сжечь цифровые затворы CPU
-        if (clk_sys_hz > 150000000u) {
-            Serial.printf("[ШТУРМ] Стоп! Частота ядра достигла критических %lu МГц. Прекращаем.\n", clk_sys_hz / 1000000ULL);
-            break;
-        }
-
-        const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;
-        uint32_t ssi_baud = (clk_sys_hz + FLASH_SAFE_MAX_HZ - 1) / FLASH_SAFE_MAX_HZ;  
-        ssi_baud = (ssi_baud + 1u) & ~1u; 
-        if (ssi_baud < 2u)  ssi_baud = 2u;  
-        if (ssi_baud > 34u) ssi_baud = 34u;  
-
-        bool sram_failed = false;
-
-        // --- КРИТИЧЕСКАЯ СЕКЦИЯ ПРЯМОГО СДВИГА PLL НА ROSC ---
-        uint32_t ints = save_and_disable_interrupts();  
-
-        // Прошиваем fbdiv и postdiv каскады (p1=7, p2=7)
-        pll_sys_hw->fbdiv_int = fb;
-        pll_sys_hw->prim = (target_p1 << PLL_PRIM_POSTDIV1_LSB) | (target_p2 << PLL_PRIM_POSTDIV2_LSB);
-
-        // Физически прошиваем делитель Flash-памяти до переключения clk_sys
-        ssi_hw->ssienr = 0; 
-        ssi_hw->baudr  = ssi_baud;  
-        ssi_hw->ssienr = 1; 
-
-        // Ожидаем захват СВЧ-фазы аналоговой петлей
-        volatile uint32_t timeout = 30000;
-        while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);
-
-        // Обновляем частоту системного ядра clk_sys
-        clock_configure(clk_sys,  
-                        CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                        clk_sys_hz, clk_sys_hz);  
-
-        // Верификационный тест ОЗУ
-        uint32_t pattern = 0x55AA55AAL ^ fb;
-        for (int w = 0; w < 512; w++) { stress_ram_block[w] = pattern + w; }
-        for (int w = 0; w < 512; w++) { if (stress_ram_block[w] != (pattern + w)) { sram_failed = true; break; } }
-
-        watchdog_update();  // сброс сторожевого таймера
-
-        restore_interrupts(ints);
-        // --- ВЫХОД ИЗ КРИТИЧЕСКОЙ СЕКЦИИ ---
-
-        float current_temp = vfo_read_core_temp_c();
-        bool is_locked = (pll_sys_hw->cs & PLL_CS_LOCK_BITS) != 0;
-
-        // Печать строки лога — штурмуем гигагерцы!
-        Serial.printf("[СВЧ-ШТУРМ] FB=%3lu | VCO = %4lu MHz | Ядро = %3lu MHz | LOCK = %s | RAM = %s | T = %4.1f C | FLASH = %4.1f MHz\n", 
-                      (unsigned long)fb,
-                      (unsigned long)(vco_hz / 1000000ULL), 
-                      (unsigned long)(clk_sys_hz / 1000000ULL),
-                      is_locked ? "YES" : "LOST!",
-                      sram_failed ? "FAIL" : "OK",
-                      (double)current_temp,
-                      (double)clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr);
-        Serial.flush();
-
-        // Как только аналоговая петля физически сорвется — фиксируем абсолютный рекорд планеты для RP2040!
-        if (!is_locked || sram_failed) {
-            Serial.printf("[СВЧ-ШТУРМ] ФИЗИЧЕСКИЙ СРЫВ АНАЛОГОВОЙ ПЕТЛИ PLL НА ОТМЕТКЕ VCO = %lu МГц!\n", (unsigned long)(vco_hz / 1000000ULL));
-            break;
-        }
-
-        // === ФИКСАЦИЯ ШАГА: откат на номинал -> запись flash -> возврат на ступень ===  
-        {  
-            uint32_t proven_vco = (uint32_t)((vco_hz * 97ULL) / 100ULL);  
-  
-            // 1. Полный откат: clk_sys на номинал 133 МГц через штатный путь,  
-            //    напряжение на VREG_VOLTAGE_DEFAULT. Все внешние опасные состояния сняты.  
-            vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
-  
-            // 2. Запись в dedicated-сектор (внутри: XOSC + baudr=2 на время erase/program,  
-            //    возврат на текущий выход PLL_SYS после записи).  
-            persist_clock_limits(0, proven_vco);  
-  
-            Serial.printf("[ШТУРМ] flash: pll_vco_max=%lu Hz (-3%% от %llu)\n",  
-                          (unsigned long)proven_vco, (unsigned long long)vco_hz);  
-            Serial.flush();  
-  
-            // 3. Возврат на ступень штурма ОДИН раз: экстремальный вольтаж,  
-            //    PLL на ROSC-опоре с текущим fb, clk_sys на частоту шага, baudr под него.  
-            vreg_set_voltage(VREG_VOLTAGE_1_30);  
-            busy_wait_us(500);  
-  
-            uint32_t ints2 = save_and_disable_interrupts();  
-            pll_sys_hw->fbdiv_int = fb;  
-            pll_sys_hw->prim = (target_p1 << PLL_PRIM_POSTDIV1_LSB) | (target_p2 << PLL_PRIM_POSTDIV2_LSB);  
-            ssi_hw->ssienr = 0; ssi_hw->baudr = ssi_baud; ssi_hw->ssienr = 1;  
-            volatile uint32_t t2 = 30000;  
-            while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --t2);  
-            clock_configure(clk_sys,  
-                            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                            clk_sys_hz, clk_sys_hz);  
-            restore_interrupts(ints2);  
-        }
-    }
-    // Возврат в безопасный номинал
-    vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);
-    Serial.println("===========================================================================");
-    Serial.println("[СВЧ-ШТУРМ] Тест завершён. Опора возвращена на кварц.");
-}
-*/
 
 /**  
  * @brief Сверхглубокий хакерский СВЧ-штурм PLL за барьер 4 ГГц с использованием КВАРЦЕВОЙ опоры.

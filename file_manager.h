@@ -104,7 +104,8 @@ struct __attribute__((packed)) SlotMeta {
   uint32_t magic;  
   uint32_t seq;  
   uint32_t max_clk_sys_hz;   // доказанный OCTEST потолок шины (−3% от достигнутого)  
-  uint32_t max_pll_vco_hz;   // доказанный PLLTEST потолок VCO (−3% от достигнутого)  
+  uint32_t max_pll_vco_hz;   // доказанный PLLTEST потолок VCO (−3% от достигнутого)
+  int32_t  xosc_corr_ppb;    // коррекция кварца в ppb; 0xFFFFFFFF/мусор → дефолт
 }; 
 
 // Константы и метаданные для циклического выравнивания износа (Wear Leveling)
@@ -117,7 +118,8 @@ struct __attribute__((packed)) SlotMeta {
 
 // Действующие лимиты разгона: загружаются из Flash, до прогона тестов — паспортные  
 extern uint32_t vfo_max_clk_sys_hz;  
-extern uint32_t vfo_max_pll_vco_hz;  
+extern uint32_t vfo_max_pll_vco_hz;
+extern int32_t  vfo_xosc_corr_ppb;
   
 // Записать достигнутые лимиты во Flash (вызывается из шагов OCTEST/PLLTEST)  
 void persist_clock_limits(uint64_t clk_sys_hz, uint64_t pll_vco_hz);

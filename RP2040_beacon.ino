@@ -948,7 +948,7 @@ void loop() {
   // Проверяем, кратна ли текущая секунда 5
   if (rtc_sec % 5 == 0 && rtc_sec != last_printed_sec) {
     // Проверяем условия: отсутствие эфира и активности
-    if (!pc_activity_detected && !soft_restart_flag && !is_transmitting) {
+    if (!pc_activity_detected && !soft_restart_flag && !is_transmitting && !rx_active) {
       last_printed_sec = rtc_sec; // Запоминаем секунду, блокируя повторные вызовы внутри нее
       
       update_scheduler();

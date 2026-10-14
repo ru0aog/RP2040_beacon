@@ -268,7 +268,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
             cfg = pll_nominal;  
         }
 
-    uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (uint64_t)(cfg.refdiv * cfg.p1 * cfg.p2));  
+    uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * vfo_calibrated_xosc_hz()) / (uint64_t)(cfg.refdiv * cfg.p1 * cfg.p2));  
     bool is_overclocking = (target_clk_hz > current_clk_sys_hz);  
   
     if (is_overclocking) {  
@@ -283,9 +283,9 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
     clock_configure(clk_sys,  
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
-                    VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
+                    vfo_calibrated_xosc_hz(), vfo_calibrated_xosc_hz());  
   
-    uint32_t vco_nominal_hz = (uint32_t)((VFO_CALIBRATED_XOSC_HZ * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);  
+    uint32_t vco_nominal_hz = (uint32_t)((vfo_calibrated_xosc_hz() * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);  
 
 
 // перед pll_init — что реально стоит в опоре PLL (CS bits 5:0 = refdiv)  
@@ -364,7 +364,7 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
         clock_configure(clk_sys,  
                         CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                         CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
-                        VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);  
+                        vfo_calibrated_xosc_hz(), vfo_calibrated_xosc_hz());  
         pll_init(pll_sys, cfg.refdiv, vco_nominal_hz, cfg.p1, cfg.p2);  
         timeout = 20000;  
         while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);
@@ -400,9 +400,9 @@ uint32_t meas_khz_final = meas_khz;
         clock_configure(clk_sys,    
                         CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,    
                         CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,    
-                        VFO_CALIBRATED_XOSC_HZ, VFO_CALIBRATED_XOSC_HZ);    
+                        vfo_calibrated_xosc_hz(), vfo_calibrated_xosc_hz());    
         pll_init(pll_sys, pll_nominal.refdiv,    
-                 (uint32_t)(VFO_CALIBRATED_XOSC_HZ * pll_nominal.fbdiv / pll_nominal.refdiv),    
+                 (uint32_t)(vfo_calibrated_xosc_hz() * pll_nominal.fbdiv / pll_nominal.refdiv),    
                  pll_nominal.p1, pll_nominal.p2);    
         timeout = 20000;    
         while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout);    
@@ -511,7 +511,7 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
     multicore_launch_core1(vfo_core1_entry);  
   
     // Правильный расчет VCO для вывода на экран в мегагерцах [Скорректировано]
-    uint32_t vco_print_mhz = (uint32_t)(((uint64_t)opt.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (1000000ULL * opt.refdiv));
+    uint32_t vco_print_mhz = (uint32_t)(((uint64_t)opt.fbdiv * vfo_calibrated_xosc_hz()) / (1000000ULL * opt.refdiv));
 
 #if BOOST_DEBUG
     Serial.printf("[BOOST  ] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
@@ -554,7 +554,7 @@ void vfo_clk_boost_exit(void) {
     spin_unlock(vfo_spin_lock, save);  
   
     // VCO = XOSC * fbdiv / refdiv (uint64 — fbdiv до 320 * 12 МГц не влезает в uint32 впритык)  
-    uint64_t vco_mhz = (VFO_CALIBRATED_XOSC_HZ * (uint64_t)pll_nominal.fbdiv)  
+    uint64_t vco_mhz = (vfo_calibrated_xosc_hz() * (uint64_t)pll_nominal.fbdiv)  
                        / ((uint64_t)pll_nominal.refdiv * 1000000ULL);  
 
 #if BOOST_DEBUG
@@ -950,7 +950,7 @@ static float frac_spur_level_db(uint16_t pio_int, uint8_t pio_frac) {
 
 PllConfig vfo_find_optimal_pll(unsigned int target_frequency_hz, uint64_t max_clk_limit) {  
   
-    uint64_t crystal_hz = VFO_CALIBRATED_XOSC_HZ;  
+    uint64_t crystal_hz = vfo_calibrated_xosc_hz();  
     uint64_t target_mhz = (uint64_t)target_frequency_hz * 1000ULL; // миллигерцы
 
     uint64_t clk_limit = (max_clk_limit == 0) ? vfo_effective_clk_max() : max_clk_limit;
@@ -1377,7 +1377,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
                       (unsigned long)target_pll.fbdiv,    
                       (unsigned long)target_pll.p1,    
                       (unsigned long)target_pll.p2,    
-                      (unsigned long)(target_pll.fbdiv * (uint32_t)(VFO_CALIBRATED_XOSC_HZ / 1000000ULL)),    
+                      (unsigned long)(target_pll.fbdiv * (uint32_t)(vfo_calibrated_xosc_hz() / 1000000ULL)),    
                       (unsigned)vsel_to_mv(selected_vsel),    
                       (double)current_clk_sys_hz / 1000000.0 / (double)ssi_hw->baudr,    
                       (unsigned)ssi_hw->baudr,    
@@ -1562,7 +1562,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
   
     // 1. СБОР КАНДИДАТОВ
     uint32_t refdiv = 1; {
-        uint64_t f_ref = VFO_CALIBRATED_XOSC_HZ / refdiv;
+        uint64_t f_ref = vfo_calibrated_xosc_hz() / refdiv;
         
         for (uint32_t fbdiv = 30; fbdiv <= 320; fbdiv++) {  
             uint64_t vco_hz = (uint64_t)fbdiv * f_ref;  
@@ -1742,7 +1742,7 @@ void __not_in_flash_func(vfo_find_max_stable_clock)(void) {
         // Ступень успешно пройдена: Читаем аппаратный статус защёлки фазы PLL [Скорректировано]
         bool is_locked = (pll_sys_hw->cs & PLL_CS_LOCK_BITS) != 0; // <--- СКОРРЕКТИРОВАНО
 
-        uint32_t vco_mhz = (uint32_t)(((uint64_t)step_cfg.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (1000000ULL * step_cfg.refdiv));  
+        uint32_t vco_mhz = (uint32_t)(((uint64_t)step_cfg.fbdiv * vfo_calibrated_xosc_hz()) / (1000000ULL * step_cfg.refdiv));  
   
         // Ваша исходная строка + параметр LOCK
         Serial.printf("[OCTEST] OK  clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  LOCK=%s  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
@@ -1800,7 +1800,7 @@ void __not_in_flash_func(vfo_test_pll_extreme_shurm)(void) {
     busy_wait_us(10000);
 
     // Жестко фиксируем частоту опоры на значении откалиброванного кварца 12 МГц
-    uint32_t rosc_hz = VFO_CALIBRATED_XOSC_HZ;
+    uint32_t rosc_hz = vfo_calibrated_xosc_hz();
 
     // Зажимаем postdiv делители на абсолютный максимум 7 x 7 = 49!
     // Это позволит VCO штурмовать 5 ГГц, удерживая ядро ниже 110 МГц!

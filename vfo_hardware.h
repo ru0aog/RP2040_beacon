@@ -108,15 +108,21 @@ struct VfoParameters {
 
 #define VFO_TONES_COUNT     64 // количество тонов
 #define VFO_TONE_NONE      255           
-//#define VFO_CALIBRATED_XOSC_HZ 12000350ULL
-// паспортный номинал кварца + относительная коррекция в ppb
-// (1 ppm = 1000 ppb; ppb выбран для целочисленной точности без float)
-#define VFO_XOSC_NOMINAL_HZ   12000000ULL   // кварц 12.000000 МГц  
-#define VFO_XOSC_CORR_PPB     (+42800LL)    // +29.167 ppm -> 12000350 Гц
-// вычисление скорректированной опоры
-inline constexpr uint64_t VFO_CALIBRATED_XOSC_HZ =  
-    (uint64_t)((int64_t)VFO_XOSC_NOMINAL_HZ +  
-               (int64_t)VFO_XOSC_NOMINAL_HZ * VFO_XOSC_CORR_PPB / 1000000000LL);
+
+// Паспортный номинал кварца — константа; коррекция живёт во Flash  
+// (пишется ключом [XOSC_PPB] в SET.TXT, хранится в SlotMeta).  
+#define VFO_XOSC_NOMINAL_HZ     12000000ULL   // кварц 12.000000 МГц    
+#define VFO_XOSC_DEFAULT_PPB    (+25000LL)    // дефолт при невалидном flash  
+  
+// Коррекция опоры в ppb, загружается из Flash (0 после старта до init_file_manager).  
+extern int32_t vfo_xosc_corr_ppb;  
+  
+// Скорректированная частота кварца — считается в рантайме от flash-значения.  
+static inline uint64_t vfo_calibrated_xosc_hz(void) {  
+    return (uint64_t)((int64_t)VFO_XOSC_NOMINAL_HZ +  
+                      (int64_t)VFO_XOSC_NOMINAL_HZ * (int64_t)vfo_xosc_corr_ppb / 1000000000LL);  
+}
+
 
 extern VfoParameters __attribute__((section(".time_critical.vfo_tones"))) vfo_tones[VFO_TONES_COUNT];
 extern int pin_freq_out; 

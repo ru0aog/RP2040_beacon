@@ -156,6 +156,7 @@ uint32_t current_max_seq     = 0;  // число перезаписей
 // Лимиты разгона: паспортные до первого успешного OCTEST/PLLTEST  
 uint32_t vfo_max_clk_sys_hz = PASSPORT_CLK_SYS_MAX_HZ;  
 uint32_t vfo_max_pll_vco_hz = PASSPORT_PLL_VCO_MAX_HZ;
+int32_t  vfo_xosc_corr_ppb = (int32_t)VFO_XOSC_DEFAULT_PPB;   // до чтения flash
 
 
 volatile bool pc_file_written = false;
@@ -872,7 +873,7 @@ void read_and_parse_SET_txt() {
   my_debug_var      = "";
   s_led_enable = "";
   String s_si_clk = "";
-  String s_clim_sample = "", s_clim_report = "";
+  String s_clim_sample = "", s_clim_report = "", s_xosc_ppb = "";
 
   uint32_t scan_start = 25 * SECTOR_SIZE; // Сектор 25
   uint32_t scan_end   = scan_start + (SET_CLUSTERS * SECTOR_SIZE);
@@ -915,6 +916,7 @@ void read_and_parse_SET_txt() {
           else if (tag == "DEBUG")           target_str = &my_debug_var;
           else if (tag == "CLIM_SAMPLE_MIN") target_str = &s_clim_sample;
           else if (tag == "CLIM_REPORT_MIN") target_str = &s_clim_report;
+          else if (tag == "XOSC_PPB")        target_str = &s_xosc_ppb;
 
           if (target_str != nullptr) {  
             start_idx = close_bracket_idx + 1;  // значение начинается сразу после ']'  
@@ -958,12 +960,21 @@ void read_and_parse_SET_txt() {
     uint32_t val = s_clim_sample.toInt();
     climate_sample_interval_min = (val > 0) ? val : 1; // Защита от 0
   }
-  if (s_clim_report.length() > 0) {
-    uint32_t val = s_clim_report.toInt();
-    climate_report_interval_min = (val > 0) ? val : 1; // Защита от 0
-  }
-  if (debug_flag) {
-    Serial.println("[Система] парсинг SET.TXT");
+  if (s_clim_report.length() > 0) {  
+    uint32_t val = s_clim_report.toInt();  
+    climate_report_interval_min = (val > 0) ? val : 1; // Защита от 0  
+  }  
+  // Коррекция частоты XOSC в ppb (знаковая, ±). Пусто/0 = кварц идеальный.  
+  // Применяется через effective_xosc_hz() — формулы clkdiv и таблица тонов  
+  // читают её вместо константы XOSC_MHZ*1e6.  
+  if (s_xosc_ppb.length() > 0) {  
+    vfo_xosc_corr_ppb = s_xosc_ppb.toInt();  
+    if (vfo_xosc_corr_ppb >  100000) vfo_xosc_corr_ppb =  100000; // ±10% — защита от опечаток  
+    if (vfo_xosc_corr_ppb < -100000) vfo_xosc_corr_ppb = -100000;  
+    Serial.printf("[SET] XOSC_PPB = %ld\n", (long)vfo_xosc_corr_ppb);  
+  }  
+  if (debug_flag) {  
+    Serial.println("[Система] парсинг SET.TXT");  
   }
 
 }
@@ -1032,8 +1043,8 @@ void print_current_settings() {
   // Данные по лимитам ядра
   Serial.println("--- Частотный план процессора ---");
   Serial.printf("Опорный кварц     XOSC: %.6f МГц\n", VFO_XOSC_NOMINAL_HZ / 1e6);
-  Serial.printf("Коррекция кварца  CORR: %+.3f ppm\n", (double)VFO_XOSC_CORR_PPB / 1000.0);
-  Serial.printf("Частота  XOSC_CORR_PPB: %llu Hz\n", (unsigned long long)VFO_CALIBRATED_XOSC_HZ);
+  Serial.printf("Коррекция кварца  CORR: %+.3f ppm\n", (double)vfo_xosc_corr_ppb / 1000.0);  
+  Serial.printf("Частота  XOSC_CORR_PPB: %llu Hz\n", (unsigned long long)vfo_calibrated_xosc_hz());
   Serial.println("--- Максимальные рабочие частоты ---");
   const char* src = (vfo_max_clk_sys_hz != PASSPORT_CLK_SYS_MAX_HZ ||  vfo_max_pll_vco_hz != PASSPORT_PLL_VCO_MAX_HZ)  ? "считано из FLASH" : "passport (тесты не проводились)"; 
    Serial.print("Источник данных       : "); Serial.println(src);
@@ -1148,6 +1159,13 @@ void init_file_manager() {
         if (checked_meta.max_pll_vco_hz >= PASSPORT_PLL_VCO_MAX_HZ &&  
             checked_meta.max_pll_vco_hz <= 6000000000ULL) {  
           vfo_max_pll_vco_hz = checked_meta.max_pll_vco_hz;  
+        }  
+        // Коррекция кварца: стёртая flash даёт 0xFFFFFFFF (-1) или мусор —  
+        // принимаем только физически разумный диапазон ±500 ppm,  
+        // иначе остаётся дефолтный 0 (без коррекции)  
+        if (checked_meta.xosc_corr_ppb > -500000 &&  
+            checked_meta.xosc_corr_ppb <  500000) {  
+          vfo_xosc_corr_ppb = checked_meta.xosc_corr_ppb;  
         }  
       }  
     }

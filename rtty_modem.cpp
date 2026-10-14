@@ -159,7 +159,7 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
 void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert) {
   uint32_t mark_hz = rtty_freq + (shift_hz + 1) / 2;
   uint32_t space_hz;
-
+    Serial.print(vfo_calibrated_xosc_hz());
   // Расчет частоты SPACE на основе флага инверсии
   if (invert) {
     space_hz = mark_hz + shift_hz; // Инверсный режим: Space выше Mark

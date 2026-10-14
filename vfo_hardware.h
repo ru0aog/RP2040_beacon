@@ -124,6 +124,7 @@ static inline uint64_t vfo_calibrated_xosc_hz(void) {
 }
 
 
+
 extern VfoParameters __attribute__((section(".time_critical.vfo_tones"))) vfo_tones[VFO_TONES_COUNT];
 extern int pin_freq_out; 
 

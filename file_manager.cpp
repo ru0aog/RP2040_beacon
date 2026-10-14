@@ -132,7 +132,7 @@ uint32_t climate_sample_interval_min = 10; // По умолчанию замер
 uint32_t climate_report_interval_min = 60; // По умолчанию таблица каждый час
 
 int subband_pins[4] = {6, 7, 8, 9};  // пины шифра поддиапазона
-int pin_freq_out = 10;  // выход DDS-генератора
+int pin_freq_out = 28;  // выход DDS-генератора
 int pin_amp_act  = 11;  // выход управления усилителем
 // пины включения питания модулей
 // -1 означает NC (Не назначен / Not Connected)
@@ -444,17 +444,17 @@ static void create_default_fat_with_info_file() {
     "[TEXT]=TESTING BEACON\r\n\r\n"
     "[CW_WPM    ]=20\r\n"
     "[RTTY_SPEED]=45.45\r\n\r\n"
-    "[FREQ_CW   ]=3601500\r\n"
-    "[RTTY_MARK ]=3601585\r\n"
+    "[FREQ_CW   ]=10001500\r\n"
+    "[RTTY_BASE ]=10001500\r\n"
     "[RTTY_SHIFT]=170\r\n"
     "[RTTY_INVERT]=0\r\n"
-    "[FREQ_IFKP ]=3601307\r\n"
-    "[FREQ_OLIVIA]=3600000\r\n"
-    "[FREQ_CONTESTIA]=3600000\r\n"
-    "[FREQ_THOR]=3600000\r\n"
-    "[FREQ_MFSK16]=3600000\r\n"
-    "[FREQ_DOMINOEX]=3600000\r\n"
-    "[FREQ_FSQ]=3600000\r\n\r\n"
+    "[FREQ_IFKP ]=10001500\r\n"
+    "[FREQ_OLIVIA]=10001500\r\n"
+    "[FREQ_CONTESTIA]=10001500\r\n"
+    "[FREQ_THOR]=10001500\r\n"
+    "[FREQ_MFSK16]=10001500\r\n"
+    "[FREQ_DOMINOEX]=10001500\r\n"
+    "[FREQ_FSQ]=10001500\r\n\r\n"
     "=== МАТРИЦА РАСПИСАНИЯ ПЕРЕДАЧ ===\r\n"
     "// ДНИ: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс, 0=Каждый день\r\n"
     "// МОДЫ: CW, RTTY, IFKP, OLIVIA, CONTESTIA, THOR, MFSK16, DOMINOEX, FSQ, SEQ (Сквозной цикл CW->RTTY->IFKP)\r\n"
@@ -462,7 +462,7 @@ static void create_default_fat_with_info_file() {
     "// Формат периодической: [TASK_01]=ДНИ,ЧЧ:ММ_СТАРТ/ЧЧ:ММ_КОНЕЦ/ИНТЕРВАЛ,ЧАСТОТА_ГЦ,МОДА\r\n"
     "// Базовое расписание (Ежедневно) ---\r\n"
     "// Плотный дневной цикл каждые 5 минут (с 09:00 до 22:00 ежедневно) ---\r\n"
-    "[TASK_01]=0,09:00/22:00/5,3591500,RTTY\r\n"
+    "// [TASK_01]=0,09:00/22:00/5,3591500,RTTY\r\n"
     "// [TASK_02]=0,15:18,3601585,CW\r\n"
     "// [TASK_03]=0,15:20,3601307,IFKP\r\n"
     "// Примеры:\r\n"
@@ -669,7 +669,7 @@ void read_and_parse_INFO_txt() {
           else if (tag == "CW_WPM")         target_str = &my_cw_wpm_var;  
           else if (tag == "RTTY_SPEED")     target_str = &my_rtty_baud_var;  
           else if (tag == "FREQ_CW")        target_str = &my_freq_cw_var;  
-          else if (tag == "RTTY_MARK")      target_str = &my_rtty_mark_var;  
+          else if (tag == "RTTY_BASE")      target_str = &my_rtty_mark_var;  
           else if (tag == "RTTY_SHIFT")     target_str = &my_rtty_shift_var;  
           else if (tag == "RTTY_INVERT")    target_str = &my_rtty_invert_var;  
           else if (tag == "FREQ_IFKP")      target_str = &my_freq_ifkp_var;

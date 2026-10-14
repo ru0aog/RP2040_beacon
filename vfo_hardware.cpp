@@ -284,17 +284,11 @@ static void __not_in_flash_func(vfo_set_clk_sys)(const PllConfig& cfg_in, uint32
                     CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
                     CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,  
                     vfo_calibrated_xosc_hz(), vfo_calibrated_xosc_hz());  
-    //uint32_t vco_nominal_hz = (uint32_t)((vfo_calibrated_xosc_hz() * (uint64_t)cfg.fbdiv) / (uint64_t)cfg.refdiv);
     // Округление ВВЕРХ до следующего кратного ref_hz: гарантирует, что внутреннее  
     // целочисленное деление pll_init даст ровно cfg.fbdiv, а не fbdiv-1  
     // (иначе при скорректированном XOSC < 12 МГц произведение падает ниже порога).  
-    //uint64_t ref_hz = ((uint64_t)vfo_calibrated_xosc_hz() + cfg.refdiv - 1u) / cfg.refdiv;  
-    //uint32_t vco_nominal_hz = (uint32_t)(ref_hz * (uint64_t)cfg.fbdiv);
-
-    // pll_init вычисляет fbdiv = vco / (XOSC_HZ/refdiv) с НОМИНАЛЬНЫМИ 12 МГц.  
-    // Передаём VCO, кратный номинальной опоре — иначе усечение при делении  
-    // съедает один шаг fbdiv (198.99 -> 198) и clk_sys уходит на ~660 кГц.  
-    uint32_t vco_nominal_hz = (uint32_t)((vfo_calibrated_xosc_hz() / (uint64_t)cfg.refdiv) * (uint64_t)cfg.fbdiv);
+    uint64_t ref_hz = ((uint64_t)vfo_calibrated_xosc_hz() + cfg.refdiv - 1u) / cfg.refdiv;  
+    uint32_t vco_nominal_hz = (uint32_t)(ref_hz * (uint64_t)cfg.fbdiv);
 
 
 // перед pll_init — что реально стоит в опоре PLL (CS bits 5:0 = refdiv)  

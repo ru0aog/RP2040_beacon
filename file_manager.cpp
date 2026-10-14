@@ -970,12 +970,12 @@ void read_and_parse_SET_txt() {
   // Коррекция частоты XOSC в ppb (знаковая, ±). Пусто/0 = кварц идеальный.  
   // Применяется через effective_xosc_hz() — формулы clkdiv и таблица тонов  
   // читают её вместо константы XOSC_MHZ*1e6.  
-  if (s_xosc_ppb.length() > 0) {  
-    vfo_xosc_corr_ppb = s_xosc_ppb.toInt();  
-    if (vfo_xosc_corr_ppb >  100000) vfo_xosc_corr_ppb =  100000; // ±10% — защита от опечаток  
-    if (vfo_xosc_corr_ppb < -100000) vfo_xosc_corr_ppb = -100000;  
-    Serial.printf("[SET] XOSC_PPB = %ld\n", (long)vfo_xosc_corr_ppb);  
-  }  
+  //if (s_xosc_ppb.length() > 0) {  
+  //  vfo_xosc_corr_ppb = s_xosc_ppb.toInt();  
+  //  if (vfo_xosc_corr_ppb >  100000) vfo_xosc_corr_ppb =  100000; // ±10% — защита от опечаток  
+  //  if (vfo_xosc_corr_ppb < -100000) vfo_xosc_corr_ppb = -100000;  
+  //  Serial.printf("[SET] XOSC_PPB = %ld\n", (long)vfo_xosc_corr_ppb);  
+  //}  
   if (debug_flag) {  
     Serial.println("[Система] парсинг SET.TXT");  
   }

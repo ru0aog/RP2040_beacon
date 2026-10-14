@@ -52,9 +52,9 @@
 
 
 // ДИАГНОСТИКА
-#define BOOST_DEBUG              1         // 0 — выключить отладочную печать блока разгона
-#define VFO_PLL_DEBUG            1         // 0 — выключить отладочную печать подбора кандидатов
-#define PLL_RUNTIME_DEBUG        1         // 0 — выключить отладочную печать блока PLL
+#define BOOST_DEBUG              0         // 0 — выключить отладочную печать блока разгона
+#define VFO_PLL_DEBUG            0         // 0 — выключить отладочную печать подбора кандидатов
+#define PLL_RUNTIME_DEBUG        0         // 0 — выключить отладочную печать блока PLL
 
 
 void vfo_quadrature_start(uint32_t freq_hz);   // freq_hz = частота ПРИЁМА (LO ставится на freq−IF)  
@@ -1330,6 +1330,12 @@ static void vfo_rebuild_tone_table(uint64_t base_freq_mhz, uint64_t step_mhz) {
 void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     // Жесткий перезапуск изолированного ядра перед изменением параметров таблиц тонов
     multicore_reset_core1(); 
+
+    // Глушим выход ДО передёрга PLL: работающий SM во время  
+    // перезахвата PLL выплюнул бы меандр на съезжающей частоте  
+    // (всплеск ниже полосы при смене сетки, напр. RSID→данные).  
+    pio_sm_set_enabled(lo_pio, lo_sm, false);  
+    pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, false);
 
     current_active_tone = VFO_TONE_NONE; 
     xorshift_state = VFO_RAND_SEED_INIT + time_us_32(); 

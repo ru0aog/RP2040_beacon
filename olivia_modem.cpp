@@ -80,10 +80,10 @@ static bool olivia_rsid() {
     uint16_t code = g_contestia ? RSID_CODE_CONTESTIA_8_250  
                                 : RSID_CODE_OLIVIA_8_250;  
 
-    // Base_freq = центр полосы 8/250  
-    if (!rsid_send(code, (double)OLIVIA_Base_freq + (OLIVIA_TONES / 2.0) * OLIVIA_STEP_HZ)) return false;
-  
-    // вернуть сетку данных 8/31.25 (нижний тон = центр - 109.375 Гц)  
+    // Base_freq — уже центр полосы: сетка строится как base ± 3.5·step    
+    if (!rsid_send(code, (double)OLIVIA_Base_freq)) return false;
+
+    // вернуть сетку данных 8/31.25 (нижний тон = центр - 109.375 Гц)
     vfo_hardware_init(OLIVIA_Base_freq - OLIVIA_CENTER_OFFSET_HZ, OLIVIA_STEP_HZ);
     vfo_set_tone_instant(0);  
     return true;  
@@ -268,7 +268,6 @@ static void send_string_common(const char* str) {
     if (!device_SI[0]) {  
         vfo_operation_set(false);  
         vfo_set_tone_instant(0);  
-        vfo_operation_set(true);  
     } else {  
         VFO_TX_ON();  
     }  

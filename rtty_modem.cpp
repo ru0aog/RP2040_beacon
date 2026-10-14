@@ -157,14 +157,15 @@ static bool find_in_table(const mtk2_map_t* table, const char* s, uint8_t &code,
 
 // Подготовка сетки частот на основе MARK, SHIFT и флага INVERT
 void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert) {
-  uint32_t mark_hz = rtty_freq + (shift_hz + 1) / 2;
+  uint32_t mark_hz;
   uint32_t space_hz;
-    Serial.print(vfo_calibrated_xosc_hz());
   // Расчет частоты SPACE на основе флага инверсии
   if (invert) {
-    space_hz = mark_hz + shift_hz; // Инверсный режим: Space выше Mark
+    space_hz = rtty_freq - (shift_hz + 1) / 2; // Инверсный режим: Space выше Mark
+    mark_hz = space_hz - shift_hz;
   } else {
-    space_hz = mark_hz - shift_hz; // Нормальный режим: Space ниже Mark
+    mark_hz = rtty_freq + (shift_hz + 1) / 2; // Нормальный режим: Mark выше Space
+    space_hz = mark_hz - shift_hz;
   }
 
   if (device_SI[0]) {

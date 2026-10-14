@@ -172,9 +172,9 @@ typedef struct {
     uint8_t  state;             // 0=idle, 1=start, 2=биты, 3=стоп  
     uint8_t  bit_cnt;  
     uint8_t  shreg;  
-    uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах)
     uint32_t bit_period;        // отсчётов на бит  
-    bool     prev_mark;         // предыдущее решение (для фронта) 
+    uint8_t  prev_mark;         // решение предыдущего символа (для поиска фронта)    
+    uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах) 
 } rtty_dec_t;  
 static rtty_dec_t rt;  
   
@@ -188,25 +188,33 @@ static inline bool sample_idx_ge(uint32_t a, uint32_t b) {
 // RTTY: решение о тоне каждые bit_period/8 отсчётов (subwin ~2.75 мс при 45.45 бод).  
 // Старт-бит ловим по фронту mark→space, датабиты читаем в их середине.  
 static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {  
-    // bit_period в отсчётах храним в rt.bit_period (заполняется в start)  
     switch (rt.state) {  
     case 0:                                  // ждём space-фронт (старт-бит)  
+        // Фронт mark→space лежит между последним mark-решением  
+        // (idx - bit_period) и текущим space-решением (idx)  
+        // → опорная точка = idx - bit_period/2.  
+        // Центр первого датабита = +1.5·T от фронта.  
         if (!mark && rt.prev_mark) {  
             rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
-            rt.next_sample = idx + rt.bit_period + rt.bit_period/2; // сер. бита 0  
+            rt.next_sample = idx + rt.bit_period;   // ≡ idx - T/2 + 1.5·T  
         }  
         break;  
+  
     case 1:                                  // читаем 5 датабитов в серединах  
-        while (sample_idx_ge(idx, rt.next_sample)) {  
+        while (idx >= rt.next_sample) {  
             rt.shreg |= (mark ? 1u : 0u) << rt.bit_cnt;  
             rt.next_sample += rt.bit_period;  
             if (++rt.bit_cnt == 5) { rt.state = 2; break; }  
         }  
         break;  
-    case 2:                                  // стоп-бит: просто закрыть символ  
-        if (sample_idx_ge(idx, rt.next_sample)) {  
+  
+    case 2:                                  // стоп-бит: закрыть символ  
+        if (idx >= rt.next_sample) {  
             rt.state = 0;  
-            uint8_t c = rt.shreg & 0x1F;  
+            // Стоп обязан быть mark. Space = framing error:  
+            // ложный фронт, символ выбрасываем, ресинк сразу.  
+            if (!mark) break;  
+            uint8_t c = rt.shreg;  
             if (c == RTTY_FIGS) rt.figs = 1;  
             else if (c == RTTY_LTRS) rt.figs = 0;  
             else {  
@@ -216,7 +224,7 @@ static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {
         }  
         break;  
     }  
-    rt.prev_mark = mark;  
+    rt.prev_mark = mark;                     // единственное место обновления  
 }
   
 // ============================================================================  

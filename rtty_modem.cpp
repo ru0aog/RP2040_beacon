@@ -194,8 +194,12 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
     vfo_hardware_init(rtty_mark_hz, rtty_shift_hz);  
     vfo_set_tone_instant(1);   // MARK = тон 1  
     vfo_set_narrowband(true);  // mfsk_prepare мог сбросить narrowband  
-    vfo_hardware_init(mark_hz, shift_hz);
-    vfo_set_tone_instant(1);
+
+    // Сетка растёт вверх от базы: base = min(mark, space), step = shift.  
+    // Нормальный режим: tone0=SPACE, tone1=MARK. Инверсия — наоборот.  
+    uint32_t base_hz = invert ? mark_hz : space_hz;  
+    vfo_hardware_init(base_hz, shift_hz);  
+    vfo_set_tone_instant(invert ? 0 : 1); // стартуем с MARK  
     vfo_operation_set(true);    // запустить генерацию программного VFO
     if (debug_flag) {
         Serial.println(F("[RTTY_ГОТОВ] Программный DDS VFO инициализирован!"));
@@ -215,12 +219,9 @@ static void send_rtty_bit(TransmitterState state) {
         VFO_TX_ON();            // запустить выход частоты TX
       }
       else {
-        if (state == MARK) {
-            vfo_set_tone_instant(0);    // запустить генерацию программного VFO
-        } else {
-            vfo_set_tone_instant(1);    // запустить генерацию программного VFO
-        }
-        //vfo_operation_set(true);
+        // Сетка: норма tone0=SPACE/tone1=MARK; инверсия — зеркально.  
+        static uint8_t rtty_tone_mark = 1, rtty_tone_space = 0; // см. ниже  
+        vfo_set_tone_instant(state == MARK ? rtty_tone_mark : rtty_tone_space);
       }
 
     if (state == MARK) {
@@ -329,18 +330,13 @@ void send_rtty_raw(const char* s) {
     Serial.println("");
 }
 
+
+
 // функция со String, включающая преамбулу, текст и постамбулу
 void send_rtty_string(String str) {
   if (pc_file_written == false && soft_restart_flag == false) {
 
     vfo_set_narrowband(true);
-    // Включаем ШИМ и плавно открываем фронт один раз ДО старта преамбулы
-    if (!device_SI[0]) {
-        vfo_operation_set(false);
-        vfo_set_tone_instant(0); // Стартуем с MARK
-        vfo_operation_set(true);
-    }
-
     // СТАРТОВЫЙ ПИЛОТ-ТОН (PREAMBLE): Включаем частоту MARK на 500 мс
     uint32_t preamble_start = millis();
     while (millis() - preamble_start < 500) {
@@ -361,7 +357,7 @@ void send_rtty_string(String str) {
     if (device_SI[0]) {
         VFO_TX_OFF(); 
     } else {
-        vfo_operation_set(false); // Плавно опускаем амплитуду до 0% в конце постамбулы
+        vfo_operation_set(false);
     }
     ZERO_LED_OFF();
     vfo_set_narrowband(false);   // возвращаем штатный дизер

@@ -124,6 +124,7 @@ void prepare_cw_frequency(uint32_t freq_hz) {
         Serial.print(format_freq(freq_hz)); Serial.println(" Гц");
     }
     vfo_hardware_init(freq_hz, 10.0);
+    vfo_set_narrowband(true);  
     vfo_operation_set(false);   // отключить генерацию программного VFO
   }
 }

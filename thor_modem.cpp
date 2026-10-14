@@ -103,7 +103,8 @@ static const uint32_t FSQ_SYMBOL_US    = 256000;         // FSQ-4.5: 3072/12000 
 #define RSID_NSYMBOLS        15
 static const double   RSID_STEP_HZ     = 11025.0 / 1024.0; // 10.7666 Гц
 static const uint32_t RSID_SYMBOL_US   = 92880;            // 1024/11025 с
-#define THOR11_RSID_CODE  	143
+#define THOR11_RSID_CODE  	 143
+#define FSQ_RSID_CODE        114
 
 #define MFSK_MAX_TONES       33
 
@@ -1046,9 +1047,15 @@ static bool fsq_send_cstr(const char* s) {
 void fsq_send_string(const char* str) {
     if (str == nullptr) return;
     fsq_prevtone = 0;
-    mfsk_tx_begin();   // сетка уже задана prepare_fsq_frequencies()
-
-    // BOT: " " + FSQBOL + mycall + ":" (без CRC — недиректный режим)
+    mfsk_tx_begin();   // сетка уже задана prepare_fsq_frequencies()  
+  
+    // RSID до BOT — сетку RSID (16 тонов) заменяем обратно на сетку FSQ  
+    if (!rsid_send(FSQ_RSID_CODE, (double)FSQ_Base_freq)) goto done;  
+    mfsk_prepare(FSQ_Base_freq - FSQ_CENTER_OFFSET_HZ, FSQ_STEP_HZ, FSQ_NUMTONES);  
+    mfsk_sync_deadline();  
+    mfsk_carrier(true);          // rsid_send гасит несущую — включаем на BOT  
+  
+    // BOT: " " + FSQBOL + mycall + ":" (без CRC — недиректный режим)  
     if (!fsq_send_cstr(" " FSQBOL)) goto done;
     if (!fsq_send_cstr(my_call_variable.c_str())) goto done;
     if (!fsq_send_char(':')) goto done;

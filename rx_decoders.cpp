@@ -176,7 +176,8 @@ typedef struct {
     uint8_t  shreg;  
     uint32_t bit_period;        // отсчётов на бит  
     uint8_t  prev_mark;         // решение предыдущего символа (для поиска фронта)    
-    uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах) 
+    uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах)
+    uint8_t  space_cnt;         // длительность текущего space-подряд (деглитчинг)
 } rtty_dec_t;  
 static rtty_dec_t rt;  
 
@@ -197,14 +198,16 @@ static inline bool sample_idx_ge(uint32_t a, uint32_t b) {
 // Старт-бит ловим по фронту mark→space, датабиты читаем в их середине.  
 static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {  
     switch (rt.state) {  
-    case 0:                                  // ждём space-фронт (старт-бит)  
-        // Фронт mark→space лежит между последним mark-решением  
-        // (idx - bit_period) и текущим space-решением (idx)  
-        // → опорная точка = idx - bit_period/2.  
-        // Центр первого датабита = +1.5·T от фронта.  
-        if (!mark && rt.prev_mark) {  
-            rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
-            rt.next_sample = idx + rt.bit_period;   // ≡ idx - T/2 + 1.5·T  
+    case 0:                                // ждём устойчивый space-фронт  
+        if (!mark) {  
+            if (++rt.space_cnt >= 2 && rt.prev_mark) {  
+                // space держится ≥2 подокон — фронт был на первом из них  
+                rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
+                rt.next_sample = idx + rt.bit_period  
+                               - rt.bit_period / 8;  // компенсация задержки деглитчинга  
+            }  
+        } else {  
+            rt.space_cnt = 0;  
         }  
         break;  
   
@@ -340,7 +343,8 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out); // запасной путь    
         rt.bit_period = (uint32_t)(fs_out / 45.45f);      // ~343 отсчёта на бит    
         sym_samples   = rt.bit_period / 8;                // подокно ~2.75 мс    
-        rt.prev_mark  = 1;                                // idle-канал = mark    
+        rt.prev_mark  = 1;                                // idle-канал = mark
+        rt.space_cnt = 0;
         rt.state = 0;    
         break;
     case RX_MODE_OLIVIA:  

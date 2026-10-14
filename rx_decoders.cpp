@@ -7,29 +7,29 @@
  */  
 
  /*
- Декодеры — большой объём
- Даю полный файл с соответствующим каркасом и полными поставками для RTTY и CW, MFSK-движком 
- с разностным детектором для FSQ/IFKP/DominoEX и Olivia-Walsh для Olivia/Contestia; 
- FEC/варикод-стыковку, содержащую в явных хуках с пояснениями
+  Декодеры — большой объём
+  Даю полный файл с соответствующим каркасом и полными поставками для RTTY и CW, MFSK-движком 
+  с разностным детектором для FSQ/IFKP/DominoEX и Olivia-Walsh для Olivia/Contestia; 
+  FEC/варикод-стыковку, содержащую в явных хуках с пояснениями
 
-Полностью рабочие из коробки: 
-RTTY (Бодо-старт-стоп) и CW (таймер + дерево Морзе). 
-Они самые простые и хорошо проверяются.
+  Полностью рабочие из коробки: 
+  RTTY (Бодо-старт-стоп) и CW (таймер + дерево Морзе). 
+  Они самые простые и хорошо проверяются.
 
-MFSK-движок готов (Goertzel-банк, победитель получает все, 
-IFK-разность, код Грея), но варикод/FEC-слои не реализованы — это ~300-400 строк, 
-выводимых из fldigi (свёрточный декодер k=7, деинтерлив 4×10, таблицы varicode[]/ fsq_varicode[]/ dominovar[]). 
+  MFSK-движок готов (Goertzel-банк, победитель получает все, 
+  IFK-разность, код Грея), но варикод/FEC-слои не реализованы — это ~300-400 строк, 
+  выводимых из fldigi (свёрточный декодер k=7, деинтерлив 4×10, таблицы varicode[]/ fsq_varicode[]/ dominovar[]). 
 
-Таблицы varicode[]в thor_modem.cpp объявленах static — для повторного использования 
-их нужно сделать externили продублировать в rx_decoders.cpp.
+  Таблицы varicode[]в thor_modem.cpp объявленах static — для повторного использования 
+  их нужно сделать externили продублировать в rx_decoders.cpp.
 
-Оливия: Коррелятор Уолша-8 есть, но полный блоковый дескремблер/распаковка 
-5-битных символов (64 символа → 40 бит → 5×8-битных символов) не дописана — помечено TODO.
-A
-FC — заглушка с ЭМА мощности; точную расстройку правильнее брать интерполяцией трёх бинов Герцеля, 
-правильно говоря rx_dsp_set_nco_hz. Скелет оставил.
-Окно символа: Герцель ведет по соединениям sym_samples — для пониженных мод (FSQ 256 мс → ~4000 отсчетов) 
-компрессоры int32могут переполняться при больших размерах; стоит нормировать вход (>>4 перед нажатием) или сделать двухэтапное окно.
+  Оливия: Коррелятор Уолша-8 есть, но полный блоковый дескремблер/распаковка 
+  5-битных символов (64 символа → 40 бит → 5×8-битных символов) не дописана — помечено TODO.
+
+  FC — заглушка с ЭМА мощности; точную расстройку правильнее брать интерполяцией трёх бинов Герцеля, 
+  правильно говоря rx_dsp_set_nco_hz. Скелет оставил.
+  Окно символа: Герцель ведет по соединениям sym_samples — для пониженных мод (FSQ 256 мс → ~4000 отсчетов) 
+  компрессоры int32могут переполняться при больших размерах; стоит нормировать вход (>>4 перед нажатием) или сделать двухэтапное окно.
 */
   
 #include <Arduino.h>  
@@ -50,7 +50,9 @@ typedef enum {
 static rx_mode_t  dec_mode = RX_MODE_NONE;  
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
 static uint32_t   sym_acc = 0;        // накоплено в окне  
-static uint32_t   sample_idx = 0;  
+static uint32_t   sample_idx = 0;
+static int32_t rtty_disc = 0;     // накопитель дискриминатора текущего окна  
+static int16_t prev_i = 0, prev_q = 0;   // последние I/Q прошлой порции (стыковка)
 static float      fs_out = 15625.0f;  
 static float      f_center_hz = 0;    // для AFC  
 static bool       afc_on = false;  
@@ -177,7 +179,13 @@ typedef struct {
     uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах) 
 } rtty_dec_t;  
 static rtty_dec_t rt;  
-  
+
+// Некогерентный интегратор по подокнам: суммируем мощности тонов  
+// за все ~8 подокон бита — решение о бите по полной энергии.  
+static int32_t  rt_pwr_mark = 0;    // Σ power тона 1 (mark)  
+static int32_t  rt_pwr_space = 0;   // Σ power тона 0 (space)  
+static uint8_t  rt_pwr_n = 0;       // сколько подокон накоплено
+
 #define RTTY_FIGS 0x1F  
 #define RTTY_LTRS 0x1B  
 
@@ -249,7 +257,8 @@ static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {
     uint32_t dur_smp = on ? (idx - cw.on_start) : (idx - cw.off_start);  
     float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000 / 1000.0f;  
   
-    float dot_ms = cw.dot_us * 0.001f;      // оценка точки в мс  
+    float dot_ms = cw.dot_us * 0.001f;      // оценка точки в мс
+    if (dot_ms < 20.0f || dot_ms > 150.0f) dot_ms = 60.0f;  // страховка при 0/мусоре
   
     if (on) {  
         // Конец тона: классификация точка/тире  
@@ -327,12 +336,12 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         gtz_bank_init(center_hz, 0, 1, fs_out);           // 1 тон  
         sym_samples = (uint32_t)(fs_out * 0.005f);        // окно 5 мс  
         break;  
-    case RX_MODE_RTTY:  
-        gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out);  
-        sym_samples = (uint32_t)(fs_out / 45.45f) / 8;   // подокно = бит/8 ≈ 43 отсчёта  
-        if (sym_samples < 8) sym_samples = 8;  
-        rt.bit_period = (uint32_t)(fs_out / 45.45f);     // полный бит в отсчётах  
-        rt.state = 0; rt.prev_mark = true;  
+    case RX_MODE_RTTY:    
+        gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out); // запасной путь    
+        rt.bit_period = (uint32_t)(fs_out / 45.45f);      // ~343 отсчёта на бит    
+        sym_samples   = rt.bit_period / 8;                // подокно ~2.75 мс    
+        rt.prev_mark  = 1;                                // idle-канал = mark    
+        rt.state = 0;    
         break;
     case RX_MODE_OLIVIA:  
     case RX_MODE_CONTESTIA:  
@@ -382,8 +391,7 @@ static void afc_update(uint8_t tone, int32_t pwr) {
 void rx_decoders_stop(void) { dec_mode = RX_MODE_NONE; }  
   
 // Вызывается из цикла core1 (rx_dsp_entry) после заполнения out_i/out_q  
-void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
-  (void)xq;                                    // энергодетектор пока по I-каналу
+void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {  
     if (dec_mode == RX_MODE_NONE || n == 0) return;  
   
     // ---------------- CW: блок = одно окно детектора огибающей ----------------  
@@ -393,7 +401,8 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         cw.noise_floor += ((p - cw.noise_floor) >> 4);  
         bool on = p > (cw.noise_floor * 4 + 1024);  
         if (on != cw.tone_on) {  
-            cw_on_edge(!on, sample_idx, (uint32_t)fs_out);  
+            // fs_x1000 = fs_out * 1000 — НЕ fs_out: внутри делится 1e6/fs_x1000 → мс  
+            cw_on_edge(!on, sample_idx, (uint32_t)(fs_out * 1000.0f));  
             cw.tone_on = on;  
             if (on) cw.on_start = sample_idx; else cw.off_start = sample_idx;  
         }  
@@ -412,6 +421,22 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
                                         ? (n - pos) : remain_sym);  
   
         gtz_push(xi + pos, chunk);  
+  
+        // Дискриминатор RTTY: накапливаем по той же порции отсчётов.  
+        // Знак кросс-произведения I/Q-последовательных отсчётов = знак частоты:  
+        // положительный → тон выше NCO (mark), отрицательный → ниже (space).  
+        if (dec_mode == RX_MODE_RTTY) {  
+            int16_t pi = (pos > 0) ? xi[pos - 1] : prev_i;   // предыдущий отсчёт  
+            int16_t pq = (pos > 0) ? xq[pos - 1] : prev_q;   // в т.ч. через границу порций  
+            for (uint8_t k = 0; k < chunk; k++) {  
+                int16_t ci = xi[pos + k], cq = xq[pos + k];  
+                rtty_disc += (int32_t)ci * pq - (int32_t)cq * pi;  
+                pi = ci; pq = cq;  
+            }  
+            prev_i = xi[pos + chunk - 1];  
+            prev_q = xq[pos + chunk - 1];  
+        }  
+  
         sym_acc    += chunk;  
         pos        += chunk;  
         sample_idx += chunk;  
@@ -425,7 +450,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
         switch (dec_mode) {  
         case RX_MODE_RTTY:  
-            rtty_bit(tone == 1, sample_idx);
+            rtty_bit(rtty_disc > 0, sample_idx);   // знак дискриминатора = mark  
             break;  
         case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
             olivia_on_tone(tone);  
@@ -445,6 +470,10 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         }  
   
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
-        sym_acc = 0;  
+        sym_acc   = 0;  
+        rtty_disc = 0;                           // новое окно — новый дискриминатор  
     }  
 }
+
+
+

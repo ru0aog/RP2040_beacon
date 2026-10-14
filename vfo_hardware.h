@@ -14,10 +14,20 @@
 #define VFO_THROTTLE_LO_C   60.0f
 #define VFO_SIMPLE_FRAC_INT_MAX 50   // выше этого int вето простых дробей не применяется (НЧ: 1/2 на железе чисто)
 
+// Скорость потокового захвата, отсчётов/с  
+#define RX_ADC_SAMPLE_RATE_HZ 480000.0f   // 480 ksps — потолок SAR при 48 МГц клока
+
 void rx_capture_start(void);  
 void rx_capture_stop(void);  
 bool rx_capture_get_block(const uint16_t** buf);  
 void rx_capture_release(void);
+
+void  rx_dsp_start(float if_hz);  
+void  rx_dsp_set_nco_hz(float f_hz);  
+bool  rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t* n);  
+void  rx_dsp_release_output(void);  
+const volatile uint32_t* rx_capture_get_block(void);   // сигнатуру обновить на 32-бит  
+uint32_t rx_capture_dropped(void);
 
 // рабочий лимит как переменные — min(дефайн, flash-значение)
 extern uint32_t vfo_max_clk_sys_hz;   // из Flash, паспорт=133 МГц  

@@ -491,7 +491,7 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
         busy_wait_us(10); 
 
 #if BOOST_DEBUG 
-        Serial.printf("[BOOST] SKIP-RETUNE (SOFT TUNE) clk=%lu kHz  target=%lu Hz\n",  
+        Serial.printf("[BOOST  ] SKIP-RETUNE (SOFT TUNE) clk=%lu kHz  target=%lu Hz\n",  
                       (unsigned long)(current_clk_sys_hz / 1000ULL),  
                       (unsigned long)target_freq_hz);  
 #endif
@@ -525,7 +525,7 @@ void vfo_clk_boost_enter(unsigned int target_freq_hz) {
     uint32_t vco_print_mhz = (uint32_t)(((uint64_t)opt.fbdiv * VFO_CALIBRATED_XOSC_HZ) / (1000000ULL * opt.refdiv));
 
 #if BOOST_DEBUG
-    Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
+    Serial.printf("[BOOST  ] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)\n",  
                 opt.clk_sys_hz / 1000000.0,  
                 (unsigned long)opt.refdiv,
                 (unsigned long)opt.fbdiv,  
@@ -551,7 +551,6 @@ void vfo_clk_boost_exit(void) {
     vfo_set_clk_sys(pll_nominal, VREG_VOLTAGE_DEFAULT);  
     vfo_rebuild_tone_table((uint64_t)cached_base_freq_hz * 1000ULL,    
                         (uint64_t)(cached_step_hz * 1000.0));  
-    //Serial.println("[BOOST] пересчёт таблицы тонов");  
     
     // Пересчёт таблицы тонов обратно под номинальную clk_sys    
     uint32_t save = spin_lock_blocking(vfo_spin_lock);    
@@ -570,7 +569,7 @@ void vfo_clk_boost_exit(void) {
                        / ((uint64_t)pll_nominal.refdiv * 1000000ULL);  
 
 #if BOOST_DEBUG
-    Serial.printf("[BOOST] OFF  clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4llu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
+    Serial.printf("[BOOST  ] OFF  clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4llu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
                   pll_nominal.clk_sys_hz / 1000000.0,  
                   (unsigned long)pll_nominal.refdiv,  
                   (unsigned long)pll_nominal.fbdiv,    
@@ -1383,7 +1382,7 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     if (clk_boosted) {
         pll_overclock = target_pll; // Обновляем рабочий профиль для термогуарда
 #if BOOST_DEBUG 
-            Serial.printf("[BOOST] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
+            Serial.printf("[BOOST  ] ON   clk_sys=%7.3f MHz  refdiv=%lu  fbdiv=%3lu  p1=%lu  p2=%lu  VCO=%4lu MHz  VSEL=%4u mV  FLASH=%6.3f MHz (BAUDR=%u)  T_CPU=%5.1f C\n",    
                       (double)current_clk_sys_hz / 1000000.0,  // Выведет честные 254.007 MHz!
                       (unsigned long)target_pll.refdiv,
                       (unsigned long)target_pll.fbdiv,    
@@ -1517,7 +1516,7 @@ void vfo_clk_thermal_guard(void) {
         clk_boosted = false;  
         thermal_throttled = true;
 #if BOOST_DEBUG 
-        Serial.printf("[BOOST] THROTTLE: T_CPU=%.1f C >= %.0f C — откат на %lu MHz\n",  
+        Serial.printf("[BOOST  ] THROTTLE: T_CPU=%.1f C >= %.0f C — откат на %lu MHz\n",  
                       (double)temp, (double)VFO_THROTTLE_HI_C,  
                       (unsigned long)(pll_nominal.clk_sys_hz / 1000000ULL));
 #endif
@@ -1532,7 +1531,7 @@ void vfo_clk_thermal_guard(void) {
         clk_boosted = true;  
         thermal_throttled = false;
 #if BOOST_DEBUG 
-        Serial.printf("[BOOST] RESUME: T_CPU=%.1f C — возврат на %7.3f MHz\n",  
+        Serial.printf("[BOOST  ] RESUME: T_CPU=%.1f C — возврат на %7.3f MHz\n",  
                       (double)temp, (double)pll_overclock.clk_sys_hz / 1000000.0);
 #endif
     }  

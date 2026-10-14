@@ -1763,7 +1763,7 @@ void ensure_file_timestamps() {
     if (create_date == 0 || write_date == 0) {  
       // with_create = true: заполнит и creation, и write time/date  
       set_dir_timestamp(idx, true);  
-      Serial.printf("[Диск] %s: проставлены отсутствующие метки даты/времени\r\n", names[idx]);  
+      Serial.printf("[Диск   ] %s: проставлены отсутствующие метки даты/времени\r\n", names[idx]);  
       changed = true;  
     }  
   }  

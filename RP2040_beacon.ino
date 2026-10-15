@@ -655,7 +655,8 @@ void check_serial_commands() {
             }  
           }
 
-          else if (command.startsWith("jtty ")) {  
+          else if (command.length() > 5 &&  
+                   command.substring(0,5).equalsIgnoreCase("jtty ")) {
               if (is_transmitting || rx_active) {  
                   Serial.println(F("ОШИБКА: передатчик занят или идёт приём"));  
               } else {  
@@ -663,9 +664,10 @@ void check_serial_commands() {
                   if (txt.length() == 0) {  
                       Serial.println(F("ОШИБКА: jtty <текст до 80 симв.>"));  
                   } else {  
-                      is_transmitting = true;
+                      is_transmitting = true;  
+                      while (Serial.available() > 0) (void)Serial.read();   // снять хвост \r\n  
                       uint32_t jtty_hz = scheduled_freq_hz ? scheduled_freq_hz : strtoul(my_freq_jtty_var.c_str(), nullptr, 10);  
-                      prepare_jtty_frequencies(jtty_hz);
+                      prepare_jtty_frequencies(jtty_hz);  
                       jtty_send_string(txt.c_str());
                       SI_POWER_OFF(); 
                       dev_TX_state = false;

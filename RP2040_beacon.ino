@@ -1916,6 +1916,22 @@ void loop() {
     }    
   }
 
+  // =========================================================================
+  // РЕЖИМ 254. ЦЕПОЧКА
+  // =========================================================================
+  // Проверка запуска трехмодовой цепочки из расписания
+  if ((is_time_to_transmit(254) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
+       Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
+       is_transmitting = true;
+       tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
+       usr_chain_state = USR_START_CW; // Толкаем ваш штатный автомат, он всё сделает сам!
+  }
+
+
+  delay(1); 
+}
+
+
 
 // RP2040_beacon.ino — выравнивание колонок в отчёте [SCAN_RESULT]  
 static String fmt_dev(const char* name, const char* addr, int sda, int scl) {  

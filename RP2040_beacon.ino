@@ -185,6 +185,9 @@ extern uint8_t rtc_sec;
 // Функция проверки и обработки текстовых команд с локальным эхом
 extern void update_info_config_from_console(String marker, String new_value);
 
+void jtty_selftest(void);   // jtty_modem.cpp
+
+
 void check_serial_commands() {  
   static char cmd_buffer[64];  
   static size_t buf_idx = 0;  
@@ -622,6 +625,11 @@ void check_serial_commands() {
                           vfo_max_clk_sys_hz / 1e6,  
                           (unsigned long)(vfo_max_pll_vco_hz / 1000000UL),  
                           src); 
+          }
+
+          // тест JTTY-кодека
+          else if (command.equalsIgnoreCase("test jtty")) {
+            jtty_selftest();
           }
 
           else if (command.startsWith("setparam ")) {

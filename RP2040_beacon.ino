@@ -186,7 +186,7 @@ extern uint8_t rtc_sec;
 extern void update_info_config_from_console(String marker, String new_value);
 
 void jtty_selftest(void);   // jtty_modem.cpp
-
+extern void jtty_selftest_pack();
 
 void check_serial_commands() {  
   static char cmd_buffer[64];  
@@ -631,6 +631,8 @@ void check_serial_commands() {
           else if (command.equalsIgnoreCase("test jtty")) {
             jtty_selftest();
           }
+
+          else if (command.equalsIgnoreCase("test jtty pack")) { jtty_selftest_pack(); }
 
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);

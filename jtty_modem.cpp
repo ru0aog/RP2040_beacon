@@ -120,18 +120,18 @@ static int32_t nhash_bytes(const void* key, size_t length, int32_t initval) {
         nh_mix(a,b,c); k += 12; length -= 12;  
     }  
     switch (length) {  
-        case 12: c += (uint32_t)k[11]<<24; /* fall */  
-        case 11: c += (uint32_t)k[10]<<16;  
-        case 10: c += (uint32_t)k[9]<<8;  
-        case 9:  c += k[8];  
-        case 8:  b += (uint32_t)k[7]<<24;  
-        case 7:  b += (uint32_t)k[6]<<16;  
-        case 6:  b += (uint32_t)k[5]<<8;  
-        case 5:  b += k[4];  
-        case 4:  a += (uint32_t)k[3]<<24;  
-        case 3:  a += (uint32_t)k[2]<<16;  
-        case 2:  a += (uint32_t)k[1]<<8;  
-        case 1:  a += k[0]; break;  
+        case 12: c += (uint32_t)k[11]<<24; /* fall through */  
+        case 11: c += (uint32_t)k[10]<<16; /* fall through */  
+        case 10: c += (uint32_t)k[9]<<8;   /* fall through */  
+        case 9:  c += k[8];                /* fall through */  
+        case 8:  b += (uint32_t)k[7]<<24;  /* fall through */  
+        case 7:  b += (uint32_t)k[6]<<16;  /* fall through */  
+        case 6:  b += (uint32_t)k[5]<<8;   /* fall through */  
+        case 5:  b += k[4];                /* fall through */  
+        case 4:  a += (uint32_t)k[3]<<24;  /* fall through */  
+        case 3:  a += (uint32_t)k[2]<<16;  /* fall through */  
+        case 2:  a += (uint32_t)k[1]<<8;   /* fall through */  
+        case 1:  a += k[0]; break;
         case 0:  return (int32_t)(c & 32767);  
     }  
     nh_final(a,b,c);  
@@ -706,4 +706,121 @@ void jtty_selftest(void)
   
     Serial.printf("[JTTY TEST] %d/%d passed\n\n", pass, total);  
 }
+
+
+
+
+
+// Мини-фреймворк: expect_pack(text, want_nf, i2a, n2a, i2b, n2b)  
+// -1 = не проверять. Счётчик pass/fail как в jtty_selftest.  
+  
+static int tp_pass, tp_fail;  
+  
+static void expect_pack(const char* text, int want_nf,  
+                        int i2a, int n2a, int i2b, int n2b, int i2c = -1)
+
+{  
+    char msg[81];  
+    strncpy(msg, text, 80); msg[80] = 0;  
+    JttyFrameList fl;  
+    bool ok = jtty_pack_message(text, &fl, JTTY_EXCHANGE_UNKNOWN, -1);
+    tp_pass++;  
+    if (!ok) { Serial.printf("  FAIL pack \"%s\"\n", text); tp_fail++; tp_pass--; return; }  
+    if (fl.nframes != want_nf) {  
+        Serial.printf("  FAIL nf \"%s\": want %d got %d\n", text, want_nf, fl.nframes);  
+        tp_fail++; tp_pass--; return;  
+    }  
+    // биты: i2 = n32&3, n2 = (n32>>2)&3; n32 = payload>>2  
+    auto low4 = [](uint64_t pl, int& i2, int& n2){  
+        uint32_t n32 = (uint32_t)(pl >> 2);  
+        i2 = n32 & 3; n2 = (n32 >> 2) & 3;  
+    };  
+    // reserved bit 33 и EOM  
+    for (int i = 0; i < fl.nframes; i++) {  
+        if (fl.frames[i] & 2ULL) { Serial.printf("  FAIL reserved bit \"%s\" f%d\n", text, i); tp_fail++; tp_pass--; }  
+        bool eom = fl.frames[i] & 1ULL;  
+        if (eom != (i == fl.nframes - 1)) { Serial.printf("  FAIL eom \"%s\" f%d\n", text, i); tp_fail++; tp_pass--; }  
+    }  
+    if (want_nf >= 1) { int a,b; low4(fl.frames[0], a, b);  
+        if ((i2a >= 0 && a != i2a) || (n2a >= 0 && b != n2a)) {
+            Serial.printf("  FAIL f1 \"%s\": want %d.%d got %d.%d\n", text, i2a, n2a, a, b);  
+            tp_fail++; tp_pass--; } }  
+    if (want_nf >= 2 && i2b >= 0) { int a,b; low4(fl.frames[1], a, b);  
+        if (a != i2b || (n2b >= 0 && b != n2b)) {  
+            Serial.printf("  FAIL f2 \"%s\": want %d.%d got %d.%d\n", text, i2b, n2b, a, b);  
+            tp_fail++; tp_pass--; } }  
+}  
+  
+void jtty_selftest_pack()  
+{  
+    tp_pass = tp_fail = 0;  
+    // основная таблица из test_jtty_pack (без профиля)  
+    expect_pack("CQ KA1ABC CQ",            1, 0, 0, -1, -1);  
+    expect_pack("CQ K1ABC CQ",             1, 0, 0, -1, -1);  
+    expect_pack("K1A",                     1, 0, 1, -1, -1);   // bare call? — сверить: 'K1A' нестандартный → TEXT5? Эталон говорит 0.1  
+    expect_pack("WB9XYZ",                  1, 0, 1, -1, -1);  
+    expect_pack("TU WB9XYZ CQ",            1, 0, 2, -1, -1);  
+    expect_pack("WB9XYZ TU",               1, 0, 3, -1, -1);  
+    expect_pack("WB9XYZ AGN?",             1, 1, 0, -1, -1);  
+    expect_pack("TU NOW WB9XYZ",           1, 1, 1, -1, -1);  
+    expect_pack("WB9XYZ TU CQ KA1ABC CQ",  2, 0, 3,  0,  0);  
+    expect_pack("K1ABC TU NOW W1XYZ",      2, 0, 1,  1,  1);  
+    expect_pack("WB9XYZ 599 123",          2, 0, 1,  2, -1);  
+    expect_pack("599 MA",                  1, 2, -1, -1, -1);  
+    expect_pack("599 FN42",                1, 2, -1, -1, -1);  
+    expect_pack("FN42",                    1, 2, -1, -1, -1);  
+    expect_pack("1D EMA",                  1, 2, -1, -1, -1);  
+    expect_pack("32F EMA",                 1, 2, -1, -1, -1);  
+    expect_pack("1F DX",                   1, 2, -1, -1, -1);  
+    expect_pack("0",                       1, 2, -1, -1, -1);  
+    expect_pack("131071",                  1, 2, -1, -1, -1);  
+    expect_pack("599 131071",              1, 2, -1, -1, -1);  
+    expect_pack("599 001",                 2, -1, -1, -1, -1);  
+    expect_pack("599 05",                  2, -1, -1, -1, -1);  
+    expect_pack("599 BRUCE",               2, -1, -1, -1, -1);  
+    expect_pack("131072",                  2, 3, -1,  3, -1);  
+    expect_pack("000001",                  2, 3, -1,  3, -1);  
+    expect_pack("01D EMA",                 2, 3, -1,  3, -1);  
+    expect_pack("1G EMA",                  2, 3, -1,  3, -1);  
+    expect_pack("K1ABC 1D EMAX QSL TU",    4, 0, 1,  3, -1);  
+    expect_pack("599 SA00",                2, -1, -1, -1, -1);  
+    expect_pack("599 XYZ",                 1, 2, -1, -1, -1);  
+    expect_pack("599 0AB",                 2, -1, -1, -1, -1);  
+    expect_pack("CQ K1ABC CQ!",            3, -1, -1, -1, -1);  
+    expect_pack("TEST WB9XYZ",             2, 3, -1,  0,  1);  
+    expect_pack("HI WB9XYZ",               2, 3, -1,  3, -1);  
+    expect_pack("K1ABC HELLO",             2, 0, 1,  3, -1);  
+    expect_pack("TEST AGN NR",             2, 3, -1,  2, -1);  
+    expect_pack("599 A",                   1, 3, -1, -1, -1);  
+    expect_pack("A599 MA",                 2, 3, -1,  3, -1);  
+    expect_pack("VP2/KF2GHI",              2, 3, -1,  3, -1);  
+    expect_pack("QU1RK",                   1, 3, -1, -1, -1);  
+    expect_pack("TU QU1RKP CQ",            3, 2, -1,  3, -1);  
+    expect_pack("WB9XYZABC",               2, 3, -1,  3, -1);  
+    expect_pack("K1A A",                   1, 3, -1, -1, -1);  
+    expect_pack("PSE AGN NR",              2, -1, -1, -1, -1);  
+    expect_pack("AGN NR PSE",              2, 2, -1,  3, -1);  
+    // CONTROL-фразы: каждая должна дать 1 кадр с family=4/misc=CONTROL  
+    static const char* ctrl[18] = {  
+        "AGN?","CALL?","AGN CALL","NR?","AGN NR","EXCH?","STATE?","SECTION?",  
+        "ZONE?","GRID?","RPRT?","QSL TU","TU","QRZ?","QSO B4","WAIT","NIL?","OK?"};  
+    for (int i = 0; i < 18; i++) {  
+        tp_pass++;  
+        JttyFrameList fl;  
+        if (!jtty_pack_message(ctrl[i], &fl, JTTY_EXCHANGE_UNKNOWN, -1) || fl.nframes != 1) {  
+            Serial.printf("  FAIL ctrl %d \"%s\"\n", i, ctrl[i]); tp_fail++; tp_pass--; continue;  
+        }  
+        uint32_t n32 = (uint32_t)(fl.frames[0] >> 2);  
+        if ((n32 & 3) != 2 || ((n32 >> 2) & 7) != 4 ||  
+            ((n32 >> 16) & 0x7F) != (uint32_t)i) {  
+            Serial.printf("  FAIL ctrlbits %d \"%s\" n32=%08lX\n", i, ctrl[i], n32);  
+            tp_fail++; tp_pass--;  
+        }  
+    }  
+    Serial.printf("[JTTY PACK] %d passed, %d failed\n", tp_pass, tp_fail);  
+}
+
+
+
+
 

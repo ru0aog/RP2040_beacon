@@ -663,9 +663,13 @@ void check_serial_commands() {
                   if (txt.length() == 0) {  
                       Serial.println(F("ОШИБКА: jtty <текст до 80 симв.>"));  
                   } else {  
-                      is_transmitting = true;  
-                      jtty_send_string(txt.c_str());  
-                      is_transmitting = false;  
+                      is_transmitting = true;
+                      uint32_t jtty_hz = scheduled_freq_hz ? scheduled_freq_hz : strtoul(my_freq_jtty_var.c_str(), nullptr, 10);  
+                      prepare_jtty_frequencies(jtty_hz);
+                      jtty_send_string(txt.c_str());
+                      SI_POWER_OFF(); 
+                      dev_TX_state = false;
+                      is_transmitting = false;
                   }  
               }  
           }
@@ -1896,7 +1900,7 @@ void loop() {
                    : strtoul(my_freq_jtty_var.c_str(), NULL, 10);    
         if (jtty_hz == 0) jtty_hz = 14079000;    
     
-        prepare_jtty_frequencies(jtty_hz);    
+        prepare_jtty_frequencies(jtty_hz);
     
         // JTTY: CQ-кадр с позывным (CALL-атом subtype 0)  
         if (!pc_file_written && !soft_restart_flag) {

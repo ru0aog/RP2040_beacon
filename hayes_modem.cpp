@@ -75,6 +75,7 @@
 #include "ifkp_modem.h"
 #include "olivia_modem.h"
 #include "thor_modem.h"
+#include "jtty_modem.h"
 #include "lcd.h"
 
 extern bool soft_restart_flag;
@@ -107,11 +108,12 @@ enum HayesAirMode : uint8_t {
   AIR_MFSK16   = 7,
   AIR_DOMINOEX = 8,
   AIR_FSQ      = 9,
+  AIR_JTTY     = 10, 
   AIR_COUNT  
 };  
   
 static const char* const AIR_MODE_NAME[AIR_COUNT] =  
-  { "LOOP", "CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA", "MFSK16", "DOMINOEX", "FSQ" };
+  { "LOOP", "CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA", "MFSK16", "DOMINOEX", "FSQ", "JTTY" };
 
 struct HayesProfile {
   bool    echo;          // E
@@ -225,6 +227,7 @@ static uint32_t default_air_freq(HayesAirMode mode) {
     case AIR_MFSK16:    hz = strtoul(my_freq_mfsk16_var.c_str(), NULL, 10);     if (hz == 0) hz = 3601307; break;
     case AIR_DOMINOEX:  hz = strtoul(my_freq_dominoex_var.c_str(), NULL, 10);   if (hz == 0) hz = 3601307; break;
     case AIR_FSQ:       hz = strtoul(my_freq_fsq_var.c_str(), NULL, 10);        if (hz == 0) hz = 3601307; break;
+    case AIR_JTTY:      hz = strtoul(my_freq_jtty_var.c_str(), NULL, 10);       if (hz == 0) hz = 14079000; break;  
     default: break;
   }
   return hz;
@@ -327,10 +330,14 @@ static void transmit_data_line() {
         prepare_dominoex_frequencies(air_freq_hz);
         dominoex_send_string(text + "\r\n");
         break;
-      case AIR_FSQ:
-        prepare_fsq_frequencies(air_freq_hz);
-        fsq_send_string(text + "\r\n");
-        break;
+      case AIR_FSQ:  
+        prepare_fsq_frequencies(air_freq_hz);  
+        fsq_send_string(text + "\r\n");  
+        break;  
+      case AIR_JTTY:  
+        prepare_jtty_frequencies(air_freq_hz);  
+        jtty_send_string(text.c_str());  
+        break;  
       default:
         break;
     }
@@ -440,26 +447,42 @@ static void dial(const char* p) {
   uint8_t  mode;  
   uint32_t freq = 0;  
   
-  if (!has_comma && digit_count > 1) {  
-    // Набор БЕЗ указания режима (например, ATD1234567890): трактуем как  
-    // обычный "телефонный номер" -> выходим в эфир RTTY на частотах из INFO.TXT.  
-    // MARK подставит default_air_freq(AIR_RTTY) ниже (my_rtty_mark_var),  
-    // SHIFT/INVERT читаются в transmit_data_line (my_rtty_shift_var / my_rtty_invert_var).  
-    mode = AIR_RTTY;  
-    freq = 0;   // 0 -> default_air_freq(AIR_RTTY) возьмёт RTTY MARK из INFO.TXT  
-  } else {  
-    const char* q = number;  
-    while (*q == ',') q++;  
-    if (*q < '0' || *q > '9') { send_result(RES_ERROR); return; }  
-    mode = *q++ - '0';  
-    if (mode >= AIR_COUNT) { send_result(RES_NO_CARRIER); return; }  
-    for (; *q; q++) {  
-      if (*q >= '0' && *q <= '9') {  
-        freq = freq * 10 + (*q - '0');  
-        if (freq > 300000000UL) { send_result(RES_ERROR); return; }  
-      }  
+// Стало:  
+  if (!has_comma && digit_count > 1 && !(digit_count == 2 && number[0] == '1')) {  
+    // "10" — валидный режим (JTTY); прочие многозначные наборы — "телефонный  
+    // номер" -> RTTY на частотах из INFO.TXT.  
+    mode = AIR_RTTY;    
+    freq = 0;  
+  } else {    
+    const char* q = number;    
+    while (*q == ',') q++;    
+    if (*q < '0' || *q > '9') { send_result(RES_ERROR); return; }    
+    // режим = все ведущие цифры (1 или 2 знака), остальное — частота  
+    long m = 0;  
+    const char* d = q;  
+    while (*d >= '0' && *d <= '9' && d - q < 2 && m * 10 + (*d - '0') < AIR_COUNT) {  
+        m = m * 10 + (*d - '0'); d++;  
     }  
-  }  
+    // однозначный режим приоритетнее: "15" = CW на 5 Гц? нет — трактуем "1",5  
+    if (m >= AIR_COUNT) { m = *q - '0'; d = q + 1; }  
+    // пробуем двузначный только если он валиден И остаток пуст или запятая  
+    {  
+        long m2 = 0;  
+        if (q[0] >= '0' && q[0] <= '9' && q[1] >= '0' && q[1] <= '9')  
+            m2 = (q[0]-'0')*10 + (q[1]-'0');  
+        if (m2 >= 10 && m2 < AIR_COUNT) { m = m2; d = q + 2; }  
+        else { m = q[0]-'0'; d = q + 1; }  
+    }  
+    q = d;  
+    mode = (uint8_t)m;  
+    if (mode >= AIR_COUNT) { send_result(RES_NO_CARRIER); return; }    
+    for (; *q; q++) {    
+      if (*q >= '0' && *q <= '9') {    
+        freq = freq * 10 + (*q - '0');    
+        if (freq > 300000000UL) { send_result(RES_ERROR); return; }    
+      }    
+    }    
+  }
   
   if (mode != AIR_LOOP) {  
     if (pc_file_written)  { send_result(RES_NO_CARRIER); return; }  

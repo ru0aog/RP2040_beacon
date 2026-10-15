@@ -1904,19 +1904,44 @@ void loop() {
     
         prepare_jtty_frequencies(jtty_hz);
     
-        // JTTY: CQ-кадр с позывным (CALL-атом subtype 0)  
+        // JTTY: позывной и локатор  
         if (!pc_file_written && !soft_restart_flag) {
-          String call_msg = "CQ " + my_call_variable + " CQ"; 
+          String call_msg = "VVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable;
           Serial.print(F("[ЭФИР_JTTY] Вызов: ")); Serial.println(call_msg);  
           jtty_send_string(call_msg.c_str());  
-        }    
-    
+        }
+   
         // JTTY: основной текст (TEXT5-кадры)  
         if (!pc_file_written && !soft_restart_flag && my_text_variable.length() > 0) {    
           Serial.print(F("[ЭФИР_JTTY] Текст: ")); Serial.println(my_text_variable);  
           jtty_send_string(my_text_variable.c_str());
         }    
-    
+
+        // JTTY: первая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();
+          Serial.print(F("[ЭФИР_JTTY] Текст: ")); Serial.println(telemetry);  
+          jtty_send_string(telemetry.c_str());
+        }  
+
+        // JTTY: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            String telemetry = get_climate_telemetry();  
+            Serial.print(F("[ЭФИР_JTTY] Текст: ")); Serial.println(telemetry);  
+            jtty_send_string(telemetry.c_str());
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+
+        // JTTY: завершение  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String over_msg = "OVER";
+          Serial.print(F("[ЭФИР_JTTY] Вызов: ")); Serial.println(over_msg);  
+          jtty_send_string(over_msg.c_str());  
+        }  
+
         if (!pc_file_written && !soft_restart_flag) {    
           uint32_t jtty_session_duration_sec = (millis() - jtty_session_start_ms) / 1000;    
           update_scheduler();    

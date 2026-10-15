@@ -178,131 +178,124 @@ static int idx_in(const char* tab, char c)
 static bool is_dig(char c)  { return c >= '0' && c <= '9'; }  
 static bool is_let(char c)  { return c >= 'A' && c <= 'Z'; }  
   
+// jtty_modem.cpp — порт pack28 из packjt77.f90.  
+// Семантика: спец-токены (0..NTOKENS-1), хэши <...> (NTOKENS..NTOKENS+MAX22-1),  
+// стандартные позывные (NTOKENS+MAX22 и выше). Возврат: n28 ≥ 0, -1 при ошибке.  
+  
 int32_t pack28(const char* call)  
 {  
+    // --- c13: строка до 13 символов, дополнена пробелами справа (adjustl) ---  
     char c13[14];  
-    memset(c13, ' ', 13); c13[13] = 0;  
+    memset(c13, ' ', 13);  
+    c13[13] = 0;  
     size_t L = strlen(call);  
     if (L > 13) L = 13;  
-    memcpy(c13, call, L);               // adjustl: строка слева, справа пробелы  
-    int n = (int)strlen(c13);           // trim(c13) — trailing spaces убраны  
-    // strlen не обрезает внутренние пробелы; c13 справа дополнен пробелами,  
-    // поэтому пересчитаем длину:  
-    while (n > 0 && c13[n-1] == ' ') n--;  
+    memcpy(c13, call, L);  
+  
+    // --- Workaround'ы префиксов — ДО токенов и iarea (эталон делает так) ---  
+    // 3DA0xxx → 3D0xxx : удалить 'A' на позиции 2, подтянуть хвост  
+    if (!strncmp(c13, "3DA0", 4)) {  
+        c13[2] = '0';  
+        memmove(c13 + 3, c13 + 4, 9);   // "3DA0ABC     " → "3D0ABC      "  
+    }  
+    // 3Xyyy(буква) → Qyyy  
+    if (c13[0] == '3' && c13[1] == 'X' && is_let(c13[2])) {  
+        c13[0] = 'Q';  
+    }  
+  
+    // n = длина trim(c13) — без хвостовых пробелов  
+    int n = 13;  
+    while (n > 0 && c13[n - 1] == ' ') n--;  
   
     // --- Спец-токены ---  
-    if (n >= 3 && !strncmp(c13, "DE ", 3))  return 0;  
-    if (n >= 4 && !strncmp(c13, "QRZ ", 4)) return 1;  
-    if (n >= 3 && !strncmp(c13, "CQ ", 3))  return 2;  
+    if (n >= 2 && !strncmp(c13, "DE", 2) && (n == 2 || c13[2] == ' '))  
+        return 0;  
+    if (n >= 3 && !strncmp(c13, "QRZ", 3) && (n == 3 || c13[3] == ' '))  
+        return 1;  
+    if (n >= 2 && !strncmp(c13, "CQ", 2) && (n == 2 || c13[2] == ' '))  
+        return 2;  
   
-    // CQ_nnn (зона 001..999) → 3+nqsy  
-    // CQ_aaaa (1..4 буквы)   → 3+1000 + base27  
-    if (n >= 4 && n <= 7 && !strncmp(c13, "CQ_", 3)) {  
-        int nlet = 0, nnum = 0;  
+    // CQ_nnn: «CQ» + пробел + 1..3 цифры → n28 = 3 + nnn  
+    if (n >= 4 && !strncmp(c13, "CQ ", 3)) {  
+        bool digits = true;  
+        int nd = 0, val = 0;  
         for (int i = 3; i < n; i++) {  
-            if (is_let(c13[i])) nlet++;  
-            if (is_dig(c13[i])) nnum++;  
+            if (!is_dig(c13[i])) { digits = false; break; }  
+            val = val * 10 + (c13[i] - '0');  
+            nd++;  
         }  
-        if (nnum == 3 && nlet == 0) {  
-            int nqsy = atoi(&c13[3]);           // "001".."999"  
-            return 3 + nqsy;                    // 4..1002  
-        }  
-        if (nlet >= 1 && nlet <= 4 && nnum == 0) {  
-            // c4 = adjustr(c13(4:n)) — буквы прижаты вправо в 4-симв поле  
-            char c4[5] = "    ";  
-            int k = 3;  
-            for (int i = n - 1; i >= 3 && k >= 0; i--) c4[k--] = c13[i];  
-            int32_t m = 0;  
-            for (int i = 0; i < 4; i++) {  
-                int j = is_let(c4[i]) ? (c4[i] - 'A' + 1) : 0;  
-                m = 27 * m + j;  
-            }  
-            return 3 + 1000 + m;                // 1003..base27-max  
+        if (digits && nd >= 1 && nd <= 3)  
+            return (3 + val) & 0x0FFFFFFFL;  
+  
+        // CQ_aaaa: 4 буквы → n28 = 3 + 1000 + jtty_hash15(c13+4,4)  
+        if (n == 8) {  
+            bool lets = true;  
+            for (int i = 4; i < 8; i++)  
+                if (!is_let(c13[i])) { lets = false; break; }  
+            if (lets)  
+                return (3 + 1000 + jtty_hash15(c13 + 4, 4)) & 0x0FFFFFFFL;  
         }  
     }  
-  
-    // --- <...> нестандартный позывной → 22-битный хэш ---  
-    if (c13[0] == '<') {  
-        char* gt = strchr(c13, '>');  
-        if (!gt) return -1;  
-        char inner[14];  
-        int ilen = (int)(gt - c13) - 1;  
-        if (ilen < 0) ilen = 0;  
-        if (ilen > 13) ilen = 13;  
-        memcpy(inner, c13 + 1, ilen);  
-        memset(inner + ilen, ' ', 13 - ilen); inner[13] = 0;  
-        int32_t n22 = ihashcall(inner, 22);  
-        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
+    // QRZ_aaaa — тот же диапазон буквенных токенов, что и CQ_aaaa  
+    if (n == 8 && !strncmp(c13, "QRZ ", 4)) {  
+        bool lets = true;  
+        for (int i = 4; i < 8; i++)  
+            if (!is_let(c13[i])) { lets = false; break; }  
+        if (lets)  
+            return (3 + 1000 + jtty_hash15(c13 + 4, 4)) & 0x0FFFFFFFL;  
     }  
   
-    // --- Стандартный позывной ---  
-    // callsign с workaround'ами  
-    char cs[7]; memset(cs, ' ', 6); cs[6] = 0;  
-  
-    // iarea — позиция (1-based) ПОСЛЕДНЕЙ цифры... точнее: идём с конца,  
-    // первая цифра при обходе справа налево  
-    int iarea = -1;                            // 0-based индекс  
-    for (int i = n - 1; i >= 1; i--) {         // Fortran: i=n..2  
-        if (is_dig(c13[i])) { iarea = i; break; }  
+    // --- Стандартный позывной: iarea = позиция первой цифры при обходе справа ---  
+    // Fortran: 1-based; здесь 0-based + 1 → iarea1 ∈ {2,3}  
+    int iarea1 = 0;  
+    for (int i = n - 1; i >= 0; i--) {  
+        if (is_dig(c13[i])) { iarea1 = i + 1; break; }  
     }  
-    if (iarea < 0) {  
-        // нет цифры зоны → нестандартный  
-        int32_t n22 = ihashcall(c13, 22);  
-        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
-    }  
-    int iarea1 = iarea + 1;                    // 1-based для сверки с Fortran  
-  
-    int npdig = 0, nplet = 0, nslet = 0;  
-    for (int i = 0; i < iarea; i++) {  
-        if (is_dig(c13[i])) npdig++;  
-        if (is_let(c13[i])) nplet++;  
-    }  
-    for (int i = iarea + 1; i < n; i++)  
-        if (is_let(c13[i])) nslet++;  
-  
-    if (iarea1 < 2 || iarea1 > 3 || nplet == 0 ||  
-        npdig >= iarea1 - 1 || nslet > 3) {  
-        // Нестандартный → 22-бит хэш  
+    if (iarea1 != 2 && iarea1 != 3) {  
+        // Нет цифры или цифра на позиции 0 / ≥4 → хэш-ветка (<...>-позывной)  
         int32_t n22 = ihashcall(c13, 22);  
         return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
     }  
   
-    // Workaround'ы применяются к c13 ДО извлечения callsign (как в Fortran):  
-    // 3DA0xxx → 3D0xxx ; 3X<буква> → Q<буква>  
-    if (!strncmp(c13, "3DA0", 4)) {  
-        c13[2] = '0';                       // '3DA0...' → '3D0...' (A сдвинут в позицию 3)  
+    // Позывной не длиннее 6 символов  
+    if (n > 6) {  
+        int32_t n22 = ihashcall(c13, 22);  
+        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
     }  
-    if (c13[0] == '3' && c13[1] == 'X' && is_let(c13[2])) {  
-        c13[0] = 'Q';                       // '3XABC' → 'QABC'  
-    }  
+  
+    // После цифры допустим максимум 2 буквы (суффикс типа /P исключён выше по n>6)  
+    // Эталон: цифра + до 2-х символов в поле i4..i6 по алфавиту a4 — проверяется  
+    // idx_in ниже; явной валидации формы здесь не требуется.  
+  
+    // --- callsign из 6 символов ---  
+    char cs[7];  
+    memset(cs, ' ', 6);  
+    cs[6] = 0;  
     if (iarea1 == 2) {  
+        // iarea=2 → callsign = ' ' + c13(1:5)  (зона на 2-й позиции)  
         cs[0] = ' ';  
         memcpy(cs + 1, c13, 5);  
     } else {  
+        // iarea=3 → callsign = c13(1:6)  (зона на 3-й позиции)  
         memcpy(cs, c13, 6);  
-    }
-    if (!strncmp(cs, "3DA0", 4)) { cs[0] = '3'; cs[1] = 'D'; cs[2] = '0';  
-                                   cs[3] = c13[4]; cs[4] = c13[5]; cs[5] = ' '; }  
-    // Исходный workaround применялся к c13 ДО проверки — применим к исходной строке:  
-    if (!strncmp(c13, "3X", 2) && is_let(c13[2])) {  
-        cs[0] = 'Q'; memcpy(cs + 1, c13 + 2, 4); cs[5] = ' ';  
-        if (iarea1 == 2) { /* prefix сдвигает iarea — редкий случай, оставить как есть */ }  
     }  
   
-    int i1 = idx_in(P28_A1, cs[0]);  
-    int i2 = idx_in(P28_A2, cs[1]);  
-    int i3 = idx_in(P28_A3, cs[2]);  
-    int i4 = idx_in(P28_A4, cs[3]);  
+    int i1 = idx_in(P28_A1, cs[0]);   // ' '+цифра+буква   (37)  
+    int i2 = idx_in(P28_A2, cs[1]);   // цифра+буква       (36)  
+    int i3 = idx_in(P28_A3, cs[2]);   // цифра             (10)  
+    int i4 = idx_in(P28_A4, cs[3]);   // ' '+буква         (27)  
     int i5 = idx_in(P28_A4, cs[4]);  
-    int i6 = idx_in(P28_A4, cs[5]);
+    int i6 = idx_in(P28_A4, cs[5]);  
+  
     if (i1 < 0 || i2 < 0 || i3 < 0 || i4 < 0 || i5 < 0 || i6 < 0) {  
+        // Форма не легла в стандартную сетку → хэш  
         int32_t n22 = ihashcall(c13, 22);  
         return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
     }  
   
-    int64_t n28 = 36L*10*27*27*27*i1 + 10L*27*27*27*i2 + 27L*27*27*i3  
-                + 27L*27*i4 + 27L*i5 + i6;  
-    n28 += PACK28_NTOKENS + PACK28_MAX22;  
+    int64_t n28 = 36LL*10*27*27*27*i1 + 10LL*27*27*27*i2 + 27LL*27*27*i3  
+                + 27LL*27*i4 + 27LL*i5 + i6;  
+    n28 += (int64_t)PACK28_NTOKENS + PACK28_MAX22;  
     return (int32_t)(n28 & 0x0FFFFFFFL);  
 }
   

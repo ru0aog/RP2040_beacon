@@ -459,7 +459,7 @@ static void create_default_fat_with_info_file() {
     "[FREQ_JTTY]=10001500\r\n\r\n"
     "=== МАТРИЦА РАСПИСАНИЯ ПЕРЕДАЧ ===\r\n"
     "// ДНИ: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс, 0=Каждый день\r\n"
-    "// МОДЫ: CW, RTTY, IFKP, OLIVIA, CONTESTIA, THOR, MFSK16, DOMINOEX, FSQ, SEQ (Сквозной цикл CW->RTTY->IFKP)\r\n"
+    "// МОДЫ: CW, RTTY, IFKP, OLIVIA, CONTESTIA, THOR, MFSK16, DOMINOEX, FSQ, JTTY, SEQ (Сквозной цикл CW->RTTY->IFKP)\r\n"
     "// Формат одиночной:     [TASK_01]=ДНИ,ЧЧ:ММ,ЧАСТОТА_ГЦ,МОДА\r\n"
     "// Формат периодической: [TASK_01]=ДНИ,ЧЧ:ММ_СТАРТ/ЧЧ:ММ_КОНЕЦ/ИНТЕРВАЛ,ЧАСТОТА_ГЦ,МОДА\r\n"
     "// Базовое расписание (Ежедневно) ---\r\n"
@@ -1400,7 +1400,7 @@ void log_file_clear() {
   set_dir_timestamp(2, false);
 
   save_ram_to_flash();
-  Serial.println("[Журнал]  Файл LOG.TXT успешно очищен.");
+  Serial.println("[Журнал ]  Файл LOG.TXT успешно очищен.");
   // Сообщаем ОС, что накопитель переподключен
   remount_usb_disk();
 }
@@ -1462,7 +1462,7 @@ void log_file_write_line(String message) {
   uint32_t msg_len = formatted_msg.length();
 
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {
-    Serial.println("[Журнал]  Предупреждение: Лог 100 Кб заполнен! Автоматическая очистка...");
+    Serial.println("[Журнал ]  Предупреждение: Лог 100 Кб заполнен! Автоматическая очистка...");
     log_file_clear(); 
     current_size = ram_disk_buffer[log_entry_offset + 28] | (ram_disk_buffer[log_entry_offset + 29] << 8);
   }
@@ -1478,7 +1478,7 @@ void log_file_write_line(String message) {
 
   set_dir_timestamp(2,false);
   save_ram_to_flash();
-  Serial.print("[Журнал]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
+  Serial.print("[Журнал ]  Строка добавлена. Объем лога: "); Serial.print(new_size); Serial.println(" байт.");
 
   // Сообщаем ОС, что накопитель переподключен
   remount_usb_disk();
@@ -1733,7 +1733,7 @@ void log_file_write_block(const String& block) {
   uint32_t msg_len = formatted.length();  
   
   if (current_size + msg_len >= (LOG_MAX_BYTES - 1)) {  
-    Serial.println("[Журнал]  Лог заполнен! Автоочистка...");  
+    Serial.println("[Журнал ]  Лог заполнен! Автоочистка...");  
     log_file_clear();   // если внутри есть save+remount — они выполнятся лишний раз  
     // перечитываем размер — clear оставляет заголовок длиной header_len  
     current_size = ram_disk_buffer[log_entry_offset + 28] |  
@@ -1753,7 +1753,7 @@ void log_file_write_block(const String& block) {
   set_dir_timestamp(2, false);
 
   save_ram_to_flash();              // <-- один раз на весь блок  
-  Serial.print("[Журнал]  Блок добавлен, объем: ");  
+  Serial.print("[Журнал ]  Блок добавлен, объем: ");  
   Serial.println(new_size);  
   
   remount_usb_disk();  

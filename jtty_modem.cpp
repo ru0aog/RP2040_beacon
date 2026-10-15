@@ -89,7 +89,7 @@ static inline void nh_mix(uint32_t& a, uint32_t& b, uint32_t& c) {
     c-=b; c^=rot32(b,8);  b+=a;  
     a-=c; a^=rot32(c,16); c+=b;  
     b-=a; b^=rot32(a,19); a+=c;  
-    c-=b; c^=rot32(b,14); b+=a;  
+    c-=b; c^=rot32(b,4);  b+=a;
 }  
 
 static inline void nh_final(uint32_t& a, uint32_t& b, uint32_t& c) {  
@@ -99,7 +99,7 @@ static inline void nh_final(uint32_t& a, uint32_t& b, uint32_t& c) {
     c^=b; c-=rot32(b,16);  
     a^=c; a-=rot32(c,4);  
     b^=a; b-=rot32(a,14);  
-    c^=b; c-=rot32(b,4);  
+    c^=b; c-=rot32(b,24);
 }
   
 static int32_t nhash_bytes(const void* key, size_t length, int32_t initval) {  
@@ -611,7 +611,7 @@ void jtty_send_string(const char* str) {
 }
 
 static bool standard_call(const char* call) {  
-    return jtty_pack28(call) > (int32_t)(JTTY_NTOKENS + JTTY_MAX22);  
+    return pack28(call) > (int32_t)(JTTY_NTOKENS + JTTY_MAX22);  
 }
 
 

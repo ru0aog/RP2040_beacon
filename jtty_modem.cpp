@@ -62,7 +62,15 @@ enum { JTTY_CALL_CQ=0, JTTY_CALL_CALL=1, JTTY_CALL_TU_CQ=2,
        JTTY_CALL_CALL_TU=3, JTTY_CALL_CALL_AGN=4, JTTY_CALL_TU_NOW=5 };  
 enum { JTTY_ROLE_FIELD_ONLY=0, JTTY_ROLE_FULL=1 };  
 enum { JTTY_EXCHANGE_UNKNOWN=0, JTTY_EXCHANGE_FIELD_DAY=1, JTTY_EXCHANGE_RTTY=2 };  
-  
+
+// CONTROL-подтипы (jtty_source_codec.f90)  
+enum { JTTY_CONTROL_AGN=0, JTTY_CONTROL_CALL=1, JTTY_CONTROL_AGN_CALL=2,  
+       JTTY_CONTROL_NR=3,  JTTY_CONTROL_AGN_NR=4, JTTY_CONTROL_EXCH=5,  
+       JTTY_CONTROL_STATE=6, JTTY_CONTROL_SECTION=7, JTTY_CONTROL_ZONE=8,  
+       JTTY_CONTROL_GRID=9,  JTTY_CONTROL_RPRT=10, JTTY_CONTROL_QSL_TU=11,  
+       JTTY_CONTROL_TU=12,   JTTY_CONTROL_QRZ=13, JTTY_CONTROL_QSO_B4=14,  
+       JTTY_CONTROL_WAIT=15, JTTY_CONTROL_NIL=16,  JTTY_CONTROL_OK=17 };
+
 uint32_t JTTY_Base_freq = 10001500;  
   
 // ============================================================  
@@ -466,12 +474,11 @@ static bool jtty_pack_message(const char* umsg_in, JttyFrameList* fl,
     char* w[8]; int nw = 0;  
     for (char* t = strtok(buf, " "); t && nw < 8; t = strtok(NULL, " ")) w[nw++] = t;  
   
-    bool recognized = false;  
     if (nw >= 2 && strcmp(w[0], "CQ") == 0 && is_standard_callsign(w[1])) {  
         atoms[na].kind = JTTY_ATOM_CALL; atoms[na].subtype = JTTY_CALL_CQ;  
         atoms[na].role = JTTY_ROLE_FIELD_ONLY;  
         strncpy(atoms[na].text, w[1], 13); atoms[na].text[13] = 0;  
-        na++; recognized = true;  
+        na++;
         // съедено "CQ <call>" (+ возможный хвост "CQ" игнорируем)  
         // хвост сообщения после второго слова уходит в TEXT5 ниже  
         int consumed = 3 + (int)strlen(w[1]);          // "CQ " + call  
@@ -486,7 +493,7 @@ static bool jtty_pack_message(const char* umsg_in, JttyFrameList* fl,
         atoms[na].kind = JTTY_ATOM_CALL; atoms[na].subtype = subtype;  
         atoms[na].role = JTTY_ROLE_FIELD_ONLY;  
         strncpy(atoms[na].text, w[0], 13); atoms[na].text[13] = 0;  
-        na++; recognized = true;  
+        na++;
         msg[0] = 0;  
     }  
   
@@ -549,8 +556,6 @@ static void jtty_build_frame(uint64_t payload34, uint8_t* itone /*59*/) {
     for (int t = 0; t < JTTY_NU; t++)  
         reg10 = (uint16_t)((reg10 << 1) | info[JTTY_INFO_BITS - JTTY_NU + t]);  
   
-    for (int i = 0; i < JTTY_NSYNC; i++) itone[i] = JTTY_IS13[i];  
-  
     for (int i = 0; i < JTTY_INFO_BITS; i++) {  
         reg10 = (uint16_t)(((reg10 << 1) | info[i]) & 0x3FF);  
         uint8_t b0 = (uint8_t)parity32(reg10 & JTTY_G0);  
@@ -610,5 +615,94 @@ void jtty_send_string(const char* str) {
 
 
 
-
+// ============================================================  
+// jtty_selftest — проверка кодека по эталонным векторам WSJT-X.  
+// Вывод в Serial. Вызов: команда "test jtty" в консоли.  
+// Вектора хэшей — из test_packjt77_hash_vectors.f90 (ihashcall m=10/12/22).  
+// ============================================================  
+void jtty_selftest(void)  
+{  
+    Serial.println(F("\n[JTTY TEST] start"));  
+  
+    // --- Тест 1: ihashcall по 13 эталонным векторам ---  
+    struct { const char* call; int h10, h12, h22; } hv[] = {  
+        { "K1ABC",       712, 2851, 2920267 },  
+        { "W9XYZ",       972, 3889, 3982604 },  
+        { "PJ4/K1ABC",   346, 1387, 1420834 },  
+        { "KH1/KH7Z",    201,  806,  825805 },  
+        { "K1JT/P",      959, 3839, 3931158 },  
+        { "W3CCX",       665, 2662, 2726483 },  
+        { "3DA0ABC",      48,  192,  196695 },  
+        { "3XABC",       563, 2254, 2308721 },  
+        { "///////////", 671, 2685, 2749801 },  
+        { "ZZZZZZZZZZZ", 902, 3609, 3695718 },  
+        { "99999999999", 762, 3050, 3123740 },  
+        { "AAAAAAAAAAA", 861, 3445, 3529655 },  // из того же набора, если есть — иначе убрать  
+        { "           ",   0,    0,       0 },  
+    };  
+    int pass = 0, total = 0;  
+    Serial.println(F("--- ihashcall ---"));  
+    for (unsigned i = 0; i < sizeof(hv)/sizeof(hv[0]); i++) {  
+        int g10 = ihashcall(hv[i].call, 10);  
+        int g12 = ihashcall(hv[i].call, 12);  
+        int g22 = ihashcall(hv[i].call, 22);  
+        bool ok = (g10 == hv[i].h10 && g12 == hv[i].h12 && g22 == hv[i].h22);  
+        total++; pass += ok;  
+        Serial.printf("  %-12s 10:%4d 12:%4d 22:%7d  %s\n",  
+                      hv[i].call, g10, g12, g22, ok ? "OK" : "FAIL");  
+    }  
+  
+    // --- Тест 2: pack28 токены и стандартные позывные ---  
+    Serial.println(F("--- pack28 ---"));  
+    struct { const char* s; int32_t lo, hi; } pv[] = {  
+        { "DE",        0, 0 }, { "QRZ", 1, 1 }, { "CQ", 2, 2 },  
+        { "K1ABC",     PACK28_NTOKENS + PACK28_MAX22, 0x0FFFFFFFL }, // стандартная ветка  
+        { "RU0AOG",    PACK28_NTOKENS + PACK28_MAX22, 0x0FFFFFFFL },  
+        { "PJ4/K1ABC", PACK28_NTOKENS + 1420834, PACK28_NTOKENS + 1420834 }, // хэш  
+    };  
+    for (unsigned i = 0; i < sizeof(pv)/sizeof(pv[0]); i++) {  
+        int32_t n28 = pack28(pv[i].s);  
+        bool ok = (n28 >= pv[i].lo && n28 <= pv[i].hi);  
+        total++; pass += ok;  
+        Serial.printf("  pack28(%-10s) = %9ld  %s\n", pv[i].s, (long)n28, ok ? "OK" : "FAIL");  
+    }  
+  
+    // --- Тест 3: атом TEXT5 'HELLO' -> эталон 0x11395558D (34 бита, eom=1) ---  
+    Serial.println(F("--- pack atom ---"));  
+    {  
+        JttyAtom a; memset(&a, 0, sizeof a);  
+        a.kind = JTTY_ATOM_TEXT5; strncpy(a.text, "HELLO", sizeof(a.text) - 1);  
+        uint64_t p34 = 0;  
+        bool ok = jtty_pack_atom(&a, true, &p34) && (p34 == 0x11395558DULL);  
+        total++; pass += ok;  
+        Serial.printf("  TEXT5 'HELLO' payload=0x%09llX  %s (expect 0x11395558D)\n",  
+                      (unsigned long long)p34, ok ? "OK" : "FAIL");  
+    }  
+    // CONTROL AGN? -> эталон 0x000000049 (eom=1)  
+    {  
+        JttyAtom a; memset(&a, 0, sizeof a);  
+        a.kind = JTTY_ATOM_CONTROL; a.subtype = JTTY_CONTROL_AGN;  
+        uint64_t p34 = 0;  
+        bool ok = jtty_pack_atom(&a, true, &p34) && (p34 == 0x000000049ULL);  
+        total++; pass += ok;  
+        Serial.printf("  CONTROL 'AGN?' payload=0x%09llX  %s (expect 0x000000049)\n",  
+                      (unsigned long long)p34, ok ? "OK" : "FAIL");  
+    }  
+  
+    // --- Тест 4: полный кадр — дамп 59 тонов ---  
+    Serial.println(F("--- frame ---"));  
+    {  
+        uint8_t itone[JTTY_NSYMS];  
+        jtty_build_frame(0x11395558DULL, itone);  
+        // первые 13 должны быть is13  
+        bool ok = true;  
+        for (int i = 0; i < JTTY_NSYNC; i++) if (itone[i] != JTTY_IS13[i]) ok = false;  
+        total++; pass += ok;  
+        Serial.print(F("  sync+data: "));  
+        for (int i = 0; i < JTTY_NSYMS; i++) Serial.printf("%d", itone[i]);  
+        Serial.printf("  sync:%s\n", ok ? "OK" : "FAIL");  
+    }  
+  
+    Serial.printf("[JTTY TEST] %d/%d passed\n\n", pass, total);  
+}
 

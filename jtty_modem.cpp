@@ -321,9 +321,12 @@ static bool grid4_to_index(const char* g, int* idx) {
 }
 
 static int32_t jtty_pack28(const char* call);  
-static bool standard_call(const char* call);  
 static bool pos_incomplete(int len, int na);
-  
+
+static bool standard_call(const char* call) {  
+    return jtty_pack28(call) > (int32_t)(JTTY_NTOKENS + JTTY_MAX22);
+}  
+
 // pack_jtty_atom: атом + eom -> 34-битный payload (биты: n32<<2 | eom)  
 static bool jtty_pack_atom(const JttyAtom* atom, bool eom, uint64_t* payload34) {  
     uint32_t n32 = 0;  
@@ -610,9 +613,7 @@ void jtty_send_string(const char* str) {
     Serial.printf("[JTTY] передано кадров: %d\n", fl.nframes);  
 }
 
-static bool standard_call(const char* call) {  
-    return pack28(call) > (int32_t)(JTTY_NTOKENS + JTTY_MAX22);  
-}
+
 
 
 

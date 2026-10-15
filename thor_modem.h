@@ -16,6 +16,11 @@ extern uint8_t  DATA_MFSK[33][8];   // регистровые пакеты Si535
 // ---- Общий IFK/MFSK-движок ----
 void mfsk_prepare(uint32_t base_hz, double step_hz, uint8_t numtones); // сетка тонов (Si5351/PIO)
 bool mfsk_emit_tone(uint8_t tone, uint32_t symbol_us);                 // тон + дедлайн/LED/watchdog
+bool mfsk_wait_symbol(uint32_t symbol_us, bool carrier_on);  
+void mfsk_set_tone(uint8_t tone);  
+void mfsk_carrier(bool on);  
+void mfsk_sync_deadline(void);  
+void mfsk_tx_begin(void);
 
 // ---- RSID fldigi (15 символов GF16, 16 тонов 10.77 Гц, center — центр полосы) ----
 void rsid_encode(uint16_t code, uint8_t* rsid /*15*/);
@@ -42,9 +47,6 @@ void prepare_fsq_frequencies(uint32_t base_hz);
 void fsq_send_string(const char* str);
 void fsq_send_string(String str);
 
-
-static void mfsk_set_tone(uint8_t tone);
-static void mfsk_carrier(bool on);
 
   
 #endif // THOR_MODEM_H

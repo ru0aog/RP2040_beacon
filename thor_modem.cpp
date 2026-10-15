@@ -703,18 +703,18 @@ void mfsk_prepare(uint32_t base_hz, double step_hz, uint8_t numtones) {
                                     DATA_MFSK[i]);  
 }  
 
-static void mfsk_set_tone(uint8_t tone) {  
+void mfsk_set_tone(uint8_t tone) {  
     if (tone >= mfsk_numtones) return;  
     if (device_SI[0] && SI_FAIL == false) setFrq_si5351(DATA_MFSK[tone]);  
     else                                  vfo_set_tone_instant(tone);  
 }  
 
 // Отсчёт дедлайнов заново от текущего момента (после пересчёта сетки и т.п.)
-static inline void mfsk_sync_deadline() { mfsk_next_deadline_us = micros(); }
+inline void mfsk_sync_deadline() { mfsk_next_deadline_us = micros(); }
 
 // Ожидание конца текущего символа по абсолютному дедлайну.
 // led=true: красный LED в начале символа, гаснет на середине.
-static bool mfsk_wait_symbol(uint32_t symbol_us, bool led) {
+bool mfsk_wait_symbol(uint32_t symbol_us, bool led) {
     uint32_t deadline = mfsk_next_deadline_us + symbol_us;
     uint32_t half_off_us = deadline - (symbol_us / 2);  
     bool led_half_off = !led;
@@ -741,12 +741,12 @@ bool mfsk_emit_tone(uint8_t tone, uint32_t symbol_us) {
     return mfsk_wait_symbol(symbol_us, true);
 }
 
-static void mfsk_carrier(bool on) {
+void mfsk_carrier(bool on) {
     if (device_SI[0]) { if (on) VFO_TX_ON(); else VFO_TX_OFF(); }
     else              vfo_operation_set(on);
 }
 
-static void mfsk_tx_begin() {
+void mfsk_tx_begin() {
     vfo_set_narrowband(true);                 // глушим FRAC-дизер (как Olivia)  
     if (!device_SI[0]) {  
         vfo_operation_set(false);  

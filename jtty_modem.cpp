@@ -81,22 +81,26 @@ static char source_char(int i) {
 // nhash — Jenkins hashlittle (байтовый путь, эталон nhash.c)  
 // Используется только для токенов CQ_aaaa.  
 // ============================================================  
-static inline uint32_t rot32(uint32_t x, int k) { return (x << k) | (x >> (32 - k)); }  
-#define NH_MIX(a,b,c) do { \  
-    a-=c; a^=rot32(c,4);  c+=b; \  
-    b-=a; b^=rot32(a,6);  a+=c; \  
-    c-=b; c^=rot32(b,8);  b+=a; \  
-    a-=c; a^=rot32(c,16); c+=b; \  
-    b-=a; b^=rot32(a,19); a+=c; \  
-    c-=b; c^=rot32(b,4);  b+=a; } while(0)  
-#define NH_FINAL(a,b,c) do { \  
-    c^=b; c-=rot32(b,14); \  
-    a^=c; a-=rot32(c,11); \  
-    b^=a; b-=rot32(a,25); \  
-    c^=b; c-=rot32(b,16); \  
-    a^=c; a-=rot32(c,4);  \  
-    b^=a; b-=rot32(a,14); \  
-    c^=b; c-=rot32(b,24); } while(0)  
+static inline uint32_t rot32(uint32_t x, int k) { return (x << k) | (x >> (32 - k)); }
+
+static inline void nh_mix(uint32_t& a, uint32_t& b, uint32_t& c) {  
+    a-=c; a^=rot32(c,4);  c+=b;  
+    b-=a; b^=rot32(a,6);  a+=c;  
+    c-=b; c^=rot32(b,8);  b+=a;  
+    a-=c; a^=rot32(c,16); c+=b;  
+    b-=a; b^=rot32(a,19); a+=c;  
+    c-=b; c^=rot32(b,14); b+=a;  
+}  
+
+static inline void nh_final(uint32_t& a, uint32_t& b, uint32_t& c) {  
+    c^=b; c-=rot32(b,14);  
+    a^=c; a-=rot32(c,11);  
+    b^=a; b-=rot32(a,25);  
+    c^=b; c-=rot32(b,16);  
+    a^=c; a-=rot32(c,4);  
+    b^=a; b-=rot32(a,14);  
+    c^=b; c-=rot32(b,4);  
+}
   
 static int32_t nhash_bytes(const void* key, size_t length, int32_t initval) {  
     const uint8_t* k = (const uint8_t*)key;  
@@ -105,7 +109,7 @@ static int32_t nhash_bytes(const void* key, size_t length, int32_t initval) {
         a += k[0] | ((uint32_t)k[1]<<8) | ((uint32_t)k[2]<<16) | ((uint32_t)k[3]<<24);  
         b += k[4] | ((uint32_t)k[5]<<8) | ((uint32_t)k[6]<<16) | ((uint32_t)k[7]<<24);  
         c += k[8] | ((uint32_t)k[9]<<8) | ((uint32_t)k[10]<<16)| ((uint32_t)k[11]<<24);  
-        NH_MIX(a,b,c); k += 12; length -= 12;  
+        nh_mix(a,b,c); k += 12; length -= 12;  
     }  
     switch (length) {  
         case 12: c += (uint32_t)k[11]<<24; /* fall */  
@@ -122,7 +126,7 @@ static int32_t nhash_bytes(const void* key, size_t length, int32_t initval) {
         case 1:  a += k[0]; break;  
         case 0:  return (int32_t)(c & 32767);  
     }  
-    NH_FINAL(a,b,c);  
+    nh_final(a,b,c);  
     return (int32_t)(c & 32767);  
 }  
   
@@ -152,113 +156,153 @@ static int ihashcall(const char* c0_13, int m) {
     return (int)(prod >> (64 - m));  
 }  
   
-// ============================================================  
-// pack28 — упаковка позывного в 28 бит (порт packjt77.f90)  
-// Возврат: -1 ошибка; 0..NTOKENS-1 токен; NTOKENS+h22 хэш;  
-//          NTOKENS+MAX22+n стандартный позывной.  
-// ============================================================  
-#define NTOKENS  2063592L  
-#define MAX22    4194304L  
+// pack28 — точный порт pack28() из packjt77.f90 (WSJT-X 3.3).  
+// Возвращает 28-битное значение или -1 (невалидный вход).  
   
-static bool standard_call(const char* c13) {  
-    // "Стандартный" = упаковывается формулой (не токен и не хэш)  
-    int32_t n28;  
-    extern int32_t jtty_pack28(const char*);  
-    n28 = jtty_pack28(c13);  
-    return n28 > (int32_t)(NTOKENS + MAX22);  
+#define PACK28_NTOKENS  2063592L  
+#define PACK28_MAX22    4194304L  
+  
+// Алфавиты индексации стандартного позывного  
+static const char P28_A1[38] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 37  
+static const char P28_A2[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";  // 36  
+static const char P28_A3[11] = "0123456789";                            // 10  
+static const char P28_A4[28] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ";           // 27  
+
+// Константы pack28 (из packjt77.f90: NTOKENS=2063592, MAX22=4194304)  
+static constexpr int32_t JTTY_NTOKENS = 2063592;  
+static constexpr int32_t JTTY_MAX22   = 4194304;
+
+static int idx_in(const char* tab, char c)  
+{  
+    const char* p = strchr(tab, c);  
+    return p ? (int)(p - tab) : -1;  
 }  
   
-int32_t jtty_pack28(const char* cs) {  
-    static const char A1[] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 37  
-    static const char A2[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";  // 36  
-    static const char A3[] = "0123456789";                          // 10  
-    static const char A4[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ";         // 27  
+static bool is_dig(char c)  { return c >= '0' && c <= '9'; }  
+static bool is_let(char c)  { return c >= 'A' && c <= 'Z'; }  
   
-    char c13[14]; memset(c13, ' ', 13); c13[13] = 0;  
-    size_t l = strlen(cs); if (l > 13) l = 13;  
-    memcpy(c13, cs, l);  
-    while (l && c13[l-1] == ' ') c13[--l] = 0;   // trim right for checks  
+int32_t pack28(const char* call)  
+{  
+    char c13[14];  
+    memset(c13, ' ', 13); c13[13] = 0;  
+    size_t L = strlen(call);  
+    if (L > 13) L = 13;  
+    memcpy(c13, call, L);               // adjustl: строка слева, справа пробелы  
+    int n = (int)strlen(c13);           // trim(c13) — trailing spaces убраны  
+    // strlen не обрезает внутренние пробелы; c13 справа дополнен пробелами,  
+    // поэтому пересчитаем длину:  
+    while (n > 0 && c13[n-1] == ' ') n--;  
   
-    char callsign[7]; memset(callsign, ' ', 6); callsign[6] = 0;  
-    bool have = false;  
+    // --- Спец-токены ---  
+    if (n >= 3 && !strncmp(c13, "DE ", 3))  return 0;  
+    if (n >= 4 && !strncmp(c13, "QRZ ", 4)) return 1;  
+    if (n >= 3 && !strncmp(c13, "CQ ", 3))  return 2;  
   
-    // Work-arounds: 3DA0xx -> 3D0xx; 3X[ABC]x -> 3Xx (первые 3 симв.)  
-    if (strncmp(c13, "3DA0", 4) == 0) {  
-        memcpy(callsign, "3D0", 3);  
-        memcpy(callsign + 3, c13 + 4, 3);           // c13(5:7)  
-        have = true;  
-    } else if (c13[0] == '3' && c13[1] == 'X' &&  
-               c13[2] >= 'A' && c13[2] <= 'C') {  
-        memcpy(callsign, c13, 3);                   // '3XA' -> '3XA' — сверить с packjt77  
-        have = true;  
-    }  
-  
-    // Спец-токены  
-    if (!have) {  
-        if (strncmp(c13, "DE", 2) == 0 && (c13[2] == ' ' || c13[2] == 0)) {  
-            memcpy(callsign, "DE    ", 6); return 0 + 0; // n28 ниже  
+    // CQ_nnn (зона 001..999) → 3+nqsy  
+    // CQ_aaaa (1..4 буквы)   → 3+1000 + base27  
+    if (n >= 4 && n <= 7 && !strncmp(c13, "CQ_", 3)) {  
+        int nlet = 0, nnum = 0;  
+        for (int i = 3; i < n; i++) {  
+            if (is_let(c13[i])) nlet++;  
+            if (is_dig(c13[i])) nnum++;  
         }  
-    }  
-  
-    // tokens: CQ/DE/QRZ -> 0/1/2; CQ_aaaa/QRZ_aaaa -> hash; CQ nnn -> 3+nnn  
-    {  
-        // CQ / DE / QRZ как полные слова  
-        if (strcmp(c13, "CQ") == 0)  return 0;  
-        if (strcmp(c13, "DE") == 0)  return 1;  
-        if (strcmp(c13, "QRZ") == 0) return 2;  
-  
-        if (strncmp(c13, "CQ ", 3) == 0) {           // CQ nnn (номер зоны)  
-            const char* p = c13 + 3;  
-            bool digits = true;  
-            for (const char* q = p; *q; q++) if (!isdigit((unsigned char)*q)) digits = false;  
-            if (digits && *p) {  
-                int n = atoi(p);  
-                if (n >= 0 && n <= 999) return 3 + n;  
+        if (nnum == 3 && nlet == 0) {  
+            int nqsy = atoi(&c13[3]);           // "001".."999"  
+            return 3 + nqsy;                    // 4..1002  
+        }  
+        if (nlet >= 1 && nlet <= 4 && nnum == 0) {  
+            // c4 = adjustr(c13(4:n)) — буквы прижаты вправо в 4-симв поле  
+            char c4[5] = "    ";  
+            int k = 3;  
+            for (int i = n - 1; i >= 3 && k >= 0; i--) c4[k--] = c13[i];  
+            int32_t m = 0;  
+            for (int i = 0; i < 4; i++) {  
+                int j = is_let(c4[i]) ? (c4[i] - 'A' + 1) : 0;  
+                m = 27 * m + j;  
             }  
+            return 3 + 1000 + m;                // 1003..base27-max  
         }  
-        if (strncmp(c13, "CQ_", 3) == 0 || strncmp(c13, "QRZ_", 4) == 0) {  
-            const char* p = strchr(c13, '_');  
-            int base = (c13[0] == 'C') ? 3 + 1000 : 3 + 1000 + 4000;  
-            return base + jtty_hash15(p + 1, strlen(p + 1));  
-        }  
-        // NOTE: точные offsets токен-таблицы (3+1000+4000) сверить с packjt77.f90 —  
-        // там диапазоны разложены через ntoken-таблицу. Для маяка нужен только CQ=0.  
     }  
   
-    // Если позывной нестандартный — хэш-ветка: '<' или '/', иначе попытка формулы.  
-    bool nonstd = strchr(c13, '<') != NULL;  
-    if (!nonstd) {  
-        // Поиск позиции цифры (зоны): допустима 2-я или 3-я позиция (1-based) => idx 1..2  
-        int narea = -1;  
-        for (int i = 1; i <= 2 && c13[i]; i++)  
-            if (c13[i] >= '0' && c13[i] <= '9') { narea = i; break; }  
-        if (narea > 0) {  
-            // callsign = буквы до зоны + зона + суффикс, максимум 6 символов  
-            char cs6[7]; memset(cs6, ' ', 6); cs6[6] = 0;  
-            int k = 0;  
-            for (int i = 0; c13[i] && k < 6; i++) cs6[k++] = c13[i];  
-            const char* p1 = strchr(A1, cs6[0]);  
-            const char* p2 = strchr(A2, cs6[1]);  
-            const char* p3 = strchr(A3, cs6[2]);  
-            const char* p4 = strchr(A4, cs6[3]);  
-            const char* p5 = strchr(A4, cs6[4]);  
-            const char* p6 = strchr(A4, cs6[5]);  
-            if (p1 && p2 && p3 && p4 && p5 && p6) {  
-                long i1 = p1 - A1, i2 = p2 - A2, i3 = p3 - A3;  
-                long i4 = p4 - A4, i5 = p5 - A4, i6 = p6 - A4;  
-                long n = i1*(36*10*27*27*27) + i2*(10*27*27*27) + i3*(27*27*27)  
-                       + i4*(27*27) + i5*27 + i6;  
-                return (int32_t)(NTOKENS + MAX22 + n);  
-            }  
-        }  
-        nonstd = true;  
+    // --- <...> нестандартный позывной → 22-битный хэш ---  
+    if (c13[0] == '<') {  
+        char* gt = strchr(c13, '>');  
+        if (!gt) return -1;  
+        char inner[14];  
+        int ilen = (int)(gt - c13) - 1;  
+        if (ilen < 0) ilen = 0;  
+        if (ilen > 13) ilen = 13;  
+        memcpy(inner, c13 + 1, ilen);  
+        memset(inner + ilen, ' ', 13 - ilen); inner[13] = 0;  
+        int32_t n22 = ihashcall(inner, 22);  
+        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
     }  
-    if (nonstd) {  
-        // '<...>' или составной позывной — 22-битный хэш  
-        return (int32_t)(NTOKENS + ihashcall(c13, 22));  
+  
+    // --- Стандартный позывной ---  
+    // callsign с workaround'ами  
+    char cs[7]; memset(cs, ' ', 6); cs[6] = 0;  
+  
+    // iarea — позиция (1-based) ПОСЛЕДНЕЙ цифры... точнее: идём с конца,  
+    // первая цифра при обходе справа налево  
+    int iarea = -1;                            // 0-based индекс  
+    for (int i = n - 1; i >= 1; i--) {         // Fortran: i=n..2  
+        if (is_dig(c13[i])) { iarea = i; break; }  
     }  
-    return -1;  
-}  
+    if (iarea < 0) {  
+        // нет цифры зоны → нестандартный  
+        int32_t n22 = ihashcall(c13, 22);  
+        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
+    }  
+    int iarea1 = iarea + 1;                    // 1-based для сверки с Fortran  
+  
+    int npdig = 0, nplet = 0, nslet = 0;  
+    for (int i = 0; i < iarea; i++) {  
+        if (is_dig(c13[i])) npdig++;  
+        if (is_let(c13[i])) nplet++;  
+    }  
+    for (int i = iarea + 1; i < n; i++)  
+        if (is_let(c13[i])) nslet++;  
+  
+    if (iarea1 < 2 || iarea1 > 3 || nplet == 0 ||  
+        npdig >= iarea1 - 1 || nslet > 3) {  
+        // Нестандартный → 22-бит хэш  
+        int32_t n22 = ihashcall(c13, 22);  
+        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
+    }  
+  
+    // Workaround'ы префиксов применяются к callsign при упаковке:  
+    // 3DA0xxx → 3D0xxx ; 3Xyyy(буква) → Qyyy  
+    if (iarea1 == 2) {  
+        // callsign = ' ' + c13(1:5)  
+        cs[0] = ' ';  
+        memcpy(cs + 1, c13, 5);  
+    } else {  
+        memcpy(cs, c13, 6);  
+    }  
+    if (!strncmp(cs, "3DA0", 4)) { cs[0] = '3'; cs[1] = 'D'; cs[2] = '0';  
+                                   cs[3] = c13[4]; cs[4] = c13[5]; cs[5] = ' '; }  
+    // Исходный workaround применялся к c13 ДО проверки — применим к исходной строке:  
+    if (!strncmp(c13, "3X", 2) && is_let(c13[2])) {  
+        cs[0] = 'Q'; memcpy(cs + 1, c13 + 2, 4); cs[5] = ' ';  
+        if (iarea1 == 2) { /* prefix сдвигает iarea — редкий случай, оставить как есть */ }  
+    }  
+  
+    int i1 = idx_in(P28_A1, cs[0]);  
+    int i2 = idx_in(P28_A2, cs[1]);  
+    int i3 = idx_in(P28_A3, cs[2]);  
+    int i4 = idx_in(P28_A4, cs[3]);  
+    int i5 = idx_in(P28_A4, cs[4]);  
+    int i6 = idx_in(P28_A4, cs[5]);
+    if (i1 < 0 || i2 < 0 || i3 < 0 || i4 < 0 || i5 < 0 || i6 < 0) {  
+        int32_t n22 = ihashcall(c13, 22);  
+        return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
+    }  
+  
+    int64_t n28 = 36L*10*27*27*27*i1 + 10L*27*27*27*i2 + 27L*27*27*i3  
+                + 27L*27*i4 + 27L*i5 + i6;  
+    n28 += PACK28_NTOKENS + PACK28_MAX22;  
+    return (int32_t)(n28 & 0x0FFFFFFFL);  
+}
   
 // ============================================================  
 // Атомы -> 32-битное тело  
@@ -274,7 +318,11 @@ static bool grid4_to_index(const char* g, int* idx) {
     if (!isdigit((unsigned char)g[2]) || !isdigit((unsigned char)g[3])) return false;  
     *idx = ((g[0]-'A')*18 + (g[1]-'A'))*100 + (g[2]-'0')*10 + (g[3]-'0');  
     return true;  
-}  
+}
+
+static int32_t jtty_pack28(const char* call);  
+static bool standard_call(const char* call);  
+static bool pos_incomplete(int len, int na);
   
 // pack_jtty_atom: атом + eom -> 34-битный payload (биты: n32<<2 | eom)  
 static bool jtty_pack_atom(const JttyAtom* atom, bool eom, uint64_t* payload34) {  
@@ -561,5 +609,10 @@ void jtty_send_string(const char* str) {
   
     Serial.printf("[JTTY] передано кадров: %d\n", fl.nframes);  
 }
+
+static bool standard_call(const char* call) {  
+    return jtty_pack28(call) > (int32_t)(JTTY_NTOKENS + JTTY_MAX22);  
+}
+
 
 

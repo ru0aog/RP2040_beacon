@@ -158,7 +158,8 @@ static int ihashcall(const char* c0_13, int m) {
   
 // pack28 — точный порт pack28() из packjt77.f90 (WSJT-X 3.3).  
 // Возвращает 28-битное значение или -1 (невалидный вход).  
-  
+
+// Константы pack28 (из packjt77.f90: NTOKENS=2063592, MAX22=4194304)   
 #define PACK28_NTOKENS  2063592L  
 #define PACK28_MAX22    4194304L  
   
@@ -167,10 +168,6 @@ static const char P28_A1[38] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 37
 static const char P28_A2[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";  // 36  
 static const char P28_A3[11] = "0123456789";                            // 10  
 static const char P28_A4[28] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ";           // 27  
-
-// Константы pack28 (из packjt77.f90: NTOKENS=2063592, MAX22=4194304)  
-static constexpr int32_t JTTY_NTOKENS = 2063592;  
-static constexpr int32_t JTTY_MAX22   = 4194304;
 
 static int idx_in(const char* tab, char c)  
 {  
@@ -270,15 +267,20 @@ int32_t pack28(const char* call)
         return (PACK28_NTOKENS + n22) & 0x0FFFFFFFL;  
     }  
   
-    // Workaround'ы префиксов применяются к callsign при упаковке:  
-    // 3DA0xxx → 3D0xxx ; 3Xyyy(буква) → Qyyy  
+    // Workaround'ы применяются к c13 ДО извлечения callsign (как в Fortran):  
+    // 3DA0xxx → 3D0xxx ; 3X<буква> → Q<буква>  
+    if (!strncmp(c13, "3DA0", 4)) {  
+        c13[2] = '0';                       // '3DA0...' → '3D0...' (A сдвинут в позицию 3)  
+    }  
+    if (c13[0] == '3' && c13[1] == 'X' && is_let(c13[2])) {  
+        c13[0] = 'Q';                       // '3XABC' → 'QABC'  
+    }  
     if (iarea1 == 2) {  
-        // callsign = ' ' + c13(1:5)  
         cs[0] = ' ';  
         memcpy(cs + 1, c13, 5);  
     } else {  
         memcpy(cs, c13, 6);  
-    }  
+    }
     if (!strncmp(cs, "3DA0", 4)) { cs[0] = '3'; cs[1] = 'D'; cs[2] = '0';  
                                    cs[3] = c13[4]; cs[4] = c13[5]; cs[5] = ' '; }  
     // Исходный workaround применялся к c13 ДО проверки — применим к исходной строке:  
@@ -320,11 +322,11 @@ static bool grid4_to_index(const char* g, int* idx) {
     return true;  
 }
 
-static int32_t jtty_pack28(const char* call);  
+
 static bool pos_incomplete(int len, int na);
 
 static bool standard_call(const char* call) {  
-    return jtty_pack28(call) > (int32_t)(JTTY_NTOKENS + JTTY_MAX22);
+    return pack28(call) > (int32_t)(PACK28_NTOKENS + PACK28_MAX22);
 }  
 
 // pack_jtty_atom: атом + eom -> 34-битный payload (биты: n32<<2 | eom)  
@@ -334,7 +336,7 @@ static bool jtty_pack_atom(const JttyAtom* atom, bool eom, uint64_t* payload34) 
     case JTTY_ATOM_CALL: {  
         if (atom->subtype < 0 || atom->subtype > 5) return false;  
         if (!standard_call(atom->text)) return false;  
-        int32_t n28 = jtty_pack28(atom->text);  
+        int32_t n28 = pack28(atom->text);
         if (n28 < 0) return false;  
         int i2, n2;  
         if (atom->subtype <= 3) { i2 = 0; n2 = atom->subtype; }  

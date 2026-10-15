@@ -136,7 +136,9 @@ OK
 ATH
 OK
 ```
-
+### Режим JTTY  
+  
+Порт протокола JTTY из WSJT-X 3.3: 4-FSK, символ 32 мс, кадр 59 символов (13 синхротонов + 46 кодированных), свёртка K=10 с полиномами `0o1167/0o1545`, CRC-12 `0x80F`, Gray-кодирование дибитов. Полоса 4 тона с шагом 31.25 Гц, длительность кадра 1.888 с. Частота задаётся параметром `FREQ_JTTY` (центр полосы; нижний тон = `FREQ_JTTY − 46.875 Гц`).
 ---
 
 ## 📚 Документация и ссылки
@@ -151,3 +153,4 @@ OK
 * **Автор проекта:** [@ru0aog](https://github.com/ru0aog)
 * Проект является открытым. Исходный код распространяется под лицензией **GPLv3** (см. файл [LICENSE](LICENSE)).  
 * **Уведомление об авторских правах третьих лиц:** модули `olivia_modem.cpp` и `thor_modem.cpp` содержат код, портированный из проекта [fldigi](https://sourceforge.net/projects/fldigi/) (GPLv3) — алгоритмы MFSK/Walsh-кодирования и RSID (© Pawel Jalocha SP9VRC, David Freese W1HKJ). Varicode в `thor_modem.cpp` реализован по спецификации IZ8BLY / ZL1BPU MFSK standard. Общий MFSK-движок `thor_modem.cpp` (THOR, MFSK16, DominoEX 8, FSQ) и генератор RSID портированы из файлов fldigi: `thor/thor.cxx`, `mfsk/mfsk.cxx`, `mfsk/mfskvaricode.cxx`, `mfsk/interleave.cxx`, `thor/thorvaricode.cxx`, `dominoex/dominoex.cxx`, `dominoex/dominovar.cxx`, `fsq/fsq.cxx`, `fsq/fsq_varicode.cxx`, `rsid/rsid.cxx`, `rsid/rsid_defs.cxx`.
+JTTY-модем (`jtty_modem.cpp`) — порт протокола JTTY из **WSJT-X 3.3** (© Joe Taylor K1JT и соавт., GPLv2): упаковка сообщений `pack_jtty`, `pack28`/`ihashcall` из `packjt77`, свёрточный код TBCC K=10 и CRC-12 из `tbcc.f90`.

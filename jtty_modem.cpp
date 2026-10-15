@@ -604,9 +604,9 @@ static void jtty_build_frame(uint64_t payload34, uint8_t* itone /*59*/) {
         reg10 = (uint16_t)(((reg10 << 1) | info[i]) & 0x3FF);  
         uint8_t b0 = (uint8_t)parity32(reg10 & JTTY_G0);  
         uint8_t b1 = (uint8_t)parity32(reg10 & JTTY_G1);  
-        itone[JTTY_NSYNC + i] = (uint8_t)((b0 << 1) | b1);  
-        // ПОРЯДОК ДИБИТА: если WSJT-X рисует кадр зеркально по частоте,  
-        // заменить на (b1 << 1) | b0 — сверить с tbcc.f90 укладкой пары.  
+        // Gray-маппинг из tbcc_encode: 00→0, 01→1, 11→2, 10→3  
+        static const uint8_t GRAY4[4] = {0, 1, 3, 2};  
+        itone[JTTY_NSYNC + i] = GRAY4[(b0 << 1) | b1]; 
     }  
 }  
   

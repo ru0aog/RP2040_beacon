@@ -926,12 +926,12 @@ bool is_time_to_transmit(uint8_t mode) {
                                        // флаг "передача запускается" — выставляется  
                                        // вызывающим кодом СРАЗУ при получении true  
   uint32_t cur = rtc_hour * 60UL + rtc_min;    
-  static uint32_t last_min[10] = {9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999};
+  static uint32_t last_min[11] = {9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999};
   
-  // слот 0..8 = CW/RTTY/IFKP/OLIVIA/THOR/CONTESTIA/MFSK16/DOMINOEX/FSQ, слот 9 = SEQ    
+  // слот 0..8 = CW/RTTY/IFKP/OLIVIA/THOR/CONTESTIA/MFSK16/DOMINOEX/FSQ/JTTY, слот 10 = SEQ    
   uint8_t slot;    
-  if (mode < 9)            slot = mode;    
-  else if (mode == MODE_SEQ) slot = 9;    
+  if (mode < 10)            slot = mode;    
+  else if (mode == MODE_SEQ) slot = 10;    
   else return false;                         // NONE и прочий мусор
   
   if (cur == last_min[slot]) return false;   // один запуск (или пропуск) на минуту

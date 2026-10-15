@@ -153,5 +153,8 @@ OK
 
 * **Автор проекта:** [@ru0aog](https://github.com/ru0aog)
 * Проект является открытым. Исходный код распространяется под лицензией **GPLv3** (см. файл [LICENSE](LICENSE)).  
-* **Уведомление об авторских правах третьих лиц:** модули `olivia_modem.cpp` и `thor_modem.cpp` содержат код, портированный из проекта [fldigi](https://sourceforge.net/projects/fldigi/) (GPLv3) — алгоритмы MFSK/Walsh-кодирования и RSID (© Pawel Jalocha SP9VRC, David Freese W1HKJ). Varicode в `thor_modem.cpp` реализован по спецификации IZ8BLY / ZL1BPU MFSK standard. Общий MFSK-движок `thor_modem.cpp` (THOR, MFSK16, DominoEX 8, FSQ) и генератор RSID портированы из файлов fldigi: `thor/thor.cxx`, `mfsk/mfsk.cxx`, `mfsk/mfskvaricode.cxx`, `mfsk/interleave.cxx`, `thor/thorvaricode.cxx`, `dominoex/dominoex.cxx`, `dominoex/dominovar.cxx`, `fsq/fsq.cxx`, `fsq/fsq_varicode.cxx`, `rsid/rsid.cxx`, `rsid/rsid_defs.cxx`.
-* JTTY-модем (`jtty_modem.cpp`) — порт протокола JTTY из **WSJT-X 3.3** (© Joe Taylor K1JT и соавт., GPLv2): упаковка сообщений `pack_jtty`, `pack28`/`ihashcall` из `packjt77`, свёрточный код TBCC K=10 и CRC-12 из `tbcc.f90`.
+* **Уведомление об авторских правах третьих лиц:**
+1. модули `olivia_modem.cpp` и `thor_modem.cpp` содержат код, портированный из проекта [fldigi](https://sourceforge.net/projects/fldigi/) (GPLv3) — алгоритмы MFSK/Walsh-кодирования и RSID (© Pawel Jalocha SP9VRC, David Freese W1HKJ).
+2. Varicode в `thor_modem.cpp` реализован по спецификации IZ8BLY / ZL1BPU MFSK standard.
+3. Общий MFSK-движок `thor_modem.cpp` (THOR, MFSK16, DominoEX 8, FSQ) и генератор RSID портированы из файлов fldigi: `thor/thor.cxx`, `mfsk/mfsk.cxx`, `mfsk/mfskvaricode.cxx`, `mfsk/interleave.cxx`, `thor/thorvaricode.cxx`, `dominoex/dominoex.cxx`, `dominoex/dominovar.cxx`, `fsq/fsq.cxx`, `fsq/fsq_varicode.cxx`, `rsid/rsid.cxx`, `rsid/rsid_defs.cxx`.
+4. JTTY-модем (`jtty_modem.cpp`) — порт протокола JTTY из **WSJT-X 3.3** (© Joe Taylor K1JT и соавт., GPLv2): упаковка сообщений `pack_jtty`, `pack28`/`ihashcall` из `packjt77`, свёрточный код TBCC K=10 и CRC-12 из `tbcc.f90`.

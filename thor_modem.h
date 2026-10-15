@@ -41,5 +41,10 @@ void dominoex_send_string(String str);
 void prepare_fsq_frequencies(uint32_t base_hz);
 void fsq_send_string(const char* str);
 void fsq_send_string(String str);
+
+
+static void mfsk_set_tone(uint8_t tone);
+static void mfsk_carrier(bool on);
+
   
 #endif // THOR_MODEM_H

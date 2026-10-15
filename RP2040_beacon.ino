@@ -1885,14 +1885,14 @@ void loop() {
     
         // JTTY: CQ-кадр с позывным (CALL-атом subtype 0)  
         if (!pc_file_written && !soft_restart_flag) {    
-          Serial.print(F("[ЭФИР_JTTY] Вызов: "));    
-          jtty_send_string(("CQ " + my_call_variable + " CQ").c_str());    
+          Serial.print(F("[ЭФИР_JTTY] Вызов: ")); Serial.println(call_msg);  
+          jtty_send_string(call_msg.c_str());  
         }    
     
         // JTTY: основной текст (TEXT5-кадры)  
         if (!pc_file_written && !soft_restart_flag && my_text_variable.length() > 0) {    
-          Serial.print(F("[ЭФИР_JTTY] Текст: "));    
-          jtty_send_string(my_text_variable.c_str());    
+          Serial.print(F("[ЭФИР_JTTY] Текст: ")); Serial.println(my_text_variable);  
+          jtty_send_string(my_text_variable.c_str());
         }    
     
         if (!pc_file_written && !soft_restart_flag) {    

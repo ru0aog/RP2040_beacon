@@ -556,6 +556,8 @@ static void jtty_build_frame(uint64_t payload34, uint8_t* itone /*59*/) {
     for (int t = 0; t < JTTY_NU; t++)  
         reg10 = (uint16_t)((reg10 << 1) | info[JTTY_INFO_BITS - JTTY_NU + t]);  
   
+    for (int i = 0; i < JTTY_NSYNC; i++) itone[i] = JTTY_IS13[i];  // sync-преамбула
+
     for (int i = 0; i < JTTY_INFO_BITS; i++) {  
         reg10 = (uint16_t)(((reg10 << 1) | info[i]) & 0x3FF);  
         uint8_t b0 = (uint8_t)parity32(reg10 & JTTY_G0);  
@@ -637,7 +639,6 @@ void jtty_selftest(void)
         { "///////////", 671, 2685, 2749801 },  
         { "ZZZZZZZZZZZ", 902, 3609, 3695718 },  
         { "99999999999", 762, 3050, 3123740 },  
-        { "AAAAAAAAAAA", 861, 3445, 3529655 },  // из того же набора, если есть — иначе убрать  
         { "           ",   0,    0,       0 },  
     };  
     int pass = 0, total = 0;  

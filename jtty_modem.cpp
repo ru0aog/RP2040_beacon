@@ -326,9 +326,9 @@ static bool grid4_to_index(const char* g, int* idx) {
 
 static bool pos_incomplete(int len, int na);
 
-static bool standard_call(const char* call) {  
-    return pack28(call) > (int32_t)(PACK28_NTOKENS + PACK28_MAX22);
-}  
+static bool standard_call(const char* call) {    
+    return pack28(call) > (int32_t)(PACK28_NTOKENS + PACK28_MAX22);    
+}
 
 // pack_jtty_atom: атом + eom -> 34-битный payload (биты: n32<<2 | eom)  
 static bool jtty_pack_atom(const JttyAtom* atom, bool eom, uint64_t* payload34) {  
@@ -588,18 +588,16 @@ static bool jtty_tx_frame(const uint8_t* itone) {
 }  
   
 // Передача сообщения (блокирующая, как остальные модемы).  
-void jtty_send_string(const char* str) {  
-    if (!str || !*str) return;  
-    if (!device_SI[0]) {  
-        // PIO-ветка: сетка уже подготовлена prepare_jtty_frequencies  
-    }  
-    mfsk_tx_begin();  
-  
-    JttyFrameList fl;  
-    if (!jtty_pack_message(str, &fl, JTTY_EXCHANGE_UNKNOWN, -1)) {  
-        Serial.println(F("[JTTY] упаковка сообщения не удалась"));  
-        return;  
-    }  
+void jtty_send_string(const char* str) {    
+    if (!str || !*str) return;    
+    
+    // Сначала упаковка: при ошибке несущая не поднимается вообще.    
+    JttyFrameList fl;    
+    if (!jtty_pack_message(str, &fl, JTTY_EXCHANGE_UNKNOWN, -1)) {    
+        Serial.println(F("[JTTY] упаковка сообщения не удалась"));    
+        return;    
+    }    
+    mfsk_tx_begin();
   
     mfsk_carrier(false);  
     mfsk_sync_deadline();  

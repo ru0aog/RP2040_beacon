@@ -130,10 +130,13 @@ bool force_thor_transmission = false;   // Флаг ручного запуск�
 bool force_mfsk16_transmission = false;   // Флаг ручного запуска MFSK16
 bool force_dominoex_transmission = false; // Флаг ручного запуска DOMINOEX
 bool force_fsq_transmission = false;      // Флаг ручного запуска FSQ
+bool force_jtty_transmission = false;     // Флаг ручного запуска JTTY
 volatile bool system_ready = false;     // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 extern volatile bool tx_launching; 
 extern PllConfig pll_overclock;   // из vfo_hardware.cpp
+extern void jtty_send_string(const char* str);  
+extern void prepare_jtty_frequencies(uint32_t base_hz);
 
 // --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
 const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
@@ -167,7 +170,7 @@ void     ZERO_LED_OFF(void);
 enum {  
     RX_MODE_NONE = 0, RX_MODE_RTTY, RX_MODE_CW,  
     RX_MODE_OLIVIA, RX_MODE_CONTESTIA, RX_MODE_THOR,  
-    RX_MODE_MFSK16, RX_MODE_DOMINOEX, RX_MODE_FSQ, RX_MODE_IFKP  
+    RX_MODE_MFSK16, RX_MODE_DOMINOEX, RX_MODE_FSQ, RX_MODE_IFKP, RX_MODE_JTTY  
 };
 
 bool is_transmitting = false; // Флаг передачи 
@@ -494,6 +497,7 @@ void check_serial_commands() {
                   else if (mode_s == "dominoex" || mode_s == "dom") mode = RX_MODE_DOMINOEX;  
                   else if (mode_s == "fsq")    mode = RX_MODE_FSQ;  
                   else if (mode_s == "ifkp")   mode = RX_MODE_IFKP;  
+                  else if (mode_s == "jtty")   mode = RX_MODE_JTTY; 
   
                   if (mode == RX_MODE_NONE) {  
                     Serial.println(F("[RX] Неизвестный режим. Доступны: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp"));  
@@ -631,8 +635,25 @@ void check_serial_commands() {
           else if (command.equalsIgnoreCase("test jtty")) {
             jtty_selftest();
           }
+          else if (command.equalsIgnoreCase("test jtty pack")) { 
+            jtty_selftest_pack(); 
+          }
 
-          else if (command.equalsIgnoreCase("test jtty pack")) { jtty_selftest_pack(); }
+          else if (command.equalsIgnoreCase("START JTTY")) {  
+            if (is_transmitting) {  
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));  
+            } else {  
+              update_scheduler();  
+              uint32_t jtty_hz = strtoul(my_freq_jtty_var.c_str(), NULL, 10);  
+              if (jtty_hz == 0) jtty_hz = 14079000;  
+              char buf[148];  
+              snprintf(buf, sizeof(buf),  
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир JTTY на частоте %s Гц...",  
+                      rtc_hour, rtc_min, rtc_sec, format_freq(jtty_hz).c_str());  
+              Serial.println(buf);  
+              force_jtty_transmission = true;  
+            }  
+          }
 
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
@@ -669,6 +690,7 @@ void check_serial_commands() {
           Serial.println(F("start mfsk16    - Немедленно запустить внеочередной сеанс MFSK16"));
           Serial.println(F("start dominoex  - Немедленно запустить внеочередной сеанс DominoEX 8"));
           Serial.println(F("start fsq       - Немедленно запустить внеочередной сеанс FSQ"));
+          Serial.println(F("start jtty      - Немедленно запустить внеочередной сеанс JTTY"));
           Serial.println(F("rx <mod> <f>    - Приём: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp"));  
           Serial.println(F("rx off          - Остановить приёмник"));
           Serial.println(F("clear log       - Стереть существующий файл LOG.TXT и создать новый пустой"));
@@ -1833,20 +1855,66 @@ void loop() {
     }  
   }
 
-  // =========================================================================
-  // РЕЖИМ 254. ЦЕПОЧКА
-  // =========================================================================
-  // Проверка запуска трехмодовой цепочки из расписания
-  if ((is_time_to_transmit(254) && !is_transmitting) && !pc_file_written && !soft_restart_flag) {
-       Serial.println(F("[Планировщик] Время подошло. Запуск сквозной цепочки CW -> RTTY -> IFKP"));
-       is_transmitting = true;
-       tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting
-       usr_chain_state = USR_START_CW; // Толкаем ваш штатный автомат, он всё сделает сам!
+// =========================================================================    
+  // РЕЖИМ 9. СЕАНС СВЯЗИ JTTY (WSJT-X 3.3)  
+  // =========================================================================    
+  if (( (is_time_to_transmit(MODE_JTTY) && !is_transmitting) || force_jtty_transmission) && !pc_file_written && !soft_restart_flag) {    
+    force_jtty_transmission = false;    
+    is_transmitting = true;    
+    tx_launching = false; // Сбрасываем защитный флаг сразу после фиксации is_transmitting    
+    
+    if (debug_flag) {    
+      char time_buf[128];    
+      snprintf(time_buf, sizeof(time_buf), "[Система] %02d:%02d:%02d - Наступило время сеанса JTTY! Выходим в эфир...", rtc_hour, rtc_min, rtc_sec);    
+      Serial.println(time_buf);    
+    }    
+    
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {  
+    
+      uint32_t jtty_session_start_ms = millis();  
+      dev_TX_state = true;  
+      update_scheduler();  
+      SI_POWER_ON();  
+    
+      if (!pc_file_written && !soft_restart_flag) {  
+        uint32_t jtty_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz           // приоритет частоте из расписания    
+                   : strtoul(my_freq_jtty_var.c_str(), NULL, 10);    
+        if (jtty_hz == 0) jtty_hz = 14079000;    
+    
+        prepare_jtty_frequencies(jtty_hz);    
+    
+        // JTTY: CQ-кадр с позывным (CALL-атом subtype 0)  
+        if (!pc_file_written && !soft_restart_flag) {    
+          Serial.print(F("[ЭФИР_JTTY] Вызов: "));    
+          jtty_send_string(("CQ " + my_call_variable + " CQ").c_str());    
+        }    
+    
+        // JTTY: основной текст (TEXT5-кадры)  
+        if (!pc_file_written && !soft_restart_flag && my_text_variable.length() > 0) {    
+          Serial.print(F("[ЭФИР_JTTY] Текст: "));    
+          jtty_send_string(my_text_variable.c_str());    
+        }    
+    
+        if (!pc_file_written && !soft_restart_flag) {    
+          uint32_t jtty_session_duration_sec = (millis() - jtty_session_start_ms) / 1000;    
+          update_scheduler();    
+          char end_buf[128];    
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс JTTY завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, jtty_session_duration_sec);    
+          Serial.println(end_buf);    
+          if (debug_flag) {    
+            log_file_write_line("Сеанс JTTY завершен. Длительность: " + String(jtty_session_duration_sec) + " сек.");    
+          }    
+        }    
+      }    
+    
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА    
+      is_transmitting = false;    
+      scheduled_freq_hz = 0;    
+      SI_POWER_OFF();    
+      dev_TX_state = false;    
+      update_scheduler();    
+    }    
   }
-
-
-  delay(1); 
-}
 
 
 // RP2040_beacon.ino — выравнивание колонок в отчёте [SCAN_RESULT]  

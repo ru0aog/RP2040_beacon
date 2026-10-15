@@ -41,6 +41,7 @@ extern String my_freq_cw_var;      // Строка частоты несущей
 extern String my_freq_ifkp_var;
 extern String my_freq_olivia_var;
 extern String my_freq_contestia_var;
+extern String my_freq_jtty_var;
 extern String my_freq_thor_var;
 extern String my_freq_mfsk16_var;
 extern String my_freq_dominoex_var;

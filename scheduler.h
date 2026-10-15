@@ -78,15 +78,16 @@ bool is_time_to_transmit(uint8_t mode);
 // Структура планировщика задач нового поколения в ОЗУ
 // ============================================================================
 enum BeaconMode : uint8_t {  
-  MODE_CW     = 0,
-  MODE_RTTY   = 1,
-  MODE_IFKP   = 2,
-  MODE_OLIVIA = 3,
-  MODE_THOR   = 4,
+  MODE_CW        = 0,
+  MODE_RTTY      = 1,
+  MODE_IFKP      = 2,
+  MODE_OLIVIA    = 3,
+  MODE_THOR      = 4,
   MODE_CONTESTIA = 5,
-  MODE_MFSK16 = 6,
-  MODE_DOMINOEX = 7,
-  MODE_FSQ    = 8,
+  MODE_MFSK16    = 6,
+  MODE_DOMINOEX  = 7,
+  MODE_FSQ       = 8,
+  MODE_JTTY      = 9,
   MODE_SEQ    = 254,       // Комбинированная цепочка: CW -> 1м -> RTTY -> 1м -> IFKP
   MODE_NONE   = 255 };
 

@@ -84,6 +84,7 @@
 #include "ifkp_modem.h"
 #include "olivia_modem.h"
 #include "thor_modem.h"
+#include "jtty_modem.h"
 #include "hayes_modem.h"
 #include "bme280.h"
 #include "lcd.h"

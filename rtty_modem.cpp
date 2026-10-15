@@ -199,7 +199,7 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
     uint32_t base_hz = invert ? mark_hz : space_hz;  
     vfo_hardware_init(base_hz, shift_hz);  
     vfo_set_tone_instant(invert ? 0 : 1); // стартуем с MARK  
-    vfo_operation_set(true);    // запустить генерацию программного VFO
+    //vfo_operation_set(true);    // запустить генерацию программного VFO
     if (debug_flag) {
         Serial.println(F("[RTTY_ГОТОВ] Программный DDS VFO инициализирован!"));
         Serial.print(F("            MARK :  ")); Serial.print(format_freq(mark_hz)); Serial.println(F(" Гц"));

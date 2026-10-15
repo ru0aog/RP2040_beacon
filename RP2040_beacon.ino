@@ -655,6 +655,21 @@ void check_serial_commands() {
             }  
           }
 
+          else if (command.startsWith("jtty ")) {  
+              if (is_transmitting || rx_active) {  
+                  Serial.println(F("ОШИБКА: передатчик занят или идёт приём"));  
+              } else {  
+                  String txt = command.substring(5); txt.trim();  
+                  if (txt.length() == 0) {  
+                      Serial.println(F("ОШИБКА: jtty <текст до 80 симв.>"));  
+                  } else {  
+                      is_transmitting = true;  
+                      jtty_send_string(txt.c_str());  
+                      is_transmitting = false;  
+                  }  
+              }  
+          }
+
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();
@@ -1884,7 +1899,8 @@ void loop() {
         prepare_jtty_frequencies(jtty_hz);    
     
         // JTTY: CQ-кадр с позывным (CALL-атом subtype 0)  
-        if (!pc_file_written && !soft_restart_flag) {    
+        if (!pc_file_written && !soft_restart_flag) {
+          String call_msg = "CQ " + my_call_variable + " CQ"; 
           Serial.print(F("[ЭФИР_JTTY] Вызов: ")); Serial.println(call_msg);  
           jtty_send_string(call_msg.c_str());  
         }    

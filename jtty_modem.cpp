@@ -648,7 +648,8 @@ void jtty_send_string(const char* str) {
     for (int f = 0; f < fl.nframes; f++) {  
         uint8_t itone[JTTY_NSYMS];  
         jtty_build_frame(fl.frames[f], itone);  
-        if (!jtty_tx_frame(itone)) { mfsk_carrier(false); return; }  
+        if (!jtty_tx_frame(itone)) { mfsk_carrier(false); return; }
+        watchdog_update();          // <-- добавить: страховка между кадрами 
     }  
     mfsk_carrier(false);  
   

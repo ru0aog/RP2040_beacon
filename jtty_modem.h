@@ -1,54 +1,44 @@
-/**
- * @file jtty_modem.h
- * @brief JTTY Async 4-GFSK modem implementation for RP2040 beacon
- * @author Your Name / @ru0aog
- * @date 2026-10-15
- * @license GPLv3
- * 
- * Target: Raspberry Pi Pico / RP2040-Zero
- * Project: https://github.com/WSJTX/wsjtx/tree/release/3.3
+/**  
+ * ============================================================================  
+ *  jtty_modem.h — Публичный интерфейс передатчика JTTY (WSJT-X 3.3)  
+ * ============================================================================  
+ *  
+ *  Объявляет API модуля асинхронного узкополосного многочастотного режима JTTY;  
+ *  реализация — в jtty_modem.cpp.  
+ *  
+ *  СПЕЦИФИКАЦИЯ (4-GFSK):  
+ *    Центральная частота полосы подготавливается через базовый тракт mfsk_prepare.  
+ *    Сетка из 4 тонов строится вниз от центра полосы с учетом полуторного  
+ *    шага частоты: center - 1.5 * JTTY_STEP_HZ.  
+ *  
+ *  СКОРОСТЬ И СТРУКТУРА:  
+ *    Фиксированная длительность одного символа составляет ~432000 мкс.  
+ *    Кадр состоит из JTTY_NDATA символов (полезная нагрузка + sync-вектор).  
+ *  
+ *  API:  
+ *    prepare_jtty_frequencies(base_hz) — расчет сетки 4-FSK тонов относительно  
+ *        центра полосы для Si5351 или программного PIO-VFO.  
+ *    jtty_send_frame(symbols, nsym) — низкоуровневая блокирующая выдача готового  
+ *        массива тонов (0..3) по жестким дедлайнам времени micros().  
+ *    jtty_send_string(const char*) — текстовый интерфейс; выполняет упаковку  
+ *        строки в кадр и запускает сессию передачи.  
+ * ============================================================================  
  */
 
-#ifndef JTTY_MODEM_H
-#define JTTY_MODEM_H
 
-#include <stdint.h>
-#include <stdbool.h>
-
-#ifdef __cplusplus
-extern "C" {
+#ifndef JTTY_MODEM_H  
+#define JTTY_MODEM_H  
+  
+#include <stdint.h>  
+#include <stdbool.h>  
+  
+// Подготовка частотной сетки; base_hz — центр полосы JTTY.  
+void prepare_jtty_frequencies(uint32_t base_hz);  
+  
+// Передача готового кадра тонов (0..3). Блокирующая.  
+bool jtty_send_frame(const uint8_t* symbols, uint8_t nsym);  
+  
+// Текстовый интерфейс (кодирование — заглушка до порта FEC из WSJT-X).  
+void jtty_send_string(const char* str);  
+  
 #endif
-
-/**
- * @brief Инициализация и запуск циклической передачи данных в моде JTTY.
- * 
- * @param freq_hz Базовая несущая частота передачи (в Гц).
- * @param text Указатель на текстовую строку для отправки в эфир.
- */
-void jtty_modem_start(uint32_t freq_hz, const char* text);
-
-/**
- * @brief Функция циклической обработки (тайминги символов и GFSK интерполяция).
- * Должна непрерывно вызываться внутри основного loop() прошивки.
- */
-void jtty_modem_process(void);
-
-/**
- * @brief Принудительная или плановая остановка передачи JTTY.
- * Выключает VFO и переводит логику маяка в режим ожидания.
- */
-void jtty_modem_stop(void);
-
-/**
- * @brief Проверка текущего статуса работы модема JTTY.
- * 
- * @return true Если в данный момент идет передача кадра в эфир.
- * @return false Если модем находится в режиме ожидания.
- */
-bool jtty_modem_is_active(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif // JTTY_MODEM_H

@@ -2317,7 +2317,7 @@ void vfo_quadrature_debug(void) {
     uint32_t cdiv   = lo_pio->sm[lo_sm].clkdiv;  
   
     Serial.printf("[LODBG] clk_sys: cached=%lu kHz  measured=%lu kHz\n",  
-                  (unsigned long)(current_clk_sys_hz / 1000ULL),  
+                  (unsigned long)(clock_get_hz(clk_sys)/1000ULL),  
                   (unsigned long)(meas_clk / 1000u));  
     Serial.printf("[LODBG] PIO=%d SM=%d  clkdiv=0x%08lX (int=%lu frac=%lu)\n",  
                   pio_get_index(lo_pio), (int)lo_sm,  

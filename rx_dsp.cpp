@@ -142,11 +142,17 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
 // if_hz — ЖЕЛАЕМАЯ частота приёма (несущая мода). Точная ПЧ вычисляется
 // от фактического квантованного LO: сигнал в базовой полосе сидит на
 // f_if_actual = f_target - f_lo_actual.
-void rx_dsp_start(float f_target_hz) {
-    // Ошибка квантования LO вносится в NCO:
-    float f_nco = f_target_hz - (float)vfo_quadrature_lo_hz();
-    nco_step  = (uint32_t)(4294967296.0f * f_nco / RX_FS_IN_HZ);
-    nco_phase = 0;
+void rx_dsp_start(float f_target_hz) {  
+    // Ошибка квантования LO вносится в NCO:  
+    float f_nco = f_target_hz - (float)vfo_quadrature_lo_hz();  
+    nco_step  = (uint32_t)(4294967296.0f * f_nco / RX_FS_IN_HZ);  
+    nco_phase = 0;  
+  
+    Serial.printf("[RXDBG] target=%.1f  lo_actual=%lu  f_nco=%.3f  nco_step=0x%08lX\n",  
+                  (double)f_target_hz,  
+                  (unsigned long)vfo_quadrature_lo_hz(),  
+                  (double)f_nco,  
+                  (unsigned long)nco_step);
   
     memset(hb_i, 0, sizeof(hb_i));
     memset(hb_q, 0, sizeof(hb_q));

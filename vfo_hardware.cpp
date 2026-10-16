@@ -2287,3 +2287,56 @@ void __not_in_flash_func(vfo_operation_set)(bool key_down) {
     if (quad_active) return;  
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out, 1, key_down);
 }
+
+
+void quad_test(uint32_t freq_hz) {
+    Serial.printf("[QUAD] lo_target=%lu Hz  lo_actual=%lu Hz  err=%ld Hz\n",  
+                freq_hz - 3000, vfo_quadrature_lo_hz(),  
+                (long)(freq_hz - 3000) - (long)vfo_quadrature_lo_hz());  
+    Serial.printf("[QUAD] clkdiv=0x%08lX  div=%lu.%02u  sm_cs=0x%08lX\n",  
+                (unsigned long)lo_pio->sm[lo_sm].clkdiv,  
+                (unsigned long)(lo_pio->sm[lo_sm].clkdiv >> 24),  
+                (unsigned)((lo_pio->sm[lo_sm].clkdiv >> 16) & 0xFF),  
+                (unsigned long)lo_pio->sm[lo_sm].execctrl);
+}
+
+
+
+// Этап 0 отладки квадратурного LO: дамп всего состояния PIO/SM,  
+// что генерирует фазы на GP1/GP2.  
+void vfo_quadrature_debug(void) {  
+#define QUAD_LO_PIN_I 1
+#define QUAD_LO_PIN_Q 2
+    // Реальная частота шины: меряем счётчиком, не доверяем current_clk_sys_hz  
+    uint32_t meas_clk = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
+    uint32_t cdiv   = lo_pio->sm[lo_sm].clkdiv;  
+  
+    Serial.printf("[LODBG] clk_sys: cached=%lu kHz  measured=%lu kHz\n",  
+                  (unsigned long)(current_clk_sys_hz / 1000ULL),  
+                  (unsigned long)(meas_clk / 1000u));  
+    Serial.printf("[LODBG] PIO=%d SM=%d  clkdiv=0x%08lX (int=%lu frac=%lu)\n",  
+                  pio_get_index(lo_pio), (int)lo_sm,  
+                  (unsigned long)cdiv,  
+                  (unsigned long)(cdiv >> 16),  
+                  (unsigned long)((cdiv >> 8) & 0xFF));  
+    Serial.printf("[LODBG] SM ctrl=0x%08lX enabled=%d  execctrl=0x%08lX  shiftctrl=0x%08lX\n",  
+                  (unsigned long)lo_pio->ctrl,  
+                  (int)((lo_pio->ctrl & (1u << lo_sm)) != 0),   // <-- запятая  
+                  (unsigned long)lo_pio->sm[lo_sm].execctrl,  
+                  (unsigned long)lo_pio->sm[lo_sm].shiftctrl);
+    // Функция пинов LO — должна быть PIO (F=pio0/pio1), не SIO  
+    Serial.printf("[LODBG] GP%d func=%lu  GP%d func=%lu  pads: out_en=%d/%d\n",  
+                  QUAD_LO_PIN_I, (unsigned long)(io_bank0_hw->io[QUAD_LO_PIN_I].ctrl & IO_BANK0_GPIO0_CTRL_FUNCSEL_BITS),  
+                  QUAD_LO_PIN_Q, (unsigned long)(io_bank0_hw->io[QUAD_LO_PIN_Q].ctrl & IO_BANK0_GPIO0_CTRL_FUNCSEL_BITS),  
+                  (int)((pads_bank0_hw->io[QUAD_LO_PIN_I] & PADS_BANK0_GPIO0_OD_BITS) == 0),  
+                  (int)((pads_bank0_hw->io[QUAD_LO_PIN_Q] & PADS_BANK0_GPIO0_OD_BITS) == 0));  
+    Serial.printf("[LODBG] lo_hz cached=%lu\n",  
+                  (unsigned long)vfo_quadrature_lo_hz());  
+    Serial.printf("[QUAD] clkdiv_hw=0x%08lX execctrl=0x%08lX pinctrl=0x%08lX instr=0x%04lX\n",  
+                  (unsigned long)lo_pio->sm[lo_sm].clkdiv,  
+                  (unsigned long)lo_pio->sm[lo_sm].execctrl,  
+                  (unsigned long)lo_pio->sm[lo_sm].pinctrl,  
+                  (unsigned long)lo_pio->sm[lo_sm].instr);
+}
+
+

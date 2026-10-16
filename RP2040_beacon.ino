@@ -437,6 +437,39 @@ void check_serial_commands() {
             }  
           }
 
+
+          else if (command.startsWith("quad ")) {          // quad 3600000      
+              uint32_t f = strtoul(command.substring(5).c_str(), NULL, 10);      
+              if (f == 0) f = 3600000;      
+              if (is_transmitting) {      
+                  Serial.println(F("[Ошибка] Сейчас идет трансляция!"));      
+              } else {    
+                  Serial.println("запускаем квадратурный режим");    
+                  vfo_quadrature_start(f);      
+                  Serial.printf("[QUAD] LO = %lu Гц на GP1/GP2\n", (unsigned long)f);  
+                  vfo_quadrature_debug();   // этап 0: регистры PIO/пинов/клока  
+                  delay(20);  
+                  // второй замер — clk_sys после возможного boost  
+                  vfo_quadrature_debug();  
+              }      
+          }
+
+
+
+
+
+
+
+
+
+
+
+
+          else if (command.equalsIgnoreCase("quad")) {
+            vfo_quadrature_start(14100000);
+            quad_test(14100000);
+          }
+
           else if (command.equalsIgnoreCase("quad off")) {    
               // Должна идти ПЕРВОЙ — иначе startsWith("quad ") перехватит её  
               uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);    

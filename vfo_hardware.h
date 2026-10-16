@@ -47,8 +47,8 @@ void     vfo_quadrature_start(uint32_t freq_hz);
 void     vfo_quadrature_stop(uint32_t freq_hz, double step_hz);  
 uint32_t vfo_quadrature_lo_hz(void);   // фактическая квантованная частота LO (для NCO)
 
-
-
+void quad_test(uint32_t freq_hz);
+void vfo_quadrature_debug(void);
 
 
 

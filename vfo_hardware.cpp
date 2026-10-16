@@ -2213,18 +2213,23 @@ void __not_in_flash_func(vfo_dither_reset)(void) {
 void vfo_quadrature_start(uint32_t freq_hz) {  
     // Целевая частота LO — ниже настраиваемой на величину ПЧ  
     uint32_t lo_hz = (freq_hz > RX_IF_SHIFT_HZ) ? (freq_hz - RX_IF_SHIFT_HZ) : freq_hz;  
-  
-    // Дробный clkdiv: 24.8 fixed-point. Аппаратный дробный делитель PIO,  
-    // без дизеринга и без core1.  
-    // div_q8 = clk_sys*256 / (4*lo_hz)  
-    uint64_t num    = (uint64_t)current_clk_sys_hz * 256;  
-    uint32_t div_q8 = (uint32_t)(num / (4ull * lo_hz));  
-    if (div_q8 < (2u << 8))                    div_q8 = 2u << 8;  
-    if (div_q8 > (0xFFFFu << 8) + 0xFF)        div_q8 = (0xFFFFu << 8) + 0xFF;  
-  
-    // Фактическая частота LO: f = clk_sys / (4 * div_q8/256) = num / (4*div_q8)  
-    quad_lo_actual_hz = (uint32_t)(num / (div_q8 * 4ull));  
-  
+    Serial.print("[QUAD] Целевая частота "); Serial.println(lo_hz);
+    // Дробный clkdiv: 24.8 fixed-point. Аппаратный дробный делитель PIO,    
+    // без дизеринга и без core1.    
+    // div_q8 = clk_sys*256 / (4*lo_hz)    
+    // ВАЖНО: current_clk_sys_hz здесь — кэш от последнего TX-init и может    
+    // отставать от реальной шины (наблюдалось 120 MHz vs 125 MHz), что    
+    // давало уход LO на 2.8 кГц. Берём живое значение из clock_get_hz.    
+    uint64_t clk_sys_hz = clock_get_hz(clk_sys);                    // фактическая шина  
+    uint64_t num    = clk_sys_hz * 256;    
+    uint32_t div_q8 = (uint32_t)(num / (4ull * lo_hz));    
+    if (div_q8 < (2u << 8))                    div_q8 = 2u << 8;    
+    if (div_q8 > (0xFFFFu << 8) + 0xFF)        div_q8 = (0xFFFFu << 8) + 0xFF;    
+    
+    // Фактическая частота LO: f = clk_sys_hz / (4 * div_q8/256) = num / (4*div_q8)    
+    quad_lo_actual_hz = (uint32_t)(num / (div_q8 * 4ull));
+    Serial.print("[QUAD] Фактическая частота "); Serial.println(quad_lo_actual_hz);
+
     if (!quad_program_loaded) {  
         quad_offset = pio_add_program(lo_pio, &pio_quad_program);  
         quad_program_loaded = true;  

@@ -486,14 +486,13 @@ static void normalize_jtty(char* s) {
     *w = 0;  
 }  
   
-static bool is_standard_callsign(const char* s) {  
-    size_t n = strlen(s);  
-    if (n < 3 || n > 6) return false;  
-    if (strchr(s, '/') || strchr(s, '<')) return false;  
-    int nd = 0;  
-    for (size_t i = 0; s[i]; i++) if (isdigit((unsigned char)s[i])) nd++;  
-    return nd >= 1;   // упрощённо; формула pack28 сама отсеет невалидное  
-}  
+static bool is_standard_callsign(const char* s) {    
+    // Стандартный позывной <=> pack28 выше хэш-диапазона.    
+    // Цифровые строки ("123456"), слэшевые ("RU0AOG/B") и прочее    
+    // уходят в хэш-ветку и возвращают значение < порога — значит    
+    // это не CALL-атом, а обычный текст (TEXT5) или недопустимый вызов.    
+    return pack28(s) > (int32_t)(PACK28_NTOKENS + PACK28_MAX22);    
+}
   
 // Сообщение -> кадры. Правила маяка:  
 //   "CQ <call> CQ" / "CQ <call>"  -> CALL-атом subtype CQ  

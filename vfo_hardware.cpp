@@ -2251,15 +2251,12 @@ void vfo_quadrature_start(uint32_t freq_hz) {
     pio_sm_config cq = pio_get_default_sm_config();  
     sm_config_set_wrap(&cq, quad_offset + 0, quad_offset + 3);  
     sm_config_set_set_pins(&cq, pin_freq_out_i, 2);   // Q = pin_freq_out_i + 1  
+    // Делитель в конфиге: 24.8 -> float, SDK упакует в регистр при sm_init  
+    sm_config_set_clkdiv(&cq, (float)div_q8 / 256.0f);  
     pio_gpio_init(lo_pio, pin_freq_out_i);  
     pio_gpio_init(lo_pio, pin_freq_out_q);  
   
-    // Дробный делитель ДО запуска SM — прямая запись в регистр,  
-    // минуя конвейер core1 (он остановлен).  
-    // Регистр: INT[31:16] | FRAC[15:8] == div_q8 << 8  
-    lo_pio->sm[lo_sm].clkdiv = (div_q8 << 8);  
-  
-    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq);  
+    pio_sm_init(lo_pio, lo_sm, quad_offset, &cq); 
     // Направление ставим ПОСЛЕДНИМ, после sm_init — пины не должны  
     // выпускать полуинициализированные переходы в смеситель.  
     pio_sm_set_consecutive_pindirs(lo_pio, lo_sm, pin_freq_out_i, 2, true);  

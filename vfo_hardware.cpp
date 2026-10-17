@@ -133,10 +133,9 @@ volatile bool clk_boosted = false;       // активация разгона
 volatile bool vfo_auto_boost = false;    // авто-разгон, вычисляется один раз на старте
 
 // --- Квадратура I/Q: один SM, 4-тактовая программа, 2 соседних пина ---  
-// ВАЖНО: пин Q обязан быть pin_freq_out + 1 (set pins работает с  
-// последовательным диапазоном). Если pin_freq_out = 21, то Q = GP22.
-uint8_t pin_freq_out_i = 1;  
-uint8_t pin_freq_out_q = 2;  
+// базовый пин PIO-блока = GP0 = Q, следующий = GP1 = I  
+pin_freq_out_i = 0;   // PIO base pin — физически это Q (GP0)  
+pin_freq_out_q = 1;   // base+1 — физически это I (GP1)
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  
@@ -176,11 +175,11 @@ static const pio_program_t pio_square_program = {
   
 // Ассемблерная микропрограмма PIO для меандра (цикл из 4 тактов) 
 static const uint16_t pio_quad_instructions[] = {  
-    0xe001,  // set pins, 0b01  : I=0 Q=1  
-    0xe003,  // set pins, 0b11  : I=1 Q=1  
-    0xe002,  // set pins, 0b10  : I=1 Q=0  
-    0xe000,  // set pins, 0b00  : I=0 Q=0  
-};  
+    0xe001,  // set pins, 0b01: Q=1 I=0  
+    0xe003,  // set pins, 0b11: Q=1 I=1  
+    0xe002,  // set pins, 0b10: Q=0 I=1  
+    0xe000,  // set pins, 0b00: Q=0 I=0  
+};
 static const pio_program_t pio_quad_program = {  
     .instructions = pio_quad_instructions,  
     .length = 4,  

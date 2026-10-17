@@ -471,6 +471,7 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     case RX_MODE_JTTY: {
         // gtz работает в звуковой полосе fs_out — частоты банка = ПЧ, НЕ радиочастота!  
         gtz_bank_init(-46.875f, 31.25f, 4, fs_out);   // тоны -47,-16,+16,+47 Гц  
+        sym_samples = (uint32_t)(fs_out * 0.032f);    // <-- вернуть: 500 отсчётов = 32 мс  
         Serial.printf("[JTTY-RX] baseband tones -46.9..+46.9 Hz step=31.25 sym=%lu smp fs=%.1f\n",  
                       (unsigned long)sym_samples, (double)fs_out);
         break; 

@@ -65,7 +65,28 @@ static int16_t prev_i = 0, prev_q = 0;   // последние I/Q прошло�
 static float      fs_out = 15625.0f;  
 static float      f_center_hz = 0;    // для AFC  
 static bool       afc_on = false;  
+
+// добавить в секцию глобальных данных (рядом с rt/cw/olv/ifk)  
+// ---------- JTTY приёмник ----------  
+// Кадр: 59 символов = 13 sync (is13) + 46 данных (дибиты кода).  
+static uint8_t  jtty_sym[59];       // текущий кадр (тоны 0..3)  
+static uint8_t  jtty_nsym = 0;      // заполненная позиция  
+static uint8_t  jtty_hist[13];      // последние 13 символов (кольцо)  
+static uint8_t  jtty_hpos = 0;      // позиция записи в кольцо  
+static uint8_t  jtty_inframe = 0;   // 1 = внутри кадра  
   
+// Паттерн is13 из спецификации JTTY (если JTTY_IS13 из jtty_modem.cpp  
+// виден — убрать этот дефайн и ссылаться на него).  
+static const uint8_t jtty_is13[13] = { 0,2,2,3,0,0,3,2,1,3,1,2,0 };  
+  
+// Число совпадений кольца истории с паттерном is13  
+static uint8_t jtty_sync_score(void) {  
+    uint8_t m = 0;  
+    for (uint8_t i = 0; i < 13; i++)  
+        if (jtty_hist[(jtty_hpos + i) & 15] == jtty_is13[i]) m++;  
+    return m;  
+}
+
 // ============================================================================  
 // 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)  
 // ----------------------------------------------------------------------------  
@@ -410,6 +431,8 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     sym_acc = 0; sample_idx = 0;  
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
     memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));
+    jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0;  
+    memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13
     cw.dot_us = 60000.0f; // (60 мс ≈ 20 WPM — стартовая точка, EMA подстроится)
     cw.noise_floor = 0;  
   
@@ -564,17 +587,41 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         case RX_MODE_JTTY: {  
             // Отладка: поток символов + статистика тонов раз в ~0.5 с.  
             static uint32_t j_dbg_cnt = 0, j_last_ms = 0;  
+            // TODO: sync по is13 + Витерби TBCC  
             static int32_t  j_acc[4]; static uint8_t j_n = 0;  
             for (uint8_t t = 0; t < 4 && t < gtz_ntones; t++)  
                 j_acc[t] += gtz_power(t);  
-            if (++j_n >= 16 || millis() - j_last_ms > 500) {   // ~16 симв = 0.5 с  
-                Serial.printf("[JTTY] pwr: %ld %ld %ld %ld  win=%d  dropped=%lu\n",  
-                              (long)j_acc[0]/16, (long)j_acc[1]/16,  
-                              (long)j_acc[2]/16, (long)j_acc[3]/16,  
-                              tone, (unsigned long)rx_capture_dropped());  
-                j_acc[0]=j_acc[1]=j_acc[2]=j_acc[3]=0; j_n=0; j_last_ms=millis();  
+            if (++j_n >= 16) {  
+                Serial.printf("[JTTY] pwr: %ld %ld %ld %ld  win=%d\n",  
+                              (long)j_acc[0]/j_n, (long)j_acc[1]/j_n,  
+                              (long)j_acc[2]/j_n, (long)j_acc[3]/j_n, tone);  
+                j_acc[0]=j_acc[1]=j_acc[2]=j_acc[3]=0; j_n=0;  
             }  
-            // TODO: sync по is13 + Витерби TBCC  
+  
+            // Кольцо истории для поиска is13  
+            jtty_hist[jtty_hpos & 15] = tone;  
+            jtty_hpos = (jtty_hpos + 1) & 15;  
+  
+            if (!jtty_inframe) {  
+                // Sync: >=11 из 13 совпадений (толерантность к 2 ошибкам)  
+                if (jtty_sync_score() >= 11) {  
+                    jtty_inframe = 1;  
+                    jtty_nsym = 0;  
+                    memcpy(jtty_sym, jtty_is13, 13);   // sync-тоны в кадр  
+                    jtty_nsym = 13;  
+                }  
+            } else {  
+                jtty_sym[jtty_nsym++] = tone;  
+                if (jtty_nsym >= 59) {                 // кадр собран  
+                    jtty_inframe = 0;  
+                    Serial.print(F("[JTTY] frame:"));  
+                    for (uint8_t i = 13; i < 59; i++)  
+                        Serial.printf("%d", jtty_sym[i]);  
+                    Serial.println();  
+                    // TODO: 46 дибитов -> 92 бита -> soft/hard Viterbi TBCC  
+                    // -> CRC12 -> распаковка pack28 (порт из WSJT-X tbcc.f90)  
+                }  
+            }  
             break;  
         }
         default: break;  

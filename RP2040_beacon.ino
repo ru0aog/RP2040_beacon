@@ -709,6 +709,26 @@ void check_serial_commands() {
               }  
           }
 
+          else if (command.startsWith("adc")) {  
+              // Снимок одного блока сырых слов [I|Q]: min/max/DC-офсет.  
+              const volatile uint32_t* blk = rx_capture_get_block();  
+              if (!blk) Serial.println(F("[ADC] блоков нет — rx запущен?"));  
+              else {  
+                  int lo_i = 4095, hi_i = 0, lo_q = 4095, hi_q = 0;  
+                  int64_t si = 0, sq = 0;  
+                  for (int k = 0; k < RX_BLOCK_SAMPLES; k++) {  
+                      int i = blk[k] & 0xFFFF, q = blk[k] >> 16;  
+                      if (i < lo_i) lo_i = i; if (i > hi_i) hi_i = i; si += i;  
+                      if (q < lo_q) lo_q = q; if (q > hi_q) hi_q = q; sq += q;  
+                  }  
+                  rx_capture_release();  
+                  Serial.printf("[ADC] I: %d..%d mid=%ld  Q: %d..%d mid=%ld  drop=%lu\n",  
+                      lo_i, hi_i, (long)(si/RX_BLOCK_SAMPLES),  
+                      lo_q, hi_q, (long)(sq/RX_BLOCK_SAMPLES),  
+                      (unsigned long)rx_capture_dropped());  
+              }  
+          }
+
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
             param_part.trim();

@@ -47,11 +47,14 @@ extern void     rx_dsp_release_output(void);
 extern void     rx_dsp_set_nco_hz(float f_hz);  
 extern float    rx_dsp_fs_out(void);  
 
+extern uint32_t rx_capture_dropped(void);
+
 typedef enum {  
     RX_MODE_NONE=0, RX_MODE_CW, RX_MODE_RTTY,  
     RX_MODE_OLIVIA, RX_MODE_CONTESTIA,  
-    RX_MODE_THOR, RX_MODE_MFSK16, RX_MODE_DOMEX, RX_MODE_FSQ, RX_MODE_IFKP  
-} rx_mode_t;  
+    RX_MODE_THOR, RX_MODE_MFSK16, RX_MODE_DOMEX, RX_MODE_FSQ, RX_MODE_IFKP,  
+    RX_MODE_JTTY      // 10 — 4-FSK, 31.25 Гц, 32 мс (WSJT-X 3.3)  
+} rx_mode_t;
 
 static rx_mode_t  dec_mode = RX_MODE_NONE;  
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
@@ -70,10 +73,35 @@ static bool       afc_on = false;
 #define DEC_MAX_TONES  33  
   
 typedef struct {  
-    int32_t  k;          // 2cos(ω)·2^15  
-    int32_t  s1, s2;     // задержка Гёрцеля  
-    uint32_t n;          // счётчик отсчётов в окне  
+    int32_t  k;                 // 2cos(ω)·2^15  
+    int32_t  s1, s2;            // задержка Гёрцеля (I)  
+    int32_t  q1, q2;            // задержка Гёрцеля (Q) — для комплексной мощности  
+    uint32_t n;  
 } gtz_t;  
+  
+static void gtz_reset(gtz_t* g) { g->s1 = g->s2 = g->q1 = g->q2 = 0; g->n = 0; }  
+  
+// Комплексный вход: xi + j·xq — мощность = P_i + P_q  
+static inline void gtz_push(const int16_t* xi, const int16_t* xq, int n) {  
+    for (int s = 0; s < n; s++) {  
+        int32_t vi = xi[s], vq = xq[s];  
+        for (uint8_t t = 0; t < gtz_ntones; t++) {  
+            int32_t s0 = vi + (int32_t)(((int64_t)gtz[t].k * gtz[t].s1) >> 15) - gtz[t].s2;  
+            gtz[t].s2 = gtz[t].s1; gtz[t].s1 = s0;  
+            int32_t r0 = vq + (int32_t)(((int64_t)gtz[t].k * gtz[t].q1) >> 15) - gtz[t].q2;  
+            gtz[t].q2 = gtz[t].q1; gtz[t].q1 = r0;  
+        }  
+    }  
+    for (uint8_t t = 0; t < gtz_ntones; t++) gtz[t].n += n;  
+}  
+  
+static inline int32_t gtz_power(uint8_t t) {  
+    int32_t s1 = gtz[t].s1 >> 8, s2 = gtz[t].s2 >> 8;  
+    int32_t q1 = gtz[t].q1 >> 8, q2 = gtz[t].q2 >> 8;  
+    int64_t pi = (int64_t)s1*s1 + (int64_t)s2*s2 - (((int64_t)gtz[t].k * s1 * s2) >> 15);  
+    int64_t pq = (int64_t)q1*q1 + (int64_t)q2*q2 - (((int64_t)gtz[t].k * q1 * q2) >> 15);  
+    return (int32_t)((pi + pq) >> 8);  
+}
   
 static gtz_t   gtz[DEC_MAX_TONES];  
 static uint8_t gtz_ntones = 0;  
@@ -386,7 +414,19 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         gtz_bank_init(center_hz - 187.15f, 11.697f, 33, fs_out);  
         sym_samples = (uint32_t)(fs_out * 0.128f);  
         ifk.offset = 1; ifk.ntones = 33;  
-        break;  
+        break;
+    case RX_MODE_JTTY:  
+        // 4 тона, шаг 31.25 Гц; нижний тон = center - 1.5·31.25 = center - 46.875  
+        // (center = частота строки FREQ_JTTY = центр полосы, как у Olivia ниже)  
+        gtz_bank_init(center_hz - 46.875f, 31.25f, 4, fs_out);  
+        sym_samples = (uint32_t)(fs_out * 0.032f);   // 500 отсчётов при 15.6 ksps  
+        Serial.printf("[JTTY-RX] f0=%.1f Hz step=31.25 sym=%lu smp (%.1f ms) fs=%.1f\n",  
+                      (double)(center_hz - 46.875f),  
+                      (unsigned long)sym_samples,  
+                      (double)(1000.0f * sym_samples / fs_out),  
+                      (double)fs_out);  
+        break;
+
     default: break;  
     }  
 }  
@@ -478,7 +518,23 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         case RX_MODE_THOR: case RX_MODE_DOMEX:  
         case RX_MODE_FSQ:  case RX_MODE_IFKP:  
             ifk_on_tone(tone);                // TODO: varicode/FEC  
+            break;
+        case RX_MODE_JTTY: {  
+            // Отладка: поток символов + статистика тонов раз в ~0.5 с.  
+            static uint32_t j_dbg_cnt = 0, j_last_ms = 0;  
+            static int32_t  j_acc[4]; static uint8_t j_n = 0;  
+            for (uint8_t t = 0; t < 4 && t < gtz_ntones; t++)  
+                j_acc[t] += gtz_power(t);  
+            if (++j_n >= 16 || millis() - j_last_ms > 500) {   // ~16 симв = 0.5 с  
+                Serial.printf("[JTTY] pwr: %ld %ld %ld %ld  win=%d  dropped=%lu\n",  
+                              (long)j_acc[0]/16, (long)j_acc[1]/16,  
+                              (long)j_acc[2]/16, (long)j_acc[3]/16,  
+                              tone, (unsigned long)rx_capture_dropped());  
+                j_acc[0]=j_acc[1]=j_acc[2]=j_acc[3]=0; j_n=0; j_last_ms=millis();  
+            }  
+            // TODO: sync по is13 + Витерби TBCC  
             break;  
+        }
         default: break;  
         }  
   

@@ -109,24 +109,12 @@ static uint8_t jtty_sync_score(void) {
 #define DEC_MAX_TONES 33         // максимум тонов (FSQ/IFKP = 33, JTTY = 4)
   
 typedef struct {  
-    int32_t k;                   // коэффициент Гёрцеля в Q15  
-    int32_t s1, s2;              // состояние рекуррентного фильтра — канал I  
-    int32_t q1, q2;              // состояние рекуррентного фильтра — канал Q  
-} gtz_t;  
+    int32_t cr, ci;        // e^{jω} в Q15: cr=cos, ci=sin  
+    int32_t ar, ai;        // комплексный резонатор s = z + c·s  
+} gtz_t;
   
 static gtz_t  gtz[DEC_MAX_TONES]; // банк фильтров  
 static uint8_t gtz_ntones = 0;    // сколько тонов реально активно  
-  
-// Сброс накопителей одного фильтра (в начале каждого символа/окна).  
-static inline void gtz_reset(gtz_t* g) {  
-    g->s1 = g->s2 = 0;  
-    g->q1 = g->q2 = 0;  
-}  
-  
-// Сброс всего банка.  
-static void gtz_reset_all(void) {  
-    for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
-}  
   
 // ----------------------------------------------------------------------------  
 // gtz_push — прогнать n комплексных отсчётов через весь банк.  
@@ -134,20 +122,15 @@ static void gtz_reset_all(void) {
 // Если режим работает только по I (CW/RTTY и т.п.), передайте xq = NULL —  
 // Q-рекуррент тогда пропускается и не жрёт CPU.  
 // ----------------------------------------------------------------------------  
-static void gtz_push(const int16_t* xi, const int16_t* xq, int n) {  
+// Стало — однополюсный комплексный Гёрцель:  
+static inline void gtz_push(const int16_t* xi, const int16_t* xq, int n) {  
     for (int i = 0; i < n; i++) {  
-        int32_t vi = xi[i];  
-        int32_t vq = xq ? xq[i] : 0;  
+        int32_t xr = xi[i], xq_ = xq[i];  
         for (uint8_t t = 0; t < gtz_ntones; t++) {  
             gtz_t* g = &gtz[t];  
-            // --- I-канал ---  
-            int32_t s0 = vi + (int32_t)(((int64_t)g->k * g->s1) >> 15) - g->s2;  
-            g->s2 = g->s1; g->s1 = s0;  
-            // --- Q-канал (только если есть что накапливать) ---  
-            if (xq) {  
-                int32_t r0 = vq + (int32_t)(((int64_t)g->k * g->q1) >> 15) - g->q2;  
-                g->q2 = g->q1; g->q1 = r0;  
-            }  
+            int32_t tr = xr + (((int64_t)g->cr * g->ar - (int64_t)g->ci * g->ai) >> 15);  
+            int32_t ti = xq_ + (((int64_t)g->cr * g->ai + (int64_t)g->ci * g->ar) >> 15);  
+            g->ar = tr; g->ai = ti;  
         }  
     }  
 }  
@@ -160,13 +143,11 @@ static void gtz_push(const int16_t* xi, const int16_t* xq, int n) {
 // ----------------------------------------------------------------------------  
 static inline int32_t gtz_power(uint8_t t) {  
     const gtz_t* g = &gtz[t];  
-    int64_t p = (int64_t)g->s1 * g->s1 + (int64_t)g->s2 * g->s2  
-              - (((int64_t)g->k * g->s1 * g->s2) >> 15);  
-    p        += (int64_t)g->q1 * g->q1 + (int64_t)g->q2 * g->q2  
-              - (((int64_t)g->k * g->q1 * g->q2) >> 15);  
-    if (p > 0x7FFFFFFFLL) p = 0x7FFFFFFFLL;   // насыщение — не молчаливый wrap  
+    int64_t p = (int64_t)g->ar * g->ar + (int64_t)g->ai * g->ai;  
+    p >>= 10;                                     // масштаб под int32  
+    if (p > 0x7FFFFFFFLL) p = 0x7FFFFFFFLL;  
     return (int32_t)p;  
-}  
+}
   
 // ----------------------------------------------------------------------------  
 // gtz_argmax — индекс самого мощного тона банка + его мощность.  
@@ -180,7 +161,12 @@ static uint8_t gtz_argmax(int32_t* out_max) {
     if (out_max) *out_max = bp;  
     return best;  
 }  
-  
+
+static inline void gtz_reset(gtz_t* g) {  
+    g->ar = 0;  
+    g->ai = 0;  
+}
+
 // ----------------------------------------------------------------------------  
 // gtz_bank_init — инициализация банка на сетку тонов:  
 //   тон t сидит на частоте  f0_hz + t * step_hz, отсчёты идут с частотой fs.  
@@ -193,7 +179,9 @@ static void gtz_bank_init(float f0_hz, float step_hz, uint8_t ntones, float fs) 
     gtz_ntones = (ntones > DEC_MAX_TONES) ? DEC_MAX_TONES : ntones;  
     for (uint8_t t = 0; t < gtz_ntones; t++) {  
         float w = 2.0f * PI * (f0_hz + t * step_hz) / fs;  
-        gtz[t].k = (int32_t)(32768.0f * 2.0f * cosf(w));  
+        // e^{-jw} — комплексный коэффициент Гёрцеля, Q15  
+        gtz[t].cr = (int32_t)(32768.0f * cosf(w));  
+        gtz[t].ci = (int32_t)(32768.0f * sinf(w));  
         gtz_reset(&gtz[t]);  
     }  
 }
@@ -482,13 +470,9 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         break;
     case RX_MODE_JTTY: {
         // gtz работает в звуковой полосе fs_out — частоты банка = ПЧ, НЕ радиочастота!  
-        float f_if_hz = center_hz - (float)vfo_quadrature_lo_hz();   // ≈2773 Гц  
-        gtz_bank_init(f_if_hz - 46.875f, 31.25f, 4, fs_out);  
-        sym_samples = (uint32_t)(fs_out * 0.032f);  
-        Serial.printf("[JTTY-RX] f0_audio=%.1f Hz (RF=%.1f) step=31.25 sym=%lu smp fs=%.1f\n",  
-                      (double)(f_if_hz - 46.875f),  
-                      (double)(center_hz - 46.875f),  
-                      (unsigned long)sym_samples, (double)fs_out);  
+        gtz_bank_init(-46.875f, 31.25f, 4, fs_out);   // тоны -47,-16,+16,+47 Гц  
+        Serial.printf("[JTTY-RX] baseband tones -46.9..+46.9 Hz step=31.25 sym=%lu smp fs=%.1f\n",  
+                      (unsigned long)sym_samples, (double)fs_out);
         break; 
         }
     default: break;  

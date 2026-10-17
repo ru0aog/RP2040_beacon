@@ -362,7 +362,7 @@ static void cw_decode_elements(void);
 static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
     // dur_ms — длительность завершившегося интервала (тона или паузы)  
     uint32_t dur_smp = on ? (idx - cw.on_start) : (idx - cw.off_start);  
-    float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000 / 1000.0f;  
+    float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000;
   
     float dot_ms = cw.dot_us * 0.001f;      // оценка точки в мс
     if (dot_ms < 20.0f || dot_ms > 150.0f) dot_ms = 60.0f;  // страховка при 0/мусоре
@@ -448,7 +448,7 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(63.0f, 0.0f, 1, fs_out);   // тон реально ~+63 Гц — остаток LO до калибровки кварца
+        gtz_bank_init(70.0f, 0.0f, 1, fs_out);   // тон ~+70 Гц — компенсация сдвига LO
         sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс
         Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",  
                       (unsigned)gtz_ntones, (unsigned long)sym_samples);  // <-- банк инициализирован

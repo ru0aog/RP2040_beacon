@@ -412,73 +412,73 @@ static void ifk_on_tone(uint8_t tone) {
 // ============================================================================  
 // 6. Верхний уровень: конфигурация режима + главный цикл  
 // ============================================================================  
+// ВАЖНО: gtz_bank_init получает частоты в БАЗОВОЙ ПОЛОСЕ (аудио), не RF!  
+// rx_dsp вращает спектр так, что center_hz (RF) → 0 Гц. Поэтому все смещения  
+// ниже — константы относительно 0, а не относительно center_hz.  
 void rx_decoders_start(uint8_t mode, float center_hz) {  
     dec_mode = (rx_mode_t)mode;  
     fs_out = rx_dsp_fs_out();  
     f_center_hz = center_hz;  
     sym_acc = 0; sample_idx = 0;  
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
-    memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));
+    memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));  
     jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0;  
-    memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13
-    cw.dot_us = 60000.0f; // (60 мс ≈ 20 WPM — стартовая точка, EMA подстроится)
+    memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13  
+    cw.dot_us = 60000.0f; // 60 мс ≈ 20 WPM — стартовая точка, EMA подстроится  
     cw.noise_floor = 0;  
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(0.0f, 0.0f, 1, fs_out);                    // тон цели → базовая полоса 0 Гц  
+        gtz_bank_init(0.0f, 0.0f, 1, fs_out);                    // тон цели → 0 Гц  
         sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс  
-        break;
-    case RX_MODE_RTTY:    
-        gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out); // запасной путь    
-        rt.bit_period = (uint32_t)(fs_out / 45.45f);      // ~343 отсчёта на бит    
-        sym_samples   = rt.bit_period / 8;                // подокно ~2.75 мс    
-        rt.prev_mark  = 1;                                // idle-канал = mark
-        rt.space_cnt = 0;
-        rt.state = 0;    
-        break;
+        break;  
+    case RX_MODE_RTTY:  
+        gtz_bank_init(-85.0f, 170.0f, 2, fs_out);                // mark/space = ±85 Гц  
+        rt.bit_period = (uint32_t)(fs_out / 45.45f);             // ~344 отсчёта на бит  
+        sym_samples   = rt.bit_period / 8;                       // подокно ~2.75 мс  
+        rt.prev_mark  = 1;                                       // idle-канал = mark  
+        rt.space_cnt  = 0;  
+        rt.state      = 0;  
+        break;  
     case RX_MODE_OLIVIA:  
     case RX_MODE_CONTESTIA:  
-        // нижний тон = центр - 3.5·31.25  
-        gtz_bank_init(center_hz - 109.375f, 31.25f, 8, fs_out);  
-        sym_samples = (uint32_t)(fs_out * 0.032f);        // 32 мс  
+        // нижний тон = центр полосы - 3.5·31.25 = -109.375 Гц  
+        gtz_bank_init(-109.375f, 31.25f, 8, fs_out);  
+        sym_samples = (uint32_t)(fs_out * 0.032f);               // 32 мс  
         break;  
     case RX_MODE_MFSK16:  
-        gtz_bank_init(center_hz - 117.19f, 15.625f, 16, fs_out);  
-        sym_samples = (uint32_t)(fs_out * 0.064f);        // 64 мс  
-        // MFSK16: абсолютные тоны + код Грея (не IFK) — on_symbol через abs-path  
+        gtz_bank_init(-117.19f, 15.625f, 16, fs_out);  
+        sym_samples = (uint32_t)(fs_out * 0.064f);               // 64 мс  
         break;  
     case RX_MODE_THOR:  
-        gtz_bank_init(center_hz - 132.81f, 15.625f, 18, fs_out);  
-        sym_samples = (uint32_t)(fs_out * 0.128f);        // 128 мс (THOR8)  
+        gtz_bank_init(-132.81f, 15.625f, 18, fs_out);  
+        sym_samples = (uint32_t)(fs_out * 0.128f);               // 128 мс (THOR8)  
         ifk.offset = 2; ifk.ntones = 18;  
         break;  
     case RX_MODE_DOMEX:  
-        gtz_bank_init(center_hz - 132.81f, 15.625f, 18, fs_out);  
+        gtz_bank_init(-132.81f, 15.625f, 18, fs_out);  
         sym_samples = (uint32_t)(fs_out * 0.128f);  
         ifk.offset = 2; ifk.ntones = 18;  
         break;  
     case RX_MODE_FSQ:  
-        gtz_bank_init(center_hz - 140.63f, 8.789f, 33, fs_out);  
+        gtz_bank_init(-140.63f, 8.789f, 33, fs_out);  
         sym_samples = (uint32_t)(fs_out * 0.256f);  
         ifk.offset = 1; ifk.ntones = 33;  
         break;  
     case RX_MODE_IFKP:  
-        gtz_bank_init(center_hz - 187.15f, 11.697f, 33, fs_out);  
+        gtz_bank_init(-187.15f, 11.697f, 33, fs_out);  
         sym_samples = (uint32_t)(fs_out * 0.128f);  
         ifk.offset = 1; ifk.ntones = 33;  
-        break;
-    case RX_MODE_JTTY: {
-        // gtz работает в звуковой полосе fs_out — частоты банка = ПЧ, НЕ радиочастота!  
-        gtz_bank_init(-46.875f, 31.25f, 4, fs_out);   // тоны -47,-16,+16,+47 Гц  
-        sym_samples = (uint32_t)(fs_out * 0.032f);    // <-- вернуть: 500 отсчётов = 32 мс  
+        break;  
+    case RX_MODE_JTTY:  
+        gtz_bank_init(-46.875f, 31.25f, 4, fs_out);              // тоны -47,-16,+16,+47 Гц  
+        sym_samples = (uint32_t)(fs_out * 0.032f);               // 500 отсчётов = 32 мс  
         Serial.printf("[JTTY-RX] baseband tones -46.9..+46.9 Hz step=31.25 sym=%lu smp fs=%.1f\n",  
-                      (unsigned long)sym_samples, (double)fs_out);
-        break; 
-        }
+                      (unsigned long)sym_samples, (double)fs_out);  
+        break;  
     default: break;  
     }  
-}  
+}
   
 // AFC: оценка расстройки = bin_max·step - expected; коррекция NCO  
 static void afc_update(uint8_t tone, int32_t pwr) {

@@ -425,7 +425,8 @@ static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {
   
 // Бинарное дерево Морзе, строится кодом — пробелы считать не нужно.  
 // '.'→2k+1, '-'→2k+2, корень idx=0.  
-static char cw_tree[64];  
+// Глубина до 6 элементов → узлов 2^7-1 = 127  
+static char cw_tree[128];
   
 static void cw_tree_init(void) {  
     memset(cw_tree, ' ', sizeof(cw_tree));  
@@ -446,19 +447,19 @@ static void cw_tree_init(void) {
     };  
     for (unsigned i = 0; i < sizeof(tab)/sizeof(tab[0]); i++) {  
         int idx = 0;  
-        for (const char *s = tab[i][1]; *s && idx < 63; s++)  
+        for (const char *s = tab[i][1]; *s && idx < 127; s++)  
             idx = idx * 2 + (*s == '-' ? 2 : 1);  
-        if (idx < 64) cw_tree[idx] = tab[i][0][0];  
-    }  
+        if (idx < 128) cw_tree[idx] = tab[i][0][0];  
+    }
 }
   
 static void cw_decode_elements(void) {  
     if (!cw.elem_n) return;  
     cw.elem_buf[cw.elem_n] = 0;  
     int idx = 0;  
-    for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
+    for (uint8_t i = 0; i < cw.elem_n && idx < 127; i++)  
         idx = idx * 2 + (cw.elem_buf[i] == '-' ? 2 : 1);  
-    char c = (idx < 64) ? cw_tree[idx] : '?';  
+    char c = (idx < 128) ? cw_tree[idx] : '?';
     if (dbg_rx)  
         Serial.printf("\n[ELEMS] '%s' idx=%d -> '%c'\n", cw.elem_buf, idx, c ? c : '?');  
     if (c && c != ' ') Serial.write(c);  

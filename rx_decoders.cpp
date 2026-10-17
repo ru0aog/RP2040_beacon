@@ -415,9 +415,12 @@ static void ifk_on_tone(uint8_t tone) {
 // ВАЖНО: gtz_bank_init получает частоты в БАЗОВОЙ ПОЛОСЕ (аудио), не RF!  
 // rx_dsp вращает спектр так, что center_hz (RF) → 0 Гц. Поэтому все смещения  
 // ниже — константы относительно 0, а не относительно center_hz.  
-void rx_decoders_start(uint8_t mode, float center_hz) {  
+void rx_decoders_start(uint8_t mode, float center_hz) {
+    Serial.printf("[DEC] start: mode=%u center=%.1f\n",  
+                (unsigned)mode, (double)center_hz);
     dec_mode = (rx_mode_t)mode;  
     fs_out = rx_dsp_fs_out();  
+    Serial.printf("[DEC] fs_out=%.1f\n", (double)fs_out);       // <-- fs валидна 
     f_center_hz = center_hz;  
     sym_acc = 0; sample_idx = 0;  
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
@@ -430,7 +433,9 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     switch (dec_mode) {  
     case RX_MODE_CW:  
         gtz_bank_init(0.0f, 0.0f, 1, fs_out);                    // тон цели → 0 Гц  
-        sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс  
+        sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс
+        Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",  
+                      (unsigned)gtz_ntones, (unsigned long)sym_samples);  // <-- банк инициализирован
         break;  
     case RX_MODE_RTTY:  
         gtz_bank_init(-85.0f, 170.0f, 2, fs_out);                // mark/space = ±85 Гц  
@@ -494,8 +499,14 @@ void rx_decoders_stop(void) { dec_mode = RX_MODE_NONE; }
   
 // Вызывается из цикла core1 (rx_dsp_entry) после заполнения out_i/out_q  
 void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {  
-    if (dec_mode == RX_MODE_NONE || n == 0) return;  
+    // Контроль: функция вообще вызывается?  
+    static uint32_t calls = 0;  
+    if (++calls == 1 || calls % 1000 == 0)  
+        Serial.printf("[DEC] process: calls=%lu mode=%u n=%u\n",  
+                      (unsigned long)calls, (unsigned)dec_mode, (unsigned)n);  
   
+    if (dec_mode == RX_MODE_NONE || n == 0) return;  
+
     // ---------------- CW: блок = одно окно детектора огибающей ----------------  
     if (dec_mode == RX_MODE_CW) {  
         gtz_push(xi, xq, n);  

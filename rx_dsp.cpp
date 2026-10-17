@@ -98,10 +98,13 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
         uint8_t wr = out_wr;  
   
         uint8_t n_out = 0;  
-        for (int n = 0; n < RX_BLOCK_SAMPLES; n++) {  
-            uint32_t w = blk[n];  
-            int32_t i_raw = (int16_t)(w & 0xFFFF) - 2048;      // ADC0 → центрирование  
-            int32_t q_raw = (int16_t)(w >> 16)     - 2048;     // ADC1  
+        const volatile int16_t* s = (const volatile int16_t*)blk;  
+        // Одно слово FIFO = один 16-битный отсчёт (нижняя половина).  
+        // Раунд-робин: чётные индексы s = ADC0 (I), нечётные = ADC1 (Q).  
+        // Пар I/Q в блоке = RX_BLOCK_SAMPLES/2.  
+        for (int n = 0; n < RX_BLOCK_SAMPLES / 2; n++) {  
+            int32_t i_raw = s[4 * n];  
+            int32_t q_raw = s[4 * n + 2];  
   
             // Комплексное вращение NCO: сдвиг спектра на -f_nco  
             int16_t sn, cs;  

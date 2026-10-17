@@ -745,33 +745,36 @@ void check_serial_commands() {
           }
 
           else if (command.startsWith("adc")) {  
-              // Снимок одного блока сырых слов [I|Q]: min/max/DC-офсет.  
-              const volatile uint32_t* blk = rx_capture_get_block();
-              // После получения blk = rx_capture_get_block(), ДО цикла статистики:  
-              Serial.print(F("[ADC] raw:"));  
-              for (int k = 0; k < 8; k++) {  
-                  Serial.printf(" %08lX", (unsigned long)blk[k]);  
-              }  
-              Serial.println();
+              const volatile uint32_t* blk = rx_capture_get_block();  
               if (!blk) Serial.println(F("[ADC] блоков нет — rx запущен?"));  
               else {  
+                  // Сырой дамп первых 8 слов — до статистики  
+                  Serial.print(F("[ADC] raw:"));  
+                  for (int k = 0; k < 8; k++)  
+                      Serial.printf(" %08lX", (unsigned long)blk[k]);  
+                  Serial.println();  
+            
                   int lo_i = 4095, hi_i = 0, lo_q = 4095, hi_q = 0;  
                   int64_t si = 0, sq = 0;  
-                  for (int k = 0; k < RX_BLOCK_SAMPLES; k++) {  
-                      int i = blk[k] & 0xFFFF, q = blk[k] >> 16;  
+                  const volatile uint16_t* s = (const volatile uint16_t*)blk;  
+                  // Каждое слово = ОДИН отсчёт в младших 16 битах:  
+                  // s[0]=I0, s[2]=Q0, s[4]=I1, s[6]=Q1 ...  
+                  int npairs = RX_BLOCK_SAMPLES / 2;  
+                  for (int k = 0; k < npairs; k++) {  
+                      int i = s[4*k], q = s[4*k + 2];  
                       if (i < lo_i) lo_i = i; if (i > hi_i) hi_i = i; si += i;  
                       if (q < lo_q) lo_q = q; if (q > hi_q) hi_q = q; sq += q;  
                   }  
-                  rx_capture_release();  
                   Serial.printf("[ADC] I: %d..%d mid=%ld  Q: %d..%d mid=%ld  drop=%lu\n",  
-                      lo_i, hi_i, (long)(si/RX_BLOCK_SAMPLES),  
-                      lo_q, hi_q, (long)(sq/RX_BLOCK_SAMPLES),  
+                      lo_i, hi_i, (long)(si/npairs),  
+                      lo_q, hi_q, (long)(sq/npairs),  
                       (unsigned long)rx_capture_dropped());  
-              }
+                  rx_capture_release();  
+              }  
               Serial.printf("[ADC] fcs=0x%08lX cs=0x%08lX rrobin=0x%02lX\n",  
-              (unsigned long)adc_hw->fcs,  
-              (unsigned long)adc_hw->cs,  
-              (unsigned long)(adc_hw->cs >> 16) & 0x1F);  // RROBIN биты CS[20:16]
+                  (unsigned long)adc_hw->fcs,  
+                  (unsigned long)adc_hw->cs,  
+                  (unsigned long)((adc_hw->cs >> 16) & 0x1F));  
           }
 
 

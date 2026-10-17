@@ -92,23 +92,23 @@ void rx_capture_start(void) {
     rx_dma_b = dma_claim_unused_channel(true);  
   
     dma_channel_config ca = dma_channel_get_default_config(rx_dma_a);  
-    channel_config_set_transfer_data_size(&ca, DMA_SIZE_32);  
+    channel_config_set_transfer_data_size(&ca, DMA_SIZE_16);   // FIFO отдаёт 16-бит отсчёты
     channel_config_set_read_increment(&ca, false);    // читаем adc_fifo  
     channel_config_set_write_increment(&ca, true);  
     channel_config_set_dreq(&ca, DREQ_ADC);  
     channel_config_set_chain_to(&ca, rx_dma_b);       // по завершении → канал B  
   
     dma_channel_config cb = dma_channel_get_default_config(rx_dma_b);  
-    channel_config_set_transfer_data_size(&cb, DMA_SIZE_32);  
+    channel_config_set_transfer_data_size(&cb, DMA_SIZE_16);   // FIFO отдаёт 16-бит отсчёты
     channel_config_set_read_increment(&cb, false);  
     channel_config_set_write_increment(&cb, true);  
     channel_config_set_dreq(&cb, DREQ_ADC);  
     channel_config_set_chain_to(&cb, rx_dma_a);       // по завершении → канал A  
   
     dma_channel_configure(rx_dma_a, &ca, (void*)rx_buf_a, &adc_hw->fifo,  
-                          RX_BLOCK_SAMPLES, false);  
+                          2 * RX_BLOCK_SAMPLES, false);   // 16-битных отсчётов на блок  
     dma_channel_configure(rx_dma_b, &cb, (void*)rx_buf_b, &adc_hw->fifo,  
-                          RX_BLOCK_SAMPLES, false);  
+                          2 * RX_BLOCK_SAMPLES, false);
   
     dma_channel_acknowledge_irq0(rx_dma_a);  
     dma_channel_acknowledge_irq0(rx_dma_b);  

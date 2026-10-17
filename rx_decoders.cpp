@@ -397,10 +397,10 @@ static const char cw_tree[] =
 static void cw_decode_elements(void) {  
     if (!cw.elem_n) return;  
     cw.elem_buf[cw.elem_n] = 0;  
-    int idx = 1;  
-    for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
-        idx = idx * 2 + (cw.elem_buf[i] == '-' ? 1 : 0);  
-    char c = (idx < 64) ? cw_tree[idx] : '?';  
+    int idx = 0;                                        // корень дерева = индекс 0  
+    for (uint8_t i = 0; i < cw.elem_n && idx < 31; i++)  
+        idx = idx * 2 + 1 + (cw.elem_buf[i] == '-' ? 1 : 0);   // точка → 2k+1, тире → 2k+2  
+    char c = (idx < 64) ? cw_tree[idx] : '?';
     if (c && c != ' ') Serial.write(c);  
     cw.elem_n = 0;  
 }

@@ -480,18 +480,17 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         sym_samples = (uint32_t)(fs_out * 0.128f);  
         ifk.offset = 1; ifk.ntones = 33;  
         break;
-    case RX_MODE_JTTY:  
-        // 4 тона, шаг 31.25 Гц; нижний тон = center - 1.5·31.25 = center - 46.875  
-        // (center = частота строки FREQ_JTTY = центр полосы, как у Olivia ниже)  
-        gtz_bank_init(center_hz - 46.875f, 31.25f, 4, fs_out);  
-        sym_samples = (uint32_t)(fs_out * 0.032f);   // 500 отсчётов при 15.6 ksps  
-        Serial.printf("[JTTY-RX] f0=%.1f Hz step=31.25 sym=%lu smp (%.1f ms) fs=%.1f\n",  
+    case RX_MODE_JTTY: {
+        // gtz работает в звуковой полосе fs_out — частоты банка = ПЧ, НЕ радиочастота!  
+        float f_if_hz = center_hz - (float)vfo_quadrature_lo_hz();   // ≈2773 Гц  
+        gtz_bank_init(f_if_hz - 46.875f, 31.25f, 4, fs_out);  
+        sym_samples = (uint32_t)(fs_out * 0.032f);  
+        Serial.printf("[JTTY-RX] f0_audio=%.1f Hz (RF=%.1f) step=31.25 sym=%lu smp fs=%.1f\n",  
+                      (double)(f_if_hz - 46.875f),  
                       (double)(center_hz - 46.875f),  
-                      (unsigned long)sym_samples,  
-                      (double)(1000.0f * sym_samples / fs_out),  
-                      (double)fs_out);  
-        break;
-
+                      (unsigned long)sym_samples, (double)fs_out);  
+        break; 
+        }
     default: break;  
     }  
 }  

@@ -538,6 +538,7 @@ void check_serial_commands() {
                     // 1. LO: целочисленный clkdiv, дизеринг/core1 выключены  
                     vfo_quadrature_start(f);
                     uint32_t lo = vfo_quadrature_lo_hz();
+                    vfo_subband_apply(freq_hz);          // freq_hz — частота команды rx  
                     // 2. ADC+DMA поток
                     rx_capture_start();
                     // 3. DSP на core1: NCO садится на (f_target − f_lo_actual)  
@@ -777,6 +778,19 @@ void check_serial_commands() {
                   (unsigned long)((adc_hw->cs >> 16) & 0x1F));  
           }
 
+          // Ручной прогон кодов: "bpf 0..15" — выставить код, "bpf" — показать текущий  
+          else if (command.startsWith("bpf")) {  
+              int sp = command.indexOf(' ');  
+              if (sp > 0) {  
+                  uint8_t c = (uint8_t)command.substring(sp+1).toInt();  
+                  for (int k = 0; k < 4; k++)  
+                      if (subband_pins[k] >= 0) digitalWrite(subband_pins[k], (c>>k)&1);  
+                  subband_current = c;  
+                  Serial.printf("[BPF] код=%u выставлен вручную\n", c);  
+              } else {  
+                  Serial.printf("[BPF] текущий код=%u\n", subband_current);  
+              }  
+          }
 
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);
@@ -927,6 +941,7 @@ void setup() {
 
   vfo_encoder_init();  // энкодер
 
+  vfo_subband_init();
 
   // Инициализация пинов питания шин, если они назначены (не равны -1)
   if (pin_pwr_si != -1) { pinMode(pin_pwr_si, OUTPUT); digitalWrite(pin_pwr_si, LOW); }

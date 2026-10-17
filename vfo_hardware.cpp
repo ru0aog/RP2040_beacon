@@ -2341,3 +2341,83 @@ void vfo_quadrature_debug(void) {
 }
 
 
+// ============================================================================  
+// Управление блоком переключаемых ДПФ перед смесителем (picorx_digi)  
+// ----------------------------------------------------------------------------  
+// Логика: по рабочей частоте выбирается один из 16 кодов, выдаваемый  
+// параллельно на 4 GPIO (двоичный код фильтра). Таблица подстроена под  
+// КВ-диапазоны; границы/коды уточни по схеме своего блока ДПФ — если там  
+// дешифратор 1-из-N или другой порядок бит, меняется только таблица.  
+// ============================================================================  
+  
+// Верхняя граница диапазона (Гц) и код на пинах поддиапазона.  
+// Порядок записей: строго по возрастанию частоты.  
+typedef struct {  
+    uint32_t f_max_hz;   // диапазон действует до этой частоты включительно  
+    uint8_t  code;       // 4-битный код на subband_pins[0..3]  
+} SubbandEntry;  
+  
+static const SubbandEntry SUBBAND_TABLE[] = {  
+    {  2500000UL, 0 },   // 160 м (до 2.5 МГц)  
+    {  4500000UL, 1 },   // 80 м  
+    {  7500000UL, 2 },   // 40 м  
+    { 10500000UL, 3 },   // 30 м  
+    { 14500000UL, 4 },   // 20 м  
+    { 18500000UL, 5 },   // 17 м  
+    { 21500000UL, 6 },   // 15 м  
+    { 25000000UL, 7 },   // 12 м  
+    { 30000000UL, 8 },   // 10 м  
+    { 0xFFFFFFFF, 9 },   // всё выше 30 МГц — последний фильтр  
+};  
+#define SUBBAND_COUNT (sizeof(SUBBAND_TABLE)/sizeof(SUBBAND_TABLE[0]))  
+  
+static uint8_t subband_current = 0xFF;   // кэш, чтобы не дёргать пины зря  
+  
+// Инициализация пинов ДПФ. Вызвать из setup() ПОСЛЕ read_and_parse_SET_txt()  
+// (пины приходят из конфига). Пины == -1 (NC) пропускаются.  
+void vfo_subband_init(void) {  
+    for (int k = 0; k < 4; k++) {  
+        if (subband_pins[k] >= 0) {  
+            pinMode(subband_pins[k], OUTPUT);  
+            digitalWrite(subband_pins[k], LOW);  
+        }  
+    }  
+    subband_current = 0xFF;  
+}  
+  
+// Применить код ДПФ по частоте. Идемпотентно: при повторном вызове  
+// с тем же диапазоном пины не перезаписываются (нет щелчков реле).  
+void vfo_subband_apply(uint32_t freq_hz) {  
+    uint8_t want = SUBBAND_TABLE[SUBBAND_COUNT - 1].code;  
+    for (uint8_t i = 0; i < SUBBAND_COUNT; i++) {  
+        if (freq_hz <= SUBBAND_TABLE[i].f_max_hz) {  
+            want = SUBBAND_TABLE[i].code;  
+            break;  
+        }  
+    }  
+    if (want == subband_current) return;     // диапазон не сменился  
+    subband_current = want;  
+  
+    for (int k = 0; k < 4; k++) {  
+        if (subband_pins[k] >= 0)  
+            digitalWrite(subband_pins[k], (want >> k) & 1);  
+    }  
+    Serial.printf("[BPF] f=%lu Hz -> ДПФ код=%u (pins %d,%d,%d,%d)\n",  
+                  (unsigned long)freq_hz, want,  
+                  subband_pins[0], subband_pins[1],  
+                  subband_pins[2], subband_pins[3]);  
+}
+
+// Выбор ДПФ на 74CBT3251: код канала = номер входа Ix = S2S1S0.  
+// BAND_0=S0=subband_pins[0] (младший), BAND_1=subband_pins[1], BAND_2=subband_pins[2].  
+void subband_select(uint32_t freq_hz) {  
+    uint8_t code;  
+    if      (freq_hz >= 16000000UL) code = 0;  // 16..30 МГц  LPF_16_30  
+    else if (freq_hz >=  8000000UL) code = 1;  //  8..16 МГц  LPF_8_16  
+    else if (freq_hz >=  4000000UL) code = 2;  //  4..8  МГц  LPF_4_8  
+    else if (freq_hz >=  2000000UL) code = 3;  //  2..4  МГц  LPF_2_4  
+    else                            code = 4;  //  1..2  МГц  LPF_1_2  
+    for (int k = 0; k < 3; k++)  
+        if (subband_pins[k] >= 0)  
+            digitalWrite(subband_pins[k], (code >> k) & 1);  
+}

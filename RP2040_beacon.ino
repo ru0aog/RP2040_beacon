@@ -748,13 +748,13 @@ void check_serial_commands() {
           }
 
           else if (command.startsWith("adc")) {  
-              // .ino, обработчик adc — вместо одного get_block():  
               const volatile uint32_t* blk = NULL;  
               uint32_t t0 = millis();  
-              while (!blk && millis() - t0 < 100) blk = rx_capture_get_block();  // ждём до 100 мс
-              if (!blk) Serial.println(F("[ADC] блоков нет — rx запущен?"));  
-              else {  
-                  // Сырой дамп первых 8 слов — до статистики  
+              while (!blk && millis() - t0 < 100) blk = rx_capture_get_block();  
+            
+              if (!blk) {  
+                  Serial.println(F("[ADC] блоков нет — rx запущен?"));  
+              } else {  
                   Serial.print(F("[ADC] raw:"));  
                   for (int k = 0; k < 8; k++)  
                       Serial.printf(" %08lX", (unsigned long)blk[k]);  
@@ -762,12 +762,10 @@ void check_serial_commands() {
             
                   int lo_i = 4095, hi_i = 0, lo_q = 4095, hi_q = 0;  
                   int64_t si = 0, sq = 0;  
-                  const volatile uint16_t* s = (const volatile uint16_t*)blk;  
-                  // Каждое слово = ОДИН отсчёт в младших 16 битах:  
-                  // s[0]=I0, s[2]=Q0, s[4]=I1, s[6]=Q1 ...  
-                  int npairs = RX_BLOCK_SAMPLES / 2;  
+                  const int npairs = RX_BLOCK_SAMPLES;  
                   for (int k = 0; k < npairs; k++) {  
-                      int i = s[4*k], q = s[4*k + 2];  
+                      int i = blk[k] & 0xFFFF;          // [15:0]  = I (ADC0)  
+                      int q = blk[k] >> 16;             // [31:16] = Q (ADC1)  
                       if (i < lo_i) lo_i = i; if (i > hi_i) hi_i = i; si += i;  
                       if (q < lo_q) lo_q = q; if (q > hi_q) hi_q = q; sq += q;  
                   }  

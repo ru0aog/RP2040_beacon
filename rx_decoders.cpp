@@ -81,6 +81,7 @@ static int16_t prev_i = 0, prev_q = 0;   // последние I/Q прошло�
 static float      fs_out = 15625.0f;  
 static float      f_center_hz = 0;    // для AFC  
 static bool       afc_on = false;
+static int32_t    p_ema = 0;          // огибающая CW, сбрасывается в rx_decoders_start 
 bool              dbg_rx = false;     // флаг печати лога отладки
 
 // добавить в секцию глобальных данных (рядом с rt/cw/olv/ifk)  
@@ -397,9 +398,9 @@ static const char cw_tree[] =
 static void cw_decode_elements(void) {  
     if (!cw.elem_n) return;  
     cw.elem_buf[cw.elem_n] = 0;  
-    int idx = 0;                                        // корень дерева = индекс 0  
-    for (uint8_t i = 0; i < cw.elem_n && idx < 31; i++)  
-        idx = idx * 2 + 1 + (cw.elem_buf[i] == '-' ? 1 : 0);   // точка → 2k+1, тире → 2k+2  
+    int idx = 0;  
+    for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
+        idx = idx * 2 + (cw.elem_buf[i] == '-' ? 2 : 1);
     char c = (idx < 64) ? cw_tree[idx] : '?';
     if (c && c != ' ') Serial.write(c);  
     cw.elem_n = 0;  
@@ -442,14 +443,14 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     sym_acc = 0; sample_idx = 0;  
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
     memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));  
-    jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0;  
+    jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0; p_ema = 0;
     memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13  
     cw.dot_us = 60000.0f; // 60 мс ≈ 20 WPM — стартовая точка, EMA подстроится  
     cw.noise_floor = 0;  
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(63.0f, 0.0f, 1, fs_out);   // тон ~+63 Гц — компенсация сдвига LO
+        gtz_bank_init(70.0f, 0.0f, 1, fs_out);   // тон ~+70 Гц — компенсация сдвига LO
         sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс
         Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",  
                       (unsigned)gtz_ntones, (unsigned long)sym_samples);  // <-- банк инициализирован
@@ -528,27 +529,25 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
     if (dec_mode == RX_MODE_CW) {  
         gtz_push(xi, xq, n);  
         int32_t p; gtz_winner(&p);  
-        // гладим огибающую — одиночное провалившееся окно не должно рвать посылку
-        static int32_t p_ema = 0;  
-        p_ema += (p - p_ema) >> 1;          // EMA за 2 окна  
+  
+        // Гладим огибающую — одиночное провалившееся окно не должно рвать посылку  
+        p_ema += (p - p_ema) >> 1;          // EMA за ~2 окна  
         p = p_ema;  
-
+  
         bool on = p > (cw.noise_floor * 4 + 1024);  
         if (!on)                                            // floor — только в паузах,  
             cw.noise_floor += ((p - cw.noise_floor) >> 4);  // иначе EMA съедает посылку  
   
-        // Отладка: огибающая раз в ~320 мс  
+        // Отладка: огибающая раз в ~320 мс (под флагом dbg_rx)  
         static uint32_t dbg = 0;  
         if (++dbg >= 64) {  
-            dbg = 0;
-            if (dbg_rx) {
-            Serial.printf("[CW] pwr=%ld floor=%ld %s\n",  
-                          (long)p, (long)cw.noise_floor, on ? "ON" : "off");  
-            }
+            dbg = 0;  
+            if (dbg_rx)  
+                Serial.printf("[CW] pwr=%ld floor=%ld %s\n",  
+                              (long)p, (long)cw.noise_floor, on ? "ON" : "off");  
         }  
   
         if (on != cw.tone_on) {  
-            // fs_x1000 = fs_out * 1000 — НЕ fs_out: внутри делится 1e6/fs_x1000 → мс  
             cw_on_edge(!on, sample_idx, (uint32_t)(fs_out * 1000.0f));  
             cw.tone_on = on;  
             if (on) cw.on_start = sample_idx; else cw.off_start = sample_idx;  

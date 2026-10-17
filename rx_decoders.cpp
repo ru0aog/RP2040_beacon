@@ -67,87 +67,129 @@ static float      f_center_hz = 0;    // для AFC
 static bool       afc_on = false;  
   
 // ============================================================================  
-// 1. Goertzel-детектор одиночного тона (накопление за символьное окно)  
+// 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)  
+// ----------------------------------------------------------------------------  
+// Классический Гёрцель второго порядка, но с РАЗДЕЛЬНЫМ накоплением по I- и  
+// Q-каналам базовой полосы. Скалярная версия (только I) одинаково реагирует  
+// на сигнал и на его зеркальную копию относительно LO — для квадратурного  
+// приёмника это означает потерю подавления зеркального канала. Комплексная  
+// форма x = I + j*Q сдвигает бин на истинный знак частоты.  
+//  
+// Реализация — целочисленная (Q15): коэффициент k хранится как  
+//   k = round(32768 * 2 * cos(2*pi*f / fs))  
+// Рекуррент на каждый отсчёт:  
+//   s0 = x + ((k * s1) >> 15) - s2;   s2 = s1;   s1 = s0;  
+// Мощность бина за N отсчётов:  
+//   P = s1^2 + s2^2 - k*s1*s2/32768  
+// Для комплексного входа суммируем мощности I- и Q-рекуррентов  
+// (энергия бина, достаточно для выбора argmax и отладочного вывода).  
 // ============================================================================  
-// Банк до 33 тонов; коэффициенты в Q15: k = 2·cos(2π·f/Fs)·32768  
-#define DEC_MAX_TONES  33  
+  
+#define DEC_MAX_TONES 8          // максимум тонов в банке (JTTY = 4)  
   
 typedef struct {  
-    int32_t  k;                 // 2cos(ω)·2^15  
-    int32_t  s1, s2;            // задержка Гёрцеля (I)  
-    int32_t  q1, q2;            // задержка Гёрцеля (Q) — для комплексной мощности  
-    uint32_t n;  
+    int32_t k;                   // коэффициент Гёрцеля в Q15  
+    int32_t s1, s2;              // состояние рекуррентного фильтра — канал I  
+    int32_t q1, q2;              // состояние рекуррентного фильтра — канал Q  
 } gtz_t;  
   
-static void gtz_reset(gtz_t* g) { g->s1 = g->s2 = g->q1 = g->q2 = 0; g->n = 0; }  
+static gtz_t  gtz[DEC_MAX_TONES]; // банк фильтров  
+static uint8_t gtz_ntones = 0;    // сколько тонов реально активно  
   
-// Комплексный вход: xi + j·xq — мощность = P_i + P_q  
-static inline void gtz_push(const int16_t* xi, const int16_t* xq, int n) {  
-    for (int s = 0; s < n; s++) {  
-        int32_t vi = xi[s], vq = xq[s];  
+// Сброс накопителей одного фильтра (в начале каждого символа/окна).  
+static inline void gtz_reset(gtz_t* g) {  
+    g->s1 = g->s2 = 0;  
+    g->q1 = g->q2 = 0;  
+}  
+  
+// Сброс всего банка.  
+static void gtz_reset_all(void) {  
+    for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
+}  
+  
+// ----------------------------------------------------------------------------  
+// gtz_push — прогнать n комплексных отсчётов через весь банк.  
+//   xi, xq — массивы базовой полосы I и Q (длина n).  
+// Если режим работает только по I (CW/RTTY и т.п.), передайте xq = NULL —  
+// Q-рекуррент тогда пропускается и не жрёт CPU.  
+// ----------------------------------------------------------------------------  
+static void gtz_push(const int16_t* xi, const int16_t* xq, int n) {  
+    for (int i = 0; i < n; i++) {  
+        int32_t vi = xi[i];  
+        int32_t vq = xq ? xq[i] : 0;  
         for (uint8_t t = 0; t < gtz_ntones; t++) {  
-            int32_t s0 = vi + (int32_t)(((int64_t)gtz[t].k * gtz[t].s1) >> 15) - gtz[t].s2;  
-            gtz[t].s2 = gtz[t].s1; gtz[t].s1 = s0;  
-            int32_t r0 = vq + (int32_t)(((int64_t)gtz[t].k * gtz[t].q1) >> 15) - gtz[t].q2;  
-            gtz[t].q2 = gtz[t].q1; gtz[t].q1 = r0;  
+            gtz_t* g = &gtz[t];  
+            // --- I-канал ---  
+            int32_t s0 = vi + (int32_t)(((int64_t)g->k * g->s1) >> 15) - g->s2;  
+            g->s2 = g->s1; g->s1 = s0;  
+            // --- Q-канал (только если есть что накапливать) ---  
+            if (xq) {  
+                int32_t r0 = vq + (int32_t)(((int64_t)g->k * g->q1) >> 15) - g->q2;  
+                g->q2 = g->q1; g->q1 = r0;  
+            }  
         }  
     }  
-    for (uint8_t t = 0; t < gtz_ntones; t++) gtz[t].n += n;  
 }  
   
+// ----------------------------------------------------------------------------  
+// gtz_power — мощность тона t за накопленное окно.  
+// P = s1^2 + s2^2 - k*s1*s2/32768 по каждому каналу, сумма I+Q.  
+// Возвращает int32; при больших окнах (>~2000 отсчётов) возможен переполн —  
+// для JTTY окно на символ ~500 отсчётов, запаса хватает.  
+// ----------------------------------------------------------------------------  
 static inline int32_t gtz_power(uint8_t t) {  
-    int32_t s1 = gtz[t].s1 >> 8, s2 = gtz[t].s2 >> 8;  
-    int32_t q1 = gtz[t].q1 >> 8, q2 = gtz[t].q2 >> 8;  
-    int64_t pi = (int64_t)s1*s1 + (int64_t)s2*s2 - (((int64_t)gtz[t].k * s1 * s2) >> 15);  
-    int64_t pq = (int64_t)q1*q1 + (int64_t)q2*q2 - (((int64_t)gtz[t].k * q1 * q2) >> 15);  
-    return (int32_t)((pi + pq) >> 8);  
-}
-  
-static gtz_t   gtz[DEC_MAX_TONES];  
-static uint8_t gtz_ntones = 0;  
-  
-static void gtz_reset(gtz_t* g) { g->s1 = g->s2 = 0; g->n = 0; }  
-  
-static void gtz_bank_init(float f0_hz, float step_hz, uint8_t ntones, float fs) {  
-    gtz_ntones = (ntones > DEC_MAX_TONES) ? DEC_MAX_TONES : ntones;  
-    for (uint8_t t = 0; t < gtz_ntones; t++) {  
-        gtz[t].k = (int32_t)(32768.0f * 2.0f * cosf(2.0f * PI * (f0_hz + t * step_hz) / fs));  
-        gtz_reset(&gtz[t]);  
-    }  
+    const gtz_t* g = &gtz[t];  
+    int64_t p = (int64_t)g->s1 * g->s1 + (int64_t)g->s2 * g->s2  
+              - (((int64_t)g->k * g->s1 * g->s2) >> 15);  
+    p        += (int64_t)g->q1 * g->q1 + (int64_t)g->q2 * g->q2  
+              - (((int64_t)g->k * g->q1 * g->q2) >> 15);  
+    if (p > 0x7FFFFFFFLL) p = 0x7FFFFFFFLL;   // насыщение — не молчаливый wrap  
+    return (int32_t)p;  
 }  
   
-// I-канал достаточно для энергетического детектора; символ → индекс max + мощность  
-static inline void gtz_push(const int16_t* x, int n) {  
-    for (int s = 0; s < n; s++) {  
-        int32_t v = x[s];  
-        for (uint8_t t = 0; t < gtz_ntones; t++) {  
-            // s0 = v + k·s1 - s2  (Q15 → сдвиг 15)  
-            int32_t s0 = v + (int32_t)(((int64_t)gtz[t].k * gtz[t].s1) >> 15) - gtz[t].s2;  
-            gtz[t].s2 = gtz[t].s1;  
-            gtz[t].s1 = s0;  
-        }  
-    }  
-    for (uint8_t t = 0; t < gtz_ntones; t++) gtz[t].n += n;  
-}  
-  
-// Мощность тона t: s1² + s2² - k·s1·s2 (с масштабированием, чтобы не переполнить)  
-static inline int32_t gtz_power(uint8_t t) {  
-    int32_t s1 = gtz[t].s1 >> 8, s2 = gtz[t].s2 >> 8;  
-    return (int32_t)(((int64_t)s1*s1 + (int64_t)s2*s2 -  
-           (((int64_t)gtz[t].k * s1 * s2) >> 15)) >> 8);  
-}  
-  
-// winner-take-all: возвращает индекс тона, записывает мощность  
-static uint8_t gtz_winner(int32_t* pmax) {  
-    uint8_t best = 0; int32_t pm = 0;  
+// ----------------------------------------------------------------------------  
+// gtz_argmax — индекс самого мощного тона банка + его мощность.  
+// ----------------------------------------------------------------------------  
+static uint8_t gtz_argmax(int32_t* out_max) {  
+    uint8_t best = 0; int32_t bp = 0;  
     for (uint8_t t = 0; t < gtz_ntones; t++) {  
         int32_t p = gtz_power(t);  
-        if (p > pm) { pm = p; best = t; }  
+        if (t == 0 || p > bp) { bp = p; best = t; }  
     }  
-    *pmax = pm;  
+    if (out_max) *out_max = bp;  
     return best;  
 }  
   
+// ----------------------------------------------------------------------------  
+// gtz_bank_init — инициализация банка на сетку тонов:  
+//   тон t сидит на частоте  f0_hz + t * step_hz, отсчёты идут с частотой fs.  
+// Вызывается из rx_decoders_start() после того как rx_dsp выдал fs выходного  
+// потока (после децимации). Для JTTY: f0 = нижний тон, step = 31.25 Гц,  
+// ntones = 4, fs = частота сэмплов детектора (например 250 Гц при 32 мс  
+// символе -> 8 отсчётов/символ, см. вашу децимацию).  
+// ----------------------------------------------------------------------------  
+static void gtz_bank_init(float f0_hz, float step_hz, uint8_t ntones, float fs) {  
+    gtz_ntones = (ntones > DEC_MAX_TONES) ? DEC_MAX_TONES : ntones;  
+    for (uint8_t t = 0; t < gtz_ntones; t++) {  
+        float w = 2.0f * PI * (f0_hz + t * step_hz) / fs;  
+        gtz[t].k = (int32_t)(32768.0f * 2.0f * cosf(w));  
+        gtz_reset(&gtz[t]);  
+    }  
+}
+
+// Поиск тона-победителя: возвращает индекс 0..gtz_ntones-1,  
+// в *p_best (если не NULL) — его мощность.  
+static uint8_t gtz_winner(int32_t* p_best) {  
+    uint8_t  best = 0;  
+    int32_t  pmax = 0;  
+    for (uint8_t t = 0; t < gtz_ntones; t++) {  
+        int32_t p = gtz_power(t);  
+        if (p > pmax) { pmax = p; best = t; }  
+    }  
+    if (p_best) *p_best = pmax;  
+    return best;  
+}
+
 // ============================================================================  
 // 2. Olivia / Contestia — 8 тонов, 31.25 Гц, Walsh-8, 32 мс символ  
 // ============================================================================  
@@ -449,7 +491,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
     // ---------------- CW: блок = одно окно детектора огибающей ----------------  
     if (dec_mode == RX_MODE_CW) {  
-        gtz_push(xi, n);  
+        gtz_push(xi, xq, n);
         int32_t p; gtz_winner(&p);  
         cw.noise_floor += ((p - cw.noise_floor) >> 4);  
         bool on = p > (cw.noise_floor * 4 + 1024);  
@@ -473,7 +515,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         uint8_t  chunk      = (uint8_t)((uint32_t)(n - pos) < remain_sym  
                                         ? (n - pos) : remain_sym);  
   
-        gtz_push(xi + pos, chunk);  
+        gtz_push(xi + pos, xq + pos, chunk);   // комплексный вход: I и Q
   
         // Дискриминатор RTTY: накапливаем по той же порции отсчётов.  
         // Знак кросс-произведения I/Q-последовательных отсчётов = знак частоты:  

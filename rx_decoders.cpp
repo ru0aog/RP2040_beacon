@@ -426,9 +426,9 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(center_hz - (float)vfo_quadrature_lo_hz(), 0.0f, 1, fs_out);  // 1 тон на ПЧ
-        sym_samples = (uint32_t)(fs_out * 0.005f);        // окно 5 мс  
-        break;  
+        gtz_bank_init(0.0f, 0.0f, 1, fs_out);                    // тон цели → базовая полоса 0 Гц  
+        sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс  
+        break;
     case RX_MODE_RTTY:    
         gtz_bank_init(center_hz - 85.0f, 170.0f, 2, fs_out); // запасной путь    
         rt.bit_period = (uint32_t)(fs_out / 45.45f);      // ~343 отсчёта на бит    
@@ -498,10 +498,20 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
     // ---------------- CW: блок = одно окно детектора огибающей ----------------  
     if (dec_mode == RX_MODE_CW) {  
-        gtz_push(xi, xq, n);
+        gtz_push(xi, xq, n);  
         int32_t p; gtz_winner(&p);  
+  
         cw.noise_floor += ((p - cw.noise_floor) >> 4);  
         bool on = p > (cw.noise_floor * 4 + 1024);  
+  
+        // Отладка: огибающая раз в ~320 мс  
+        static uint32_t dbg = 0;  
+        if (++dbg >= 64) {  
+            dbg = 0;  
+            Serial.printf("[CW] pwr=%ld floor=%ld %s\n",  
+                          (long)p, (long)cw.noise_floor, on ? "ON" : "off");  
+        }  
+  
         if (on != cw.tone_on) {  
             // fs_x1000 = fs_out * 1000 — НЕ fs_out: внутри делится 1e6/fs_x1000 → мс  
             cw_on_edge(!on, sample_idx, (uint32_t)(fs_out * 1000.0f));  
@@ -511,7 +521,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
         sample_idx += n;  
         return;  
-    }  
+    } 
   
     // ------------- Остальные моды: символьная синхронизация по блокам ----------  
     // Блок (64 отсчёта) не кратен окну символа (напр. 43): разбираем по частям,  

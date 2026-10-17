@@ -448,7 +448,7 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(0.0f, 0.0f, 1, fs_out);                    // тон цели → 0 Гц  
+        gtz_bank_init(63.0f, 0.0f, 1, fs_out);   // тон реально ~+63 Гц — остаток LO до калибровки кварца
         sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс
         Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",  
                       (unsigned)gtz_ntones, (unsigned long)sym_samples);  // <-- банк инициализирован
@@ -523,13 +523,14 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
     if (dec_mode == RX_MODE_NONE || n == 0) return;  
 
-    // ---------------- CW: блок = одно окно детектора огибающей ----------------  
+// ---------------- CW: блок = одно окно детектора огибающей ----------------  
     if (dec_mode == RX_MODE_CW) {  
         gtz_push(xi, xq, n);  
         int32_t p; gtz_winner(&p);  
   
-        cw.noise_floor += ((p - cw.noise_floor) >> 4);  
         bool on = p > (cw.noise_floor * 4 + 1024);  
+        if (!on)                                            // floor — только в паузах,  
+            cw.noise_floor += ((p - cw.noise_floor) >> 4);  // иначе EMA съедает посылку  
   
         // Отладка: огибающая раз в ~320 мс  
         static uint32_t dbg = 0;  
@@ -548,7 +549,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
         sample_idx += n;  
         return;  
-    } 
+    }
   
     // ------------- Остальные моды: символьная синхронизация по блокам ----------  
     // Блок (64 отсчёта) не кратен окну символа (напр. 43): разбираем по частям,  

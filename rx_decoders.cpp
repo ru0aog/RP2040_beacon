@@ -426,7 +426,7 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(center_hz, 0, 1, fs_out);           // 1 тон  
+        gtz_bank_init(center_hz - (float)vfo_quadrature_lo_hz(), 0.0f, 1, fs_out);  // 1 тон на ПЧ
         sym_samples = (uint32_t)(fs_out * 0.005f);        // окно 5 мс  
         break;  
     case RX_MODE_RTTY:    

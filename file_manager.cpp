@@ -132,8 +132,8 @@ volatile uint32_t RTTY_BIT_TIME_US = 22000; // Время одного бита 
 uint32_t climate_sample_interval_min = 10; // По умолчанию замер каждые 10 мин
 uint32_t climate_report_interval_min = 60; // По умолчанию таблица каждый час
 
-int subband_pins[4] = {6, 7, 8, 9};  // пины шифра поддиапазона
-int pin_freq_out = 28;  // выход DDS-генератора
+int subband_pins[4] = {2, 3, 4, -1};  // пины шифра поддиапазона
+int pin_freq_out = 15;  // выход DDS-генератора
 int pin_amp_act  = 11;  // выход управления усилителем
 // пины включения питания модулей
 // -1 означает NC (Не назначен / Not Connected)

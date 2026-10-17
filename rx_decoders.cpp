@@ -71,7 +71,7 @@ static bool       afc_on = false;
 // Кадр: 59 символов = 13 sync (is13) + 46 данных (дибиты кода).  
 static uint8_t  jtty_sym[59];       // текущий кадр (тоны 0..3)  
 static uint8_t  jtty_nsym = 0;      // заполненная позиция  
-static uint8_t  jtty_hist[13];      // последние 13 символов (кольцо)  
+static uint8_t  jtty_hist[16];      // кольцо на 16 (маска &15), читаются последние 13
 static uint8_t  jtty_hpos = 0;      // позиция записи в кольцо  
 static uint8_t  jtty_inframe = 0;   // 1 = внутри кадра  
   

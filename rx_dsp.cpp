@@ -87,41 +87,49 @@ static volatile uint8_t out_ready = 0;   // маска готовых буфер
 static volatile uint8_t out_read = 0;    // индекс буфера, отданного consumer'у  
   
 // Точка входа DSP на core1  
+// rx_dsp.cpp — rx_dsp_entry, исправленный вариант  
 static void __not_in_flash_func(rx_dsp_entry)(void) {  
-    while (true) {
-      watchdog_update();
+    // Оценка DC-смещения АЦП: EMA по входным отсчётам.  
+    // alpha=1/256 → постоянная ~0.4 с, сигнал тона за символ усредняется в 0.  
+    static int32_t dc_i = 2048 << 8, dc_q = 2048 << 8;  
+  
+    while (true) {  
+        watchdog_update();  
         const volatile uint32_t* blk = rx_capture_get_block();  
-        if (!blk) { tight_loop_contents(); watchdog_update(); continue; }
+        if (!blk) { tight_loop_contents(); watchdog_update(); continue; }  
   
-        // Если consumer ещё не отдал предыдущий буфер — пишем в свободный,  
-        // оба заняты не бывает: период блока 2 мс, обработка ~0.3 мс.  
         uint8_t wr = out_wr;  
-  
         uint8_t n_out = 0;  
+  
+        // DMA_SIZE_16: каждое 32-битное слово FIFO = пара отсчётов  
+        // [15:0] = ADC0 (I), [31:16] = ADC1 (Q). Пар в блоке = RX_BLOCK_SAMPLES.  
         const volatile int16_t* s = (const volatile int16_t*)blk;  
-        // Одно слово FIFO = один 16-битный отсчёт (нижняя половина).  
-        // Раунд-робин: чётные индексы s = ADC0 (I), нечётные = ADC1 (Q).  
-        // Пар I/Q в блоке = RX_BLOCK_SAMPLES/2.  
-        for (int n = 0; n < RX_BLOCK_SAMPLES / 2; n++) {  
-            int32_t i_raw = s[4 * n];  
-            int32_t q_raw = s[4 * n + 2];  
+  
+        for (int n = 0; n < RX_BLOCK_SAMPLES; n++) {  
+            int32_t i_meas = s[2 * n];  
+            int32_t q_meas = s[2 * n + 1];  
+  
+            // EMA DC и центрирование  
+            dc_i += (i_meas - (dc_i >> 8));        // dc в Q8  
+            dc_q += (q_meas - (dc_q >> 8));  
+            int32_t i_raw = i_meas - (dc_i >> 8);  
+            int32_t q_raw = q_meas - (dc_q >> 8);  
   
             // Комплексное вращение NCO: сдвиг спектра на -f_nco  
             int16_t sn, cs;  
             nco_sincos(nco_phase, &sn, &cs);  
             nco_phase += nco_step;  
-            // (I+jQ)·(cos - j·sin): I' = I·cos + Q·sin; Q' = Q·cos - I·sin  
             int32_t i_rot = (i_raw * cs + q_raw * sn) >> 15;  
             int32_t q_rot = (q_raw * cs - i_raw * sn) >> 15;  
   
             // Каскад HB-децимации /8  
             int32_t vi = i_rot, vq = q_rot;  
             bool emit = true;  
-            for (int s = 0; s < RX_DECIM_STAGES; s++) {  
+            for (int st = 0; st < RX_DECIM_STAGES; st++) {  
                 int32_t oi, oq;  
-                bool ri = hb_push(&hb_i[s], vi, &oi);  
-                bool rq = hb_push(&hb_q[s], vq, &oq);  
-                if (!ri || !rq) { emit = false; break; }  // фазы I/Q синхронны  
+                bool ri = hb_push(&hb_i[st], vi, &oi);  
+                bool rq = hb_push(&hb_q[st], vq, &oq);  
+                if (!ri || !rq) { emit = false; break; }  
                 vi = oi; vq = oq;  
             }  
             if (emit && n_out < RX_OUT_SAMPLES) {  
@@ -132,13 +140,11 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
         }  
         rx_capture_release();  
   
-        // Публикация: помечаем буфер готовым, переключаем указатель записи.  
-        // Чтение/запись out_ready/out_wr — однобайтовые, атомарны между ядрами.  
         out_read  = wr;  
         out_ready |= (1u << wr);  
         out_wr    = wr ^ 1;  
     }  
-}   
+} 
   
 // ---- Публичный API ----  
   

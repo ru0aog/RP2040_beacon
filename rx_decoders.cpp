@@ -80,7 +80,8 @@ static int32_t rtty_disc = 0;     // накопитель дискриминат
 static int16_t prev_i = 0, prev_q = 0;   // последние I/Q прошлой порции (стыковка)
 static float      fs_out = 15625.0f;  
 static float      f_center_hz = 0;    // для AFC  
-static bool       afc_on = false;  
+static bool       afc_on = false;
+bool              dbg_rx = false;     // флаг печати лога отладки
 
 // добавить в секцию глобальных данных (рядом с rt/cw/olv/ifk)  
 // ---------- JTTY приёмник ----------  
@@ -432,11 +433,11 @@ static void ifk_on_tone(uint8_t tone) {
 // rx_dsp вращает спектр так, что center_hz (RF) → 0 Гц. Поэтому все смещения  
 // ниже — константы относительно 0, а не относительно center_hz.  
 void rx_decoders_start(uint8_t mode, float center_hz) {
-    Serial.printf("[DEC] start: mode=%u center=%.1f\n",  
-                (unsigned)mode, (double)center_hz);
+    if (dbg_rx) {Serial.printf("[DEC] start: mode=%u center=%.1f\n",  
+                (unsigned)mode, (double)center_hz);}
     dec_mode = (rx_mode_t)mode;  
     fs_out = rx_dsp_fs_out();  
-    Serial.printf("[DEC] fs_out=%.1f\n", (double)fs_out);       // <-- fs валидна 
+    if (dbg_rx) {Serial.printf("[DEC] fs_out=%.1f\n", (double)fs_out);}       // <-- fs валидна 
     f_center_hz = center_hz;  
     sym_acc = 0; sample_idx = 0;  
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
@@ -448,7 +449,7 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(70.0f, 0.0f, 1, fs_out);   // тон ~+70 Гц — компенсация сдвига LO
+        gtz_bank_init(63.0f, 0.0f, 1, fs_out);   // тон ~+63 Гц — компенсация сдвига LO
         sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс
         Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",  
                       (unsigned)gtz_ntones, (unsigned long)sym_samples);  // <-- банк инициализирован
@@ -518,8 +519,8 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
     // Контроль: функция вообще вызывается?  
     static uint32_t calls = 0;  
     if (++calls == 1 || calls % 1000 == 0)  
-        Serial.printf("[DEC] process: calls=%lu mode=%u n=%u\n",  
-                      (unsigned long)calls, (unsigned)dec_mode, (unsigned)n);  
+        if (dbg_rx) {Serial.printf("[DEC] process: calls=%lu mode=%u n=%u\n",  
+                      (unsigned long)calls, (unsigned)dec_mode, (unsigned)n);}
   
     if (dec_mode == RX_MODE_NONE || n == 0) return;  
 
@@ -527,7 +528,11 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
     if (dec_mode == RX_MODE_CW) {  
         gtz_push(xi, xq, n);  
         int32_t p; gtz_winner(&p);  
-  
+        // гладим огибающую — одиночное провалившееся окно не должно рвать посылку
+        static int32_t p_ema = 0;  
+        p_ema += (p - p_ema) >> 1;          // EMA за 2 окна  
+        p = p_ema;  
+
         bool on = p > (cw.noise_floor * 4 + 1024);  
         if (!on)                                            // floor — только в паузах,  
             cw.noise_floor += ((p - cw.noise_floor) >> 4);  // иначе EMA съедает посылку  
@@ -535,9 +540,11 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         // Отладка: огибающая раз в ~320 мс  
         static uint32_t dbg = 0;  
         if (++dbg >= 64) {  
-            dbg = 0;  
+            dbg = 0;
+            if (dbg_rx) {
             Serial.printf("[CW] pwr=%ld floor=%ld %s\n",  
                           (long)p, (long)cw.noise_floor, on ? "ON" : "off");  
+            }
         }  
   
         if (on != cw.tone_on) {  

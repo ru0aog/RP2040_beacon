@@ -72,6 +72,8 @@ uint8_t rx_decoders_mode_by_name(const char* name) {
     return RX_MODE_NONE;   // 0 — «режим не найден», вызывающий код проверяет на NONE  
 }
 
+bool              dbg_rx = true;     // флаг печати лога отладки
+
 static rx_mode_t  dec_mode = RX_MODE_NONE;  
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
 static uint32_t   sym_acc = 0;        // накоплено в окне  
@@ -81,8 +83,6 @@ static int16_t prev_i = 0, prev_q = 0;   // последние I/Q прошло�
 static float      fs_out = 15625.0f;  
 static float      f_center_hz = 0;    // для AFC  
 static bool       afc_on = false;
-static int32_t    p_ema = 0;          // огибающая CW, сбрасывается в rx_decoders_start 
-bool              dbg_rx = false;     // флаг печати лога отладки
 
 // добавить в секцию глобальных данных (рядом с rt/cw/olv/ifk)  
 // ---------- JTTY приёмник ----------  
@@ -108,11 +108,9 @@ static uint8_t jtty_sync_score(void) {
 // рядом с остальными static-полями декодеров, над rx_decoders_process  
 static int32_t  cw_sig_avg    = 0;      // EMA уровня тона (fldigi sig_avg)  
 static int32_t  cw_noise_avg = 1024;    // оценка шума огибающей  
-static bool     cw_key        = false;  // детектированное состояние ключа  
 static float    cw_dot_avg    = 60.0f;  // мс, адаптивная оценка точки  
 static float    cw_dash_avg   = 180.0f; // мс, адаптивная оценка тире  
 static float    cw_gap_avg  = 60.0f;     // мс, пауза между элементами  
-static uint32_t cw_last_edge  = 0;      // sample_idx последнего фронта
 
 // Дебаунс ключа: off подтверждается только после N подряд «тихих» окон  
 static uint8_t  cw_low_cnt  = 0;      // счётчик дебаунса спада  
@@ -134,11 +132,7 @@ static cw_state_t cw;
 // ============================================================================  
 // 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)  
 // ----------------------------------------------------------------------------  
-// Классический Гёрцель второго порядка, но с РАЗДЕЛЬНЫМ накоплением по I- и  
-// Q-каналам базовой полосы. Скалярная версия (только I) одинаково реагирует  
-// на сигнал и на его зеркальную копию относительно LO — для квадратурного  
-// приёмника это означает потерю подавления зеркального канала. Комплексная  
-// форма x = I + j*Q сдвигает бин на истинный знак частоты.  
+// Классический Гёрцель реализация однополюсная комплексная (s = x + c·s, P = |s|²)
 //  
 // Реализация — целочисленная (Q15): коэффициент k хранится как  
 //   k = round(32768 * 2 * cos(2*pi*f / fs))  
@@ -385,17 +379,21 @@ static void cw_decode_elements(void) {
     for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
         idx = idx * 2 + (cw.elem_buf[i] == '-' ? 2 : 1);  
     char c = (idx < 64) ? cw_tree[idx] : '?';  
+    if (dbg_rx)  
+        Serial.printf("\n[ELEMS] '%s' idx=%d -> '%c'\n", cw.elem_buf, idx, c ? c : '?');  
     if (c && c != ' ') Serial.write(c);  
     cw.elem_n = 0;  
-}  
+}
   
 // on=true  -> завершилась пауза (фронт нажатия)  
 // on=false -> завершился тон (фронт отпускания)  
 // idx — sample_idx текущего блока, fs_x1000 = fs_out*1000  
 static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
     uint32_t dur_smp = on ? (idx - cw.on_start) : (idx - cw.off_start);  
-    float dur_ms = (float)dur_smp * 1.0e3f / (float)fs_x1000;   // fs_x1000=fs*1000 -> мс  
-  
+    float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000;   // отсчёты → мс
+    if (dbg_rx)  
+        Serial.printf("[EDGE] %s dur=%.1fms dot=%.1f\n",  
+                      on ? "on " : "off", (double)dur_ms, (double)cw_dot_avg);
     if (on) {  
         // Тон начался -> завершилась ПАУЗА  
         if (dur_ms < 15.0f) return;                        // щелчок — игнор  
@@ -456,14 +454,17 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     sym_acc = 0; sample_idx = 0;  
     
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
-    memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));  
-    cw_dot_avg = 60.0f; cw_dash_avg = 180.0f; cw_gap_avg = 60.0f;  
-    cw_noise_avg = 1024; cw_sig_avg = 0; cw_p_ema = 0; cw_low_cnt = 0;
-    jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0;
-
+    memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));
+    // Гибридный CW: сброс детектора огибающей и адаптивных оценок таймингов  
+    cw_p_ema     = 0;  
+    cw_low_cnt   = 0;  
+    cw_sig_avg   = 0;         // детектор сам выйдет на уровень за ~16 блоков  
+    cw_noise_avg = 1024;      // стартовый шум; если ключ «залипнет» — уменьшить до ~256  
+    cw_dot_avg   = 60.0f;     // 60 мс ≈ 20 WPM  
+    cw_dash_avg  = 180.0f;  
+    cw_gap_avg   = 60.0f;    // пауза между элементами ≈ 1 точка
     memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13  
     // CW: явный сброс состояния детектора/классификатора уже сделан выше  
-    // (cw_*-статики + memset(&cw,...)); старые поля dot_us/noise_floor удалены.  
     cw.tone_on  = false;  
     cw.on_start = cw.off_start = 0;  
     cw.elem_n   = 0;
@@ -660,17 +661,17 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
             break;
         case RX_MODE_JTTY: {  
             // Отладка: поток символов + статистика тонов раз в ~0.5 с.  
-            static uint32_t j_dbg_cnt = 0, j_last_ms = 0;  
             // TODO: sync по is13 + Витерби TBCC  
             static int32_t  j_acc[4]; static uint8_t j_n = 0;  
             for (uint8_t t = 0; t < 4 && t < gtz_ntones; t++)  
                 j_acc[t] += gtz_power(t);  
-            if (++j_n >= 16) {  
-                Serial.printf("[JTTY] pwr: %ld %ld %ld %ld  win=%d\n",  
-                              (long)j_acc[0]/j_n, (long)j_acc[1]/j_n,  
-                              (long)j_acc[2]/j_n, (long)j_acc[3]/j_n, tone);  
-                j_acc[0]=j_acc[1]=j_acc[2]=j_acc[3]=0; j_n=0;  
-            }  
+            if (++j_n >= 16) {    
+                if (dbg_rx)  
+                    Serial.printf("[JTTY] pwr: %ld %ld %ld %ld  win=%d\n",    
+                                  (long)j_acc[0]/j_n, (long)j_acc[1]/j_n,    
+                                  (long)j_acc[2]/j_n, (long)j_acc[3]/j_n, tone);    
+                j_acc[0]=j_acc[1]=j_acc[2]=j_acc[3]=0; j_n=0;    
+            }
   
             // Кольцо истории для поиска is13  
             jtty_hist[jtty_hpos & 15] = tone;  
@@ -706,6 +707,4 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         rtty_disc = 0;                           // новое окно — новый дискриминатор  
     }  
 }
-
-
 

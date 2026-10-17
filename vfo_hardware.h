@@ -27,6 +27,8 @@
 // Таблица переключаемых ДПФ: верхняя граница диапазона + 4-битный код  
 // на пинах subband_pins[0..3] (бит0 → subband_pins[0] и т.д.).  
 extern void vfo_subband_apply(uint32_t freq_hz);
+extern uint8_t subband_current;
+void vfo_subband_init();
 
 // ---- Параметры захвата ----  
 // FIFO 32-битное слово: [31:16] — канал Q (ADC1), [15:0] — I (ADC0),  

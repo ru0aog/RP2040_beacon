@@ -2358,20 +2358,15 @@ typedef struct {
 } SubbandEntry;  
   
 static const SubbandEntry SUBBAND_TABLE[] = {  
-    {  2500000UL, 0 },   // 160 м (до 2.5 МГц)  
-    {  4500000UL, 1 },   // 80 м  
-    {  7500000UL, 2 },   // 40 м  
-    { 10500000UL, 3 },   // 30 м  
-    { 14500000UL, 4 },   // 20 м  
-    { 18500000UL, 5 },   // 17 м  
-    { 21500000UL, 6 },   // 15 м  
-    { 25000000UL, 7 },   // 12 м  
-    { 30000000UL, 8 },   // 10 м  
-    { 0xFFFFFFFF, 9 },   // всё выше 30 МГц — последний фильтр  
-};  
+    {  2000000UL, 4 },   // LPF_1_2  (I4)  
+    {  4000000UL, 3 },   // LPF_2_4  (I3)  
+    {  8000000UL, 2 },   // LPF_4_8  (I2)  
+    { 16000000UL, 1 },   // LPF_8_16 (I1)  
+    { 0xFFFFFFFF, 0 },   // LPF_16_30 (I0)  
+};
 #define SUBBAND_COUNT (sizeof(SUBBAND_TABLE)/sizeof(SUBBAND_TABLE[0]))  
   
-static uint8_t subband_current = 0xFF;   // кэш, чтобы не дёргать пины зря  
+uint8_t subband_current = 0xFF;   // кэш, чтобы не дёргать пины зря  
   
 // Инициализация пинов ДПФ. Вызвать из setup() ПОСЛЕ read_and_parse_SET_txt()  
 // (пины приходят из конфига). Пины == -1 (NC) пропускаются.  
@@ -2408,16 +2403,3 @@ void vfo_subband_apply(uint32_t freq_hz) {
                   subband_pins[2], subband_pins[3]);  
 }
 
-// Выбор ДПФ на 74CBT3251: код канала = номер входа Ix = S2S1S0.  
-// BAND_0=S0=subband_pins[0] (младший), BAND_1=subband_pins[1], BAND_2=subband_pins[2].  
-void subband_select(uint32_t freq_hz) {  
-    uint8_t code;  
-    if      (freq_hz >= 16000000UL) code = 0;  // 16..30 МГц  LPF_16_30  
-    else if (freq_hz >=  8000000UL) code = 1;  //  8..16 МГц  LPF_8_16  
-    else if (freq_hz >=  4000000UL) code = 2;  //  4..8  МГц  LPF_4_8  
-    else if (freq_hz >=  2000000UL) code = 3;  //  2..4  МГц  LPF_2_4  
-    else                            code = 4;  //  1..2  МГц  LPF_1_2  
-    for (int k = 0; k < 3; k++)  
-        if (subband_pins[k] >= 0)  
-            digitalWrite(subband_pins[k], (code >> k) & 1);  
-}

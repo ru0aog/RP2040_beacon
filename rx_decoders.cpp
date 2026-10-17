@@ -357,22 +357,11 @@ static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {
     rt.prev_mark = mark;                     // единственное место обновления  
 }
   
-// ============================================================================  
-// 4. CW — тональный детектор + тайминг (точка=1, тире=3, паузы 1/3/7)  
-// ============================================================================  
-typedef struct {  
-    uint32_t on_start;          // отсчёт начала тона  
-    uint32_t off_start;         // отсчёт начала паузы  
-    bool     tone_on;  
-    float    dot_us;            // оценка точки в МИКРОсекундах (автоподстройка)  
-    char     elem_buf[64];  
-    uint8_t  elem_n;  
-    int32_t  noise_floor;  
-} cw_dec_t;  
-static cw_dec_t cw;  
+// ----------------------------------------------------------------------------  
+// 4. CW ДЕКОДЕР: фронты -> элементы -> знаки (адаптивная классификация UHSDR)  
+// ----------------------------------------------------------------------------  
   
-static void cw_decode_elements(void);  
-  
+// Таблица Морзе: обход дерева от корня; '.' -> 2k+1, '-' -> 2k+2  
 static const char cw_tree[] =  
     " ETIANMSURWDKGOHVVF L  PJBXCYZQ  54 3   2       16       7   8 90";  
   
@@ -381,10 +370,40 @@ static void cw_decode_elements(void) {
     cw.elem_buf[cw.elem_n] = 0;  
     int idx = 0;  
     for (uint8_t i = 0; i < cw.elem_n && idx < 63; i++)  
-        idx = idx * 2 + (cw.elem_buf[i] == '-' ? 2 : 1);
-    char c = (idx < 64) ? cw_tree[idx] : '?';
+        idx = idx * 2 + (cw.elem_buf[i] == '-' ? 2 : 1);  
+    char c = (idx < 64) ? cw_tree[idx] : '?';  
     if (c && c != ' ') Serial.write(c);  
     cw.elem_n = 0;  
+}  
+  
+// on=true  -> завершилась пауза (фронт нажатия)  
+// on=false -> завершился тон (фронт отпускания)  
+// idx — sample_idx текущего блока, fs_x1000 = fs_out*1000  
+static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
+    uint32_t dur_smp = on ? (idx - cw.on_start) : (idx - cw.off_start);  
+    float dur_ms = (float)dur_smp * 1.0e3f / (float)fs_x1000;   // fs_x1000=fs*1000 -> мс  
+  
+    if (on) {  
+        // Тон начался -> завершилась ПАУЗА  
+        if (dur_ms < 15.0f) return;                        // щелчок — игнор  
+        if      (dur_ms > cw_dot_avg * 5.0f) { cw_decode_elements(); Serial.write(' '); }  
+        else if (dur_ms > cw_dot_avg * 2.2f) { cw_decode_elements(); }  
+        if (dur_ms < cw_gap_avg * 4.0f)  
+            cw_gap_avg += (dur_ms - cw_gap_avg) * 0.1f;    // медленная адаптация паузы  
+    } else {  
+        // Тон кончился -> завершился ЭЛЕМЕНТ: точка/тире по композитному порогу  
+        if (dur_ms < 15.0f) return;                        // статический разряд  
+        float pulse_avg = (cw_dot_avg * 0.25f + cw_dash_avg) * 0.5f;  
+        if (dur_ms < pulse_avg) {  
+            if (cw.elem_n < sizeof(cw.elem_buf) - 1)  
+                cw.elem_buf[cw.elem_n++] = '.';  
+            cw_dot_avg += (dur_ms - cw_dot_avg) * 0.25f;   // быстрая адаптация  
+        } else {  
+            if (cw.elem_n < sizeof(cw.elem_buf) - 1)  
+                cw.elem_buf[cw.elem_n++] = '-';  
+            cw_dash_avg += (dur_ms - cw_dash_avg) * 0.10f; // медленнее  
+        }  
+    }  
 }
 
 // ============================================================================  
@@ -422,11 +441,14 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     if (dbg_rx) {Serial.printf("[DEC] fs_out=%.1f\n", (double)fs_out);}       // <-- fs валидна 
     f_center_hz = center_hz;  
     sym_acc = 0; sample_idx = 0;  
+    
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
     cw_noise_avg = 1024; cw_sig_avg = 1024;   // ненулевой старт — пороги валидны сразу  
-    cw_p_ema = 0; cw_low_cnt = 0;
+    cw_p_ema = 0; cw_low_cnt = 0;  
+    cw_dot_avg = 60.0f; cw_dash_avg = 180.0f; cw_gap_avg = 60.0f;  // старт ~20 WPM  
     memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));  
-    jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0; p_ema = 0;
+    jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0;
+
     memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13  
     cw.dot_us = 60000.0f; // 60 мс ≈ 20 WPM — стартовая точка, EMA подстроится  
     cw.noise_floor = 0;  
@@ -515,12 +537,11 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         gtz_push(xi, xq, n);  
         int32_t p; gtz_winner(&p);  
   
-        // EMA огибающей за ~8 окон (~33 мс): провалы внутри тире не рвут посылку  
+        // EMA огибающей ~8 окон (~33 мс): провалы внутри тире не рвут посылку  
         cw_p_ema += (p - cw_p_ema) >> 3;  
         int32_t pe = cw_p_ema;  
   
         // Двухуровневая AGC + гистерезис (fldigi):  
-        //  шум растёт медленно / падает быстро; пик растёт быстро / падает медленно  
         if (pe > cw_noise_avg)  
             cw_noise_avg += (pe - cw_noise_avg) >> 8;   // очень медленно вверх  
         else  
@@ -529,18 +550,17 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         if (pe > cw_sig_avg)  
             cw_sig_avg += (pe - cw_sig_avg) >> 2;       // быстро вверх — захват посылки  
         else  
-            cw_sig_avg += (pe - cw_sig_avg) >> 9;       // медленно вниз — держит между знаками  
+            cw_sig_avg += (pe - cw_sig_avg) >> 9;       // медленно вниз  
   
-        int32_t range = cw_sig_avg - cw_noise_avg;  
-        int32_t thr_hi = cw_noise_avg + range * 3 / 5;  // зажечь ключ  
-        int32_t thr_lo = cw_noise_avg + range * 2 / 5;  // погасить  
+        int32_t range   = cw_sig_avg - cw_noise_avg;  
+        int32_t thr_hi  = cw_noise_avg + range * 3 / 5;  
+        int32_t thr_lo  = cw_noise_avg + range * 2 / 5;  
         bool key;  
         if      (pe > thr_hi) key = true;  
         else if (pe < thr_lo) key = false;  
-        else                  key = cw.tone_on;         // зона гистерезиса — держим прошлое  
+        else                  key = cw.tone_on;         // зона гистерезиса  
   
-        // Дебаунс: off принимается только после 3 подряд «тихих» окон (~12 мс).  
-        // Одиночный провал посреди тире больше не рвёт элемент.  
+        // Дебаунс: off только после 3 подряд «тихих» окон (~12 мс)  
         bool key_deb;  
         if (key) { cw_low_cnt = 0; key_deb = true; }  
         else {  
@@ -552,13 +572,13 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         static uint32_t dbg = 0;  
         if (++dbg >= 64) {  
             dbg = 0;  
-            Serial.printf("[CW] pe=%ld sig=%ld nse=%ld %s dot=%.1fms\n",  
-                          (long)pe, (long)cw_sig_avg, (long)cw_noise_avg,  
-                          key_deb ? "ON" : "off", (double)cw_dot_avg);  
+            if (dbg_rx)  
+                Serial.printf("[CW] pe=%ld sig=%ld nse=%ld %s dot=%.1fms\n",  
+                              (long)pe, (long)cw_sig_avg, (long)cw_noise_avg,  
+                              key_deb ? "ON" : "off", (double)cw_dot_avg);  
         }  
   
         if (key_deb != cw.tone_on) {  
-            // fs_x1000 = fs_out * 1000 — НЕ fs_out: внутри делится 1e6/fs_x1000 → мс  
             cw_on_edge(!key_deb, sample_idx, (uint32_t)(fs_out * 1000.0f));  
             cw.tone_on = key_deb;  
             if (key_deb) cw.on_start = sample_idx; else cw.off_start = sample_idx;  

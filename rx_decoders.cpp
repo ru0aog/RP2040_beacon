@@ -53,8 +53,24 @@ typedef enum {
     RX_MODE_NONE=0, RX_MODE_CW, RX_MODE_RTTY,  
     RX_MODE_OLIVIA, RX_MODE_CONTESTIA,  
     RX_MODE_THOR, RX_MODE_MFSK16, RX_MODE_DOMEX, RX_MODE_FSQ, RX_MODE_IFKP,  
-    RX_MODE_JTTY      // 10 — 4-FSK, 31.25 Гц, 32 мс (WSJT-X 3.3)  
-} rx_mode_t;
+    RX_MODE_JTTY  
+} rx_mode_t;  
+
+// Единственная точка сопоставления имя↔режим. .ino вызывает её, не зная enum.  
+uint8_t rx_decoders_mode_by_name(const char* name) {  
+    if (!strcmp(name, "cw"))       return RX_MODE_CW;  
+    if (!strcmp(name, "rtty"))     return RX_MODE_RTTY;  
+    if (!strcmp(name, "olivia"))   return RX_MODE_OLIVIA;  
+    if (!strcmp(name, "contestia"))return RX_MODE_CONTESTIA;  
+    if (!strcmp(name, "thor"))     return RX_MODE_THOR;  
+    if (!strcmp(name, "mfsk16"))   return RX_MODE_MFSK16;  
+    if (!strcmp(name, "dominoex")) return RX_MODE_DOMEX;  
+    if (!strcmp(name, "dom"))      return RX_MODE_DOMEX;  
+    if (!strcmp(name, "fsq"))      return RX_MODE_FSQ;  
+    if (!strcmp(name, "ifkp"))     return RX_MODE_IFKP;  
+    if (!strcmp(name, "jtty"))     return RX_MODE_JTTY;  
+    return RX_MODE_NONE;   // 0 — «режим не найден», вызывающий код проверяет на NONE  
+}
 
 static rx_mode_t  dec_mode = RX_MODE_NONE;  
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  

@@ -709,9 +709,50 @@ void check_serial_commands() {
               }  
           }
 
+
+          // .ino, рядом с обработчиком "adc"  
+          else if (command == "adcr") {  
+              bool was_running = false;               // если есть флаг rx_running — используй его  
+              rx_capture_stop();                      // остановить DMA/ADC free-run  
+            
+              adc_init();  
+              adc_gpio_init(RX_ADC_PIN_I);  
+              adc_gpio_init(RX_ADC_PIN_Q);  
+            
+              adc_select_input(0);                    // ADC0 = GP26  
+              uint16_t v0 = adc_read();  
+              adc_select_input(1);                    // ADC1 = GP27  
+              uint16_t v1 = adc_read();  
+            
+              Serial.printf("[ADCR] ADC0(GP26)=%u  ADC1(GP27)=%u\n", v0, v1);  
+              // RX перезапусти вручную командой rx jtty после теста  
+          }
+
+          // Прямое чтение каналов в обход захвата (только при выключенном RX!)  
+          else if (command == "adcq") {  
+              adc_init();  
+              adc_gpio_init(RX_ADC_PIN_I);  
+              adc_gpio_init(RX_ADC_PIN_Q);  
+              for (int ch = 0; ch < 2; ch++) {  
+                  adc_select_input(ch);  
+                  uint16_t mn = 0xFFFF, mx = 0;  
+                  for (int i = 0; i < 200; i++) {  
+                      uint16_t v = adc_read();  
+                      if (v < mn) mn = v; if (v > mx) mx = v;  
+                  }  
+                  Serial.printf("[ADCQ] ch%d (GP%d): %u..%u\n", ch, 26 + ch, mn, mx);  
+              }  
+          }
+
           else if (command.startsWith("adc")) {  
               // Снимок одного блока сырых слов [I|Q]: min/max/DC-офсет.  
-              const volatile uint32_t* blk = rx_capture_get_block();  
+              const volatile uint32_t* blk = rx_capture_get_block();
+              // После получения blk = rx_capture_get_block(), ДО цикла статистики:  
+              Serial.print(F("[ADC] raw:"));  
+              for (int k = 0; k < 8; k++) {  
+                  Serial.printf(" %08lX", (unsigned long)blk[k]);  
+              }  
+              Serial.println();
               if (!blk) Serial.println(F("[ADC] блоков нет — rx запущен?"));  
               else {  
                   int lo_i = 4095, hi_i = 0, lo_q = 4095, hi_q = 0;  
@@ -726,8 +767,13 @@ void check_serial_commands() {
                       lo_i, hi_i, (long)(si/RX_BLOCK_SAMPLES),  
                       lo_q, hi_q, (long)(sq/RX_BLOCK_SAMPLES),  
                       (unsigned long)rx_capture_dropped());  
-              }  
+              }
+              Serial.printf("[ADC] fcs=0x%08lX cs=0x%08lX rrobin=0x%02lX\n",  
+              (unsigned long)adc_hw->fcs,  
+              (unsigned long)adc_hw->cs,  
+              (unsigned long)(adc_hw->cs >> 16) & 0x1F);  // RROBIN биты CS[20:16]
           }
+
 
           else if (command.startsWith("setparam ")) {
             String param_part = command.substring(9);

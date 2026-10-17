@@ -122,6 +122,20 @@ void rx_capture_start(void) {
     adc_run(true);  
     rx_running = true;  
     dma_channel_start(rx_dma_a);                      // стартует A, дальше чейн  
+
+    // rx_capture.cpp, в конце rx_capture_start()  
+    io_rw_32 ctrl = dma_channel_hw_addr(rx_dma_a)->ctrl_trig;  
+    Serial.printf("[CAP] chA=%d chB=%d  ctrl=0x%08lX  size=%lu incr_r=%d incr_w=%d dreq=%lu tc=%lu\n",  
+                    (int)rx_dma_a, (int)rx_dma_b,  
+                    (unsigned long)ctrl,  
+                    (unsigned long)((ctrl >> 2) & 3),    // DATA_SIZE: 0=8, 1=16, 2=32 бита  
+                    (int)((ctrl >> 4) & 1),              // INCR_READ  (0 — читаем FIFO)  
+                    (int)((ctrl >> 5) & 1),              // INCR_WRITE (1 — пишем в буфер)  
+                    (unsigned long)((ctrl >> 15) & 0x3F),// TREQ_SEL (DREQ_ADC = 36)  
+                    (unsigned long)dma_channel_hw_addr(rx_dma_a)->transfer_count);  
+    // контрольный дамп al1_ctrl — то, что реально уедет в канал по trigger  
+    Serial.printf("[CAP] ctrl=0x%08lX\n", (unsigned long)dma_hw->ch[rx_dma_a].al1_ctrl);
+
 }  
   
 void rx_capture_stop(void) {  

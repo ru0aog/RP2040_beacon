@@ -748,7 +748,10 @@ void check_serial_commands() {
           }
 
           else if (command.startsWith("adc")) {  
-              const volatile uint32_t* blk = rx_capture_get_block();  
+              // .ino, обработчик adc — вместо одного get_block():  
+              const volatile uint32_t* blk = NULL;  
+              uint32_t t0 = millis();  
+              while (!blk && millis() - t0 < 100) blk = rx_capture_get_block();  // ждём до 100 мс
               if (!blk) Serial.println(F("[ADC] блоков нет — rx запущен?"));  
               else {  
                   // Сырой дамп первых 8 слов — до статистики  

@@ -105,6 +105,15 @@ static uint8_t jtty_sync_score(void) {
     return m;  
 }
 
+// рядом с остальными static-полями декодеров, над rx_decoders_process  
+static int32_t  cw_sig_avg    = 0;      // EMA уровня тона (fldigi sig_avg)  
+static int32_t  cw_noise_avg  = 0;      // EMA уровня шума  
+static bool     cw_key        = false;  // детектированное состояние ключа  
+static float    cw_dot_avg    = 60.0f;  // мс, адаптивная оценка точки  
+static float    cw_dash_avg   = 180.0f; // мс, адаптивная оценка тире  
+static float    cw_gap_avg    = 60.0f;  // мс, оценка межэлементной паузы  
+static uint32_t cw_last_edge  = 0;      // sample_idx последнего фронта
+
 // ============================================================================  
 // 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)  
 // ----------------------------------------------------------------------------  
@@ -360,38 +369,6 @@ static cw_dec_t cw;
   
 static void cw_decode_elements(void);  
   
-// idx — индекс отсчёта Fs_out; dur переводим в микросекунды  
-static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
-    // dur_ms — длительность завершившегося интервала (тона или паузы)  
-    uint32_t dur_smp = on ? (idx - cw.on_start) : (idx - cw.off_start);  
-    float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000;
-  
-    float dot_ms = cw.dot_us * 0.001f;      // оценка точки в мс
-    if (dot_ms < 20.0f || dot_ms > 150.0f) dot_ms = 60.0f;  // страховка при 0/мусоре
-  
-    if (on) {  
-        // Конец тона: классификация точка/тире  
-        if (dur_ms < 15.0f) return;          // статический разряд — игнорировать  
-        if (dur_ms < 2.0f * dot_ms) {  
-            cw.elem_buf[cw.elem_n++] = '.';  
-            // Автоподстройка: быстрая EMA по точкам, жёсткий кламп 20..150 мс (~8–60 WPM)  
-            float nd_ms = dot_ms + (dur_ms - dot_ms) * 0.25f;  
-            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd_ms * 1000.0f));  
-        } else {  
-            cw.elem_buf[cw.elem_n++] = '-';  
-            // Тире обновляет оценку точки в 3 раза медленнее (dur/3 vs dot)  
-            float nd_ms = dot_ms + (dur_ms / 3.0f - dot_ms) * 0.10f;  
-            cw.dot_us = (uint32_t)fminf(150000.0f, fmaxf(20000.0f, nd_ms * 1000.0f));  
-        }  
-        if (cw.elem_n >= sizeof(cw.elem_buf) - 1) cw.elem_n = 0;  
-    } else {  
-        // Конец паузы: ~3·dot → конец знака, ~7·dot → конец слова  
-        if (dur_ms < 15.0f) return;          // щелчок-прореживание тона — не разрыв слова  
-        if      (dur_ms > 6.0f * dot_ms) { cw_decode_elements(); Serial.write(' '); }  
-        else if (dur_ms > 2.5f * dot_ms)   { cw_decode_elements(); }  
-    }  
-}
-
 static const char cw_tree[] =  
     " ETIANMSURWDKGOHVVF L  PJBXCYZQ  54 3   2       16       7   8 90";  
   
@@ -450,11 +427,12 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
   
     switch (dec_mode) {  
     case RX_MODE_CW:  
-        gtz_bank_init(70.0f, 0.0f, 1, fs_out);   // тон ~+70 Гц — компенсация сдвига LO
-        sym_samples = (uint32_t)(fs_out * 0.005f);               // окно 5 мс
-        Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",  
-                      (unsigned)gtz_ntones, (unsigned long)sym_samples);  // <-- банк инициализирован
-        break;  
+        gtz_bank_init(63.0f, 0.0f, 1, fs_out);   // бин на остаточный сдвиг LO (~+63 Гц)  
+        sym_samples = (uint32_t)(fs_out * 0.005f);  
+        cw_sig_avg = 0; cw_noise_avg = 1024; cw_key = false;  
+        cw_dot_avg = 60.0f; cw_dash_avg = 180.0f; cw_gap_avg = 60.0f;  
+        cw_last_edge = 0;  
+        break;
     case RX_MODE_RTTY:  
         gtz_bank_init(-85.0f, 170.0f, 2, fs_out);                // mark/space = ±85 Гц  
         rt.bit_period = (uint32_t)(fs_out / 45.45f);             // ~344 отсчёта на бит  
@@ -525,33 +503,70 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
     if (dec_mode == RX_MODE_NONE || n == 0) return;  
 
-// ---------------- CW: блок = одно окно детектора огибающей ----------------  
+// ---------------- CW: блок ----------------  
     if (dec_mode == RX_MODE_CW) {  
         gtz_push(xi, xq, n);  
         int32_t p; gtz_winner(&p);  
   
-        // Гладим огибающую — одиночное провалившееся окно не должно рвать посылку  
-        p_ema += (p - p_ema) >> 1;          // EMA за ~2 окна  
-        p = p_ema;  
+        // --- AGC двухуровневый (fldigi): sig_avg и noise_avg по раздельным EMA ---  
+        if (p > cw_sig_avg)   cw_sig_avg   += (p - cw_sig_avg)   >> 3;  // быстро вверх  
+        else                  cw_sig_avg   += (p - cw_sig_avg)   >> 7;  // медленно вниз  
+        if (p < cw_noise_avg) cw_noise_avg += (p - cw_noise_avg) >> 3;  
+        else                  cw_noise_avg += (p - cw_noise_avg) >> 7;  
   
-        bool on = p > (cw.noise_floor * 4 + 1024);  
-        if (!on)                                            // floor — только в паузах,  
-            cw.noise_floor += ((p - cw.noise_floor) >> 4);  // иначе EMA съедает посылку  
+        // Порог с гистерезисом: верхний для включения, нижний для выключения  
+        int32_t range = cw_sig_avg - cw_noise_avg;  
+        int32_t thr_hi = cw_noise_avg + (range >> 1) + (range >> 2);  // 0.75  
+        int32_t thr_lo = cw_noise_avg + (range >> 2);                 // 0.25  
+        if (range < 512) { thr_hi = cw_noise_avg + 512; thr_lo = cw_noise_avg + 256; }  
   
-        // Отладка: огибающая раз в ~320 мс (под флагом dbg_rx)  
+        bool key = cw_key;  
+        if (!key && p > thr_hi) key = true;  
+        else if (key && p < thr_lo) key = false;  
+  
+        // --- Фронт: длительность интервала в мс ---  
+        if (key != cw_key) {  
+            float ms_per_smp = 1000.0f / fs_out;  
+            float dur_ms = (float)(sample_idx - cw_last_edge) * ms_per_smp;  
+            cw_last_edge = sample_idx;  
+  
+            if (key) {  
+                // Завершилась ПАУЗА — классификация промежутка (UHSDR)  
+                if (dur_ms > cw_dot_avg * 5.0f) { cw_decode_elements(); Serial.write(' '); }  
+                else if (dur_ms > cw_dot_avg * 2.2f) { cw_decode_elements(); }  
+                // EMA паузы для адаптации gap  
+                if (dur_ms < cw_gap_avg * 4.0f)  
+                    cw_gap_avg += (dur_ms - cw_gap_avg) * 0.1f;  
+            } else {  
+                // Завершился ТОН — классификация точка/тире по композитному  
+                // порогу (UHSDR): pulse_avg = (dot/4 + dash)/2  
+                float pulse_avg = (cw_dot_avg * 0.25f + cw_dash_avg) * 0.5f;  
+                if (dur_ms < 15.0f) { /* статический разряд — пропуск */ }  
+                else if (dur_ms < pulse_avg) {  
+                    cw.elem_buf[cw.elem_n++] = '.';  
+                    cw_dot_avg += (dur_ms - cw_dot_avg) * 0.25f;   // EMA ~0.25  
+                } else {  
+                    cw.elem_buf[cw.elem_n++] = '-';  
+                    cw_dash_avg += (dur_ms - cw_dash_avg) * 0.10f; // медленнее  
+                }  
+                if (cw.elem_n >= sizeof(cw.elem_buf) - 1) {  
+                    if (dbg_rx) Serial.println(F("[CW] elem_buf overflow"));  
+                    cw.elem_n = 0;  
+                }  
+            }  
+            cw_key = key;  
+        }  
+  
+        // Отладка  
         static uint32_t dbg = 0;  
         if (++dbg >= 64) {  
             dbg = 0;  
             if (dbg_rx)  
-                Serial.printf("[CW] pwr=%ld floor=%ld %s\n",  
-                              (long)p, (long)cw.noise_floor, on ? "ON" : "off");  
+                Serial.printf("[CW] pwr=%ld sig=%ld noise=%ld %s dot=%.0f\n",  
+                              (long)p, (long)cw_sig_avg, (long)cw_noise_avg,  
+                              key ? "ON" : "off", (double)cw_dot_avg);  
         }  
   
-        if (on != cw.tone_on) {  
-            cw_on_edge(!on, sample_idx, (uint32_t)(fs_out * 1000.0f));  
-            cw.tone_on = on;  
-            if (on) cw.on_start = sample_idx; else cw.off_start = sample_idx;  
-        }  
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
         sample_idx += n;  
         return;  

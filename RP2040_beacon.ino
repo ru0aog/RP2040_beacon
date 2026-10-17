@@ -137,6 +137,7 @@ extern volatile bool tx_launching;
 extern PllConfig pll_overclock;   // из vfo_hardware.cpp
 extern void jtty_send_string(const char* str);  
 extern void prepare_jtty_frequencies(uint32_t base_hz);
+extern bool dbg_rx;
 
 // --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
 const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
@@ -888,7 +889,7 @@ void setup() {
 
   // запуск виртуального СОМ-порта через USB  
   Serial.setStringDescriptor("Beacon Console");   // имя первого порта (должно стоять ДО begin)  
-  Serial.begin(115200);
+  Serial.begin(115200);  
 
   // Serial1.begin(115200, SERIAL_8N1); // Запуск аппаратного UART0 на пинах GP0 (TX) и GP1 (RX)
   // Serial.println("[Система] Выходим в эфир...");  // это пойдет в USB
@@ -982,8 +983,8 @@ void loop() {
       while (rx_dsp_get_output(&bi, &bq, &bn)) {  
           static uint32_t blk_cnt = 0;  
           if (++blk_cnt == 1 || blk_cnt % 500 == 0)  
-              Serial.printf("[LOOP] blk=%lu bn=%u\n",  
-                            (unsigned long)blk_cnt, (unsigned)bn);   // <-- данные доходят до core0  
+              if (dbg_rx) {Serial.printf("[LOOP] blk=%lu bn=%u\n",  
+                            (unsigned long)blk_cnt, (unsigned)bn);}   // <-- данные доходят до core0  
           rx_decoders_process(bi, bq, bn);  
           rx_dsp_release_output();  
       }  

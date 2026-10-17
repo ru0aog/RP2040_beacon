@@ -1049,17 +1049,14 @@ void loop() {
       usr_chain_state = USR_WAIT_FOR_RTTY;
       break;
 
-    case USR_WAIT_FOR_RTTY:
-      // Ждем, пока внутренний модулятор CW отработает.
-      // В конце своего сеанса модулятор CW сбросит force_cw_transmission в false.
-      // ВНИМАНИЕ: Родной блок CW в конце сеанса выполнит "is_transmitting = false". 
-      // Мы перехватываем этот момент, возвращаем true для удержания блокировки во время паузы.
-      if (!force_cw_transmission && !is_transmitting) {
-        Serial.println(F("[Автомат] Передача CW завершена. Блокировка удержана. Пауза 15 сек перед RTTY..."));
-        is_transmitting = true;   // Восстанавливаем блокировку на время тишины!
-        usr_timer_ms = millis();  // Засекаем 15 секунд паузы между модами
-        usr_chain_state = USR_START_RTTY;
-      }
+    case USR_WAIT_FOR_RTTY:  
+      // Тестовый режим: кнопка USR запускает ТОЛЬКО CW, цепочка RTTY/IFKP отключена.  
+      if (!force_cw_transmission && !is_transmitting) {  
+        Serial.println(F("[Автомат] Передача CW завершена. Тестовый режим: цепочка остановлена."));  
+        LCD_init(true);  
+        LCD_print("CW DONE! READY", 0, 0);  
+        usr_chain_state = USR_IDLE;        // автомат в исходное, блокировка честно снята (is_transmitting уже false)  
+      }  
       break;
 
     case USR_START_RTTY:

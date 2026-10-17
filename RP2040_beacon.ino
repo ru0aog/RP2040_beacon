@@ -507,6 +507,7 @@ void check_serial_commands() {
                   Serial.println(F("[RX] OFF"));  
               }
           }
+          
           else if (command.startsWith("rx ")) {  
               // rx <mode> [freq]  — пример: rx rtty 3608000  
               if (is_transmitting || tx_launching) {  
@@ -520,7 +521,7 @@ void check_serial_commands() {
                   uint32_t f = (sp < 0) ? 0 : strtoul(rest.substring(sp+1).c_str(), NULL, 10);  
                   if (f == 0) f = 3608000;  
                   mode_s.toLowerCase();  
-  
+            
                   uint8_t mode = RX_MODE_NONE;  
                   if      (mode_s == "rtty")   mode = RX_MODE_RTTY;  
                   else if (mode_s == "cw")     mode = RX_MODE_CW;  
@@ -531,29 +532,32 @@ void check_serial_commands() {
                   else if (mode_s == "dominoex" || mode_s == "dom") mode = RX_MODE_DOMINOEX;  
                   else if (mode_s == "fsq")    mode = RX_MODE_FSQ;  
                   else if (mode_s == "ifkp")   mode = RX_MODE_IFKP;  
-                  else if (mode_s == "jtty")   mode = RX_MODE_JTTY; 
-  
+                  else if (mode_s == "jtty")   mode = RX_MODE_JTTY;  
+            
                   if (mode == RX_MODE_NONE) {  
-                    Serial.println(F("[RX] Неизвестный режим. Доступны: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp"));  
+                      Serial.println(F("[RX] Неизвестный режим. Доступны: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp jtty"));  
                   } else {  
-                    // 1. LO: целочисленный clkdiv, дизеринг/core1 выключены  
-                    vfo_quadrature_start(f);
-                    uint32_t lo = vfo_quadrature_lo_hz();
-                    vfo_subband_apply(f);          // freq_hz — частота команды rx  
-                    // 2. ADC+DMA поток
-                    rx_dsp_start((float)f);
-                    // 3. DSP на core1: NCO садится на (f_target − f_lo_actual)  
-                    rx_capture_start();  
-                    rx_decoders_start(RX_MODE_JTTY, (float)f);
-                    //rx_dsp_start((float)f);  
-                    //rx_decoders_start(mode, (float)f - (float)lo);  
-                    rx_active = true;  
-                    rx_freq_hz = f;  
-                    rx_mode = mode;  
-                    ZERO_LED_CYAN_ON();  
-                    Serial.printf("[RX] %s @ %lu Гц | LO=%lu Гц, IF=%.1f Гц\n",  
-                                  mode_s.c_str(), (unsigned long)f,  
-                                  (unsigned long)lo, (float)f - (float)lo);  
+                      // 1. LO: целочисленный clkdiv, дизеринг/core1 выключены  
+                      vfo_quadrature_start(f);  
+                      uint32_t lo = vfo_quadrature_lo_hz();  
+                      vfo_subband_apply(f);          // ДПФ по частоте команды rx  
+            
+                      // 2. DSP на core1: NCO садится на (f_target − f_lo_actual)  
+                      rx_dsp_start((float)f);  
+            
+                      // 3. ADC+DMA поток  
+                      rx_capture_start();  
+            
+                      // 4. Декодер выбранного режима  
+                      rx_decoders_start(mode, (float)f);   // <-- было RX_MODE_JTTY — теперь mode  
+            
+                      rx_active = true;  
+                      rx_freq_hz = f;  
+                      rx_mode = mode;  
+                      ZERO_LED_CYAN_ON();  
+                      Serial.printf("[RX] %s @ %lu Гц | LO=%lu Гц, IF=%.1f Гц\n",  
+                                    mode_s.c_str(), (unsigned long)f,  
+                                    (unsigned long)lo, (float)f - (float)lo);  
                   }  
               }  
           }

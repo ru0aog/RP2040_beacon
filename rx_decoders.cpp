@@ -107,16 +107,29 @@ static uint8_t jtty_sync_score(void) {
 
 // рядом с остальными static-полями декодеров, над rx_decoders_process  
 static int32_t  cw_sig_avg    = 0;      // EMA уровня тона (fldigi sig_avg)  
-static int32_t  cw_noise_avg  = 0;      // EMA уровня шума  
+static int32_t  cw_noise_avg = 1024;    // оценка шума огибающей  
 static bool     cw_key        = false;  // детектированное состояние ключа  
 static float    cw_dot_avg    = 60.0f;  // мс, адаптивная оценка точки  
 static float    cw_dash_avg   = 180.0f; // мс, адаптивная оценка тире  
-static float    cw_gap_avg    = 60.0f;  // мс, оценка межэлементной паузы  
+static float    cw_gap_avg  = 60.0f;     // мс, пауза между элементами  
 static uint32_t cw_last_edge  = 0;      // sample_idx последнего фронта
 
 // Дебаунс ключа: off подтверждается только после N подряд «тихих» окон  
-static uint8_t  cw_low_cnt  = 0;  
-static int32_t  cw_p_ema    = 0;    // сглаженная огибающая (EMA ~8 окон)
+static uint8_t  cw_low_cnt  = 0;      // счётчик дебаунса спада  
+static int32_t  cw_p_ema    = 0;      // сглаженная огибающая (EMA ~8 окон)
+
+// Состояние CW-декодера  
+typedef struct {  
+    bool     tone_on;                 // дебаунснутое состояние ключа  
+    uint32_t on_start, off_start;     // sample_idx начала тона/паузы  
+    uint8_t  elem_n;                  // элементов в буфере знака  
+    char     elem_buf[12];            // '.'/'-' текущего знака  
+} cw_state_t;  
+  
+static cw_state_t cw;  
+
+
+
 
 // ============================================================================  
 // 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)  
@@ -443,15 +456,17 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     sym_acc = 0; sample_idx = 0;  
     
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
-    cw_noise_avg = 1024; cw_sig_avg = 1024;   // ненулевой старт — пороги валидны сразу  
-    cw_p_ema = 0; cw_low_cnt = 0;  
-    cw_dot_avg = 60.0f; cw_dash_avg = 180.0f; cw_gap_avg = 60.0f;  // старт ~20 WPM  
     memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));  
+    cw_dot_avg = 60.0f; cw_dash_avg = 180.0f; cw_gap_avg = 60.0f;  
+    cw_noise_avg = 1024; cw_sig_avg = 0; cw_p_ema = 0; cw_low_cnt = 0;
     jtty_nsym = 0; jtty_hpos = 0; jtty_inframe = 0;
 
     memset(jtty_hist, 0xFF, sizeof(jtty_hist));   // гарантированно не совпадёт с is13  
-    cw.dot_us = 60000.0f; // 60 мс ≈ 20 WPM — стартовая точка, EMA подстроится  
-    cw.noise_floor = 0;  
+    // CW: явный сброс состояния детектора/классификатора уже сделан выше  
+    // (cw_*-статики + memset(&cw,...)); старые поля dot_us/noise_floor удалены.  
+    cw.tone_on  = false;  
+    cw.on_start = cw.off_start = 0;  
+    cw.elem_n   = 0;
   
     switch (dec_mode) {  
     case RX_MODE_CW:  

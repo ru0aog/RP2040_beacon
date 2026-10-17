@@ -563,7 +563,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
         // Граница символа: winner-take-all  
         int32_t pmax;  
-        uint8_t tone = gtz_winner(&pmax);  
+        uint8_t tone = gtz_argmax(&pmax);
         afc_update(tone, pmax);  
   
         switch (dec_mode) {  

@@ -540,8 +540,10 @@ void check_serial_commands() {
                     uint32_t lo = vfo_quadrature_lo_hz();
                     vfo_subband_apply(f);          // freq_hz — частота команды rx  
                     // 2. ADC+DMA поток
-                    rx_capture_start();
+                    rx_dsp_start((float)f);
                     // 3. DSP на core1: NCO садится на (f_target − f_lo_actual)  
+                    rx_capture_start();  
+                    rx_decoders_start(RX_MODE_JTTY, (float)f);
                     //rx_dsp_start((float)f);  
                     //rx_decoders_start(mode, (float)f - (float)lo);  
                     rx_active = true;  

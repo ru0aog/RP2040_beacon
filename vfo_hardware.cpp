@@ -134,8 +134,8 @@ volatile bool vfo_auto_boost = false;    // авто-разгон, вычисл�
 
 // --- Квадратура I/Q: один SM, 4-тактовая программа, 2 соседних пина ---  
 // базовый пин PIO-блока = GP0 = Q, следующий = GP1 = I  
-pin_freq_out_i = 0;   // PIO base pin — физически это Q (GP0)  
-pin_freq_out_q = 1;   // base+1 — физически это I (GP1)
+int pin_freq_out_i = 0;   // PIO base pin — физически это Q (GP0)  
+int pin_freq_out_q = 1;   // base+1 — физически это I (GP1)
 
 static bool thermal_throttled = false; // защёлка состояния троттлинга  
 static uint16_t vsel_to_mv(uint32_t vsel);  

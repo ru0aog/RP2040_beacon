@@ -146,13 +146,14 @@ typedef struct {
     float buf_mi[RTTY_MAX_SYMLEN], buf_mq[RTTY_MAX_SYMLEN];  
     float buf_si[RTTY_MAX_SYMLEN], buf_sq[RTTY_MAX_SYMLEN];  
     int   buf_idx;  
-    float sum_mi, sum_mq, sum_si, sum_sq;  
+    float sum_mi, sum_mq, sum_si, sum_sq;
   
     // огибающие и шум (rtty.cxx:679-693)  
-    float mark_mag, space_mag;  
-    float mark_env, space_env;  
-    float mark_noise, space_noise;  
-    float noise_floor;  
+    float mark_env, space_env;      // сглаженные огибающие (decayavg)    
+    float mark_mag, space_mag;      // мгновенные |сумма boxcar| — то, что в точке строба    
+    float mark_noise, space_noise;  // трекеры шума
+    float noise_floor;              // min(mark_noise, space_noise) — fldigi nf    
+    float v1, v2, v3;               // ATC-слайсер
   
     // сдвиговый регистр решений + автомат rx()  
     bool  bit_buf[RTTY_MAX_SYMLEN];  
@@ -248,9 +249,16 @@ static bool rtty_rx(bool bit)
   
     case 2: // DATA — nbits стробов по середине каждого бита  
         if (--rrx.counter == 0) {  
-            bool mk = rtty_is_mark();  
-            if (dbg_bits)  
-                Serial.printf("[RTTY-B] %d:%c\n", rrx.bitcntr, mk ? '1' : '0');  
+            bool mk = rtty_is_mark();    
+            if (dbg_bits) {    
+                float den  = rrx.mark_mag + rrx.space_mag;    
+                float marg = (den > 1e-6f) ? fabsf(rrx.mark_mag - rrx.space_mag) / den : 0.0f;    
+                Serial.printf("[RTTY-B] %d:%c v3=%+.0f mg=%.2f |m|=%.0f |s|=%.0f env=%.0f/%.0f\n",    
+                  rrx.bitcntr, mk ? '1' : '0',    
+                  (double)rrx.v3, (double)marg,    
+                  (double)rrx.mark_mag, (double)rrx.space_mag,    
+                  (double)rrx.mark_env, (double)rrx.space_env);    
+            }
             rrx.rxdata |= (mk ? 1u : 0u) << rrx.bitcntr++;  
             rrx.counter = rrx.symbollen;  
             if (rrx.bitcntr >= rrx.nbits)  
@@ -260,9 +268,11 @@ static bool rtty_rx(bool bit)
   
     case 3: // STOP — ждём mark  
         if (--rrx.counter == 0) {  
-            bool mk = rtty_is_mark();  
-            if (dbg_bits)  
-                Serial.printf("[RTTY-B] P:%c\n", mk ? '1' : '0');  
+            bool mk = rtty_is_mark();    
+            if (dbg_bits)    
+                Serial.printf("[RTTY-B] P:%c v3=%.1f m=%.0f s=%.0f\n",  
+                              mk ? '1' : '0', (double)rrx.v3,  
+                              (double)rrx.mark_env, (double)rrx.space_env);
             if (mk) {  
                 uint8_t c = (uint8_t)(rrx.rxdata & 0x1F);  
                 rtty_emit(c);  
@@ -299,11 +309,12 @@ static void rtty_rx_sample(float xr, float xq)
     rrx.sum_sq += s_i - rrx.buf_sq[idx]; rrx.buf_sq[idx] = s_i;
     if (++rrx.buf_idx >= L) rrx.buf_idx = 0;  
   
-    rrx.mark_mag  = sqrtf(rrx.sum_mi*rrx.sum_mi + rrx.sum_mq*rrx.sum_mq) / L;  
-    rrx.space_mag = sqrtf(rrx.sum_si*rrx.sum_si + rrx.sum_sq*rrx.sum_sq) / L;  
-  
-    // rtty.cxx:679-693 — асимметричные decayavg  
-    float T = rrx.symbollen_f;  
+    rrx.mark_mag  = sqrtf(rrx.sum_mi*rrx.sum_mi + rrx.sum_mq*rrx.sum_mq) / L;    
+    rrx.space_mag = sqrtf(rrx.sum_si*rrx.sum_si + rrx.sum_sq*rrx.sum_sq) / L;    
+    
+    // rtty.cxx:679-693 — асимметричные decayavg    
+    float T = rrx.symbollen_f;
+
     rrx.mark_env   = rtty_decayavg(rrx.mark_env,  rrx.mark_mag,  
                      rrx.mark_mag  > rrx.mark_env  ? T/4  : T*16);  
     rrx.mark_noise = rtty_decayavg(rrx.mark_noise, rrx.mark_mag,  

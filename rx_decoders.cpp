@@ -423,8 +423,12 @@ static void rtty_afc(void) {
     // Защита от NaN-выбросов в паузах манипуляции
     if (m2_curr > 0.01f && m2_prev > 0.01f) {  
         // Кросс-произведение для вычисления остаточного вращения фазы за бит
-        float d = re*pre + im*pim;  
-        float c = im*pre - re*pim;  
+        // ИСПРАВЛЕНО: Математически корректный знак комплексного дискриминатора fldigi.
+        // Восстанавливает отрицательную обратную связь: петля AFC начинает притягивать 
+        // частоты миксеров к истинному тону корреспондента, компенсируя расстройку до 250 Гц.
+        float d = re * pre + im * pim;  
+        float c = im * pre - re * pim;  
+
         
         // Быстрый замер фазового сдвига dphi = arg(z * conj(z_prev))
         float dphi = atan2f(c, d);  
@@ -432,14 +436,7 @@ static void rtty_afc(void) {
         // Переводим радианы в герцы ошибки частоты: err = dphi * fs / (2 * PI * T_bit)
         float err_hz = dphi * fs_out / (2.0f * PI * (float)rrx.bit_period);  
         
-        // Добавляем к базовой ошибке уточнение от параболического интерполятора Якобсена.
-        // Шаг бина сетки частот при Fs=15625 и окне T_bit(344) равен: fs_out / bit_period ≈ 45.4 Гц.
-        // Интерполятор сдвигает ошибку еще точнее — в пределах ±22.7 Гц.
-        float delta = rtty_interpolate_peak(pre, pim, re, im, rrx.sum_mr, rrx.sum_mi);
-        float fine_hz = delta * (fs_out / (float)rrx.bit_period);
-        
-        // Композитная ошибка частоты расстройки
-        float total_err_hz = err_hz + fine_hz;
+        float total_err_hz = err_hz;   // интерполятору нужны FFT-бины, не boxcar-суммы
 
         // Жесткое ограничение: не более четверти сдвига частоты за один шаг (один бит)
         if (total_err_hz >  200.0f) total_err_hz =  200.0f;  
@@ -540,15 +537,19 @@ static inline void rtty_rx_sample(int16_t xi, int16_t xq) {
   
     // --- битовый таймер (старт-стопный автомат) ---  
     switch (rrx.state) {  
-    case 0:                                       
+    case 0:                                       // idle = mark, ловим фронт в space  
         if (!curbit) {  
             if (++rrx.space_cnt >= 4) {           // ~0.25 мс деглитчинг  
                 rrx.state = 1;  
                 rrx.bit_cnt = 0;  
                 rrx.shreg = 0;  
-                // ИСПРАВЛЕНО: Вычитаем групповую задержку Boxcar-фильтра (T_bit / 2).
-                // Истинный центр бита 0 находится строго на расстоянии rrx.bit_period от фронта.
-                rrx.bit_timer = rrx.bit_period - 4;  
+                
+                // ИСПРАВЛЕНО: Центрирование стробирования с учетом физики Boxcar-фильтра.
+                // Групповая задержка скользящего среднего равна rrx.bit_period / 2.
+                // Чтобы попасть строго в середину бита 0, первый дедлайн таймера должен составить
+                // ровно половину периода бита (минус 4 отсчета деглитчера).
+                rrx.bit_timer = (rrx.bit_period / 2) - 4;  
+                
                 if (dbg_rx)  
                     Serial.println(F("[RTTY] start"));  
             }  
@@ -556,6 +557,7 @@ static inline void rtty_rx_sample(int16_t xi, int16_t xq) {
             rrx.space_cnt = 0;  
         }  
         break;  
+
   
     case 1:                                       
         if (--rrx.bit_timer == 0) {  

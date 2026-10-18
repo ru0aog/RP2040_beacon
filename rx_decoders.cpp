@@ -796,30 +796,34 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
         switch (dec_mode) {
 
-        case RX_MODE_RTTY:  
-            rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;  
-            // Скелч: нет сигнала — автомату говорим "mark" (линия в покое),  
-            // чтобы шум не генерировал ложные старт-фронты  
+case RX_MODE_RTTY: {  
+            rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;   // EMA по закрытому подокну  
+  
+            // Squelch: оба бина в шуме → удерживаем mark (idle)  
             int32_t sig = (int32_t)gtz_power(0) + (int32_t)gtz_power(1);  
             bool mark = (sig < 300) ? true : (rtty_disc_ema < 0);  
-            rtty_bit(mark, sample_idx);
+            rtty_bit(mark, sample_idx);  
+  
             if (dbg_rx) {  
                 static uint8_t rd = 0;  
                 if (++rd >= 16) {  
                     rd = 0;  
-                    Serial.printf("[RTTY] raw=%ld ema=%ld %s\n",  
-                                  (long)rtty_disc, (long)rtty_disc_ema,  
-                                  (rtty_disc_ema < 0) ? "mark" : "space");  
+                    Serial.printf("[RTTY] raw=%ld ema=%ld sig=%ld %s\n",  
+                                  (long)rtty_disc, (long)rtty_disc_ema, (long)sig,  
+                                  mark ? "mark" : "space");  
                 }  
-            }
-            static uint32_t dbg2 = 0;  
-            if (dbg_rx && (++dbg2 >= 48)) {  
-                dbg2 = 0;  
-                Serial.printf("[RTTY-PWR] bin0=%lu bin1=%lu\n",  
-                                        (unsigned long)gtz_power(0),  
-                                        (unsigned long)gtz_power(1));
-            }
-            break;
+                static uint32_t dbg2 = 0;  
+                if (++dbg2 >= 48) {  
+                    dbg2 = 0;  
+                    Serial.printf("[RTTY-PWR] bin0=%lu bin1=%lu\n",  
+                                  (unsigned long)gtz_power(0),  
+                                  (unsigned long)gtz_power(1));  
+                }  
+            }  
+  
+            rtty_disc = 0;   // сброс ПОСЛЕ печати — новое подокно с чистого сумматора  
+            break;  
+        }
 
         case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
             olivia_on_tone(tone);  

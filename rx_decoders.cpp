@@ -346,10 +346,12 @@ static const char baudot_ltrs[32] = {
 static const char baudot_figs[32] = {  
     '\0','3','\n','-',' ','\'','8','7','\r','$','4','\a',',','!',':','(',  
     '5','+',')','2','#','6','0','1','9','?','&',0,'.','/',';',0 };  
-    // МТК-2: русский регистр (коды ITA2-позиций → кириллица)  
-static const char baudot_rus[32] = {  
-    '\0','Е','\n','А',' ','С','И','У','\r','Д','Р','Й','Н','Ф','Ц','К',  
-    'Т','З','Л','В','Х','Ы','П','Я','О','Б','Г',0,'М','Ь','Ш',0 };
+    // МТК-2 русский регистр: UTF-8 строки (кириллица = 2 байта, char не вмещает)  
+static const char *baudot_rus[32] = {  
+    "",  "Е", "\n", "А", " ", "С", "И", "У",  
+    "\r","Д", "Р", "Й", "Н", "Ф", "Ц", "К",  
+    "Т", "З", "Л", "В", "Х", "Ы", "П", "Я",  
+    "О", "Б", "Г", "",  "М", "Ь", "Ш", "" };
 
 typedef struct {  
     uint8_t  figs;              // регистр LTRS/FIGS  
@@ -429,10 +431,13 @@ static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {
             else if (c == MTK2_LAT) rt.figs = 0;  
             else if (c == MTK2_RUS) rt.figs = 2;  
             else {  
-                char ch = (rt.figs == 2) ? baudot_rus[c]  
-                        : (rt.figs == 1) ? baudot_figs[c]  
-                                         : baudot_ltrs[c];  
-                if (ch) Serial.write(ch);  
+                if (rt.figs == 2) {  
+                    const char *s = baudot_rus[c];  
+                    if (s[0]) Serial.print(s);  
+                } else {  
+                    char ch = rt.figs ? baudot_figs[c] : baudot_ltrs[c];  
+                    if (ch) Serial.write(ch);  
+                }  
             }
         }  
         break;  

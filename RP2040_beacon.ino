@@ -504,10 +504,10 @@ void check_serial_commands() {
                   Serial.println(F("[RX] OFF"));    
               }  
           }  
- 
+
 
           else if (command.startsWith("rx ")) {  
-            // rx <mode> [freq]  — пример: rx rtty 3608000  
+            // rx <mode> [freq]  — пример: rx rtty 3601500  
             if (is_transmitting || tx_launching) {  
                 Serial.println(F("[Ошибка] Идёт передача — приём заблокирован"));  
             } else if (rx_active) {  
@@ -517,7 +517,7 @@ void check_serial_commands() {
                 int sp = rest.indexOf(' ');  
                 String mode_s = (sp < 0) ? rest : rest.substring(0, sp);  
                 uint32_t f = (sp < 0) ? 0 : strtoul(rest.substring(sp+1).c_str(), NULL, 10);  
-                if (f == 0) f = 3608000;  
+                if (f == 0) f = 3601500;  
                 mode_s.toLowerCase();  
   
                 // Маппинг режима — внутри rx_decoders.cpp, единый источник enum.  

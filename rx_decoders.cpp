@@ -156,11 +156,13 @@ typedef struct {
     int   figs;               // регистр LTRS/FIGS  
     char  lastchar;  
   
-    // AFC (rtty.cxx:836-850): история baseband-комплексов для смежных битов  
-    float h_m_re[2], h_m_im[2], h_s_re[2], h_s_im[2];   // [0]=старее  
-    float freqerr;  
-    int   sym_since_char;                             // отсчёты от последнего char  
-} rtty_t;  
+// AFC (rtty.cxx:836-850): история baseband-комплексов для смежных битов    
+    float h_m_re[2], h_m_im[2], h_s_re[2], h_s_im[2];   // [0]=старее    
+    float freqerr;    
+    int   sym_since_char;                             // отсчёты от последнего char    
+  
+    float dc_i, dc_q;           // EMA оценка DC-смещения I/Q (вычитаем до миксеров)  
+} rtty_t;
   
 static rtty_t rrx;  
 
@@ -239,12 +241,20 @@ static bool rtty_rx(bool bit)
     return flag;  
 }
 
-static void rtty_rx_sample(float xr, float xq)  
+static void rtty_rx_sample(float xr, float xq)    
 {  
-    // boxcar-обновления: выталкиваем старое, кладём новое  
-    float m_r, m_i, s_r, s_i;  
-    rtty_mixer(rrx.mark_phase,  rrx.f_mark,  xr, xq, m_r, m_i);  
-    rtty_mixer(rrx.space_phase, rrx.f_space, xr, xq, s_r, s_i);  
+    // Оценка и вычитание DC: LO-feedthrough даёт выброс в 0 Гц,  
+    // лезет в space-канал (тон ~+415 Гц) через боковые лепестки boxcar.  
+    // w=512: полоса трекера ~15 Гц при 15.6 ksps — сигнал не съедаем.  
+    rrx.dc_i += (xr - rrx.dc_i) / 512.0f;  
+    rrx.dc_q += (xq - rrx.dc_q) / 512.0f;  
+    xr -= rrx.dc_i;  
+    xq -= rrx.dc_q;  
+  
+    // boxcar-обновления: выталкиваем старое, кладём новое    
+    float m_r, m_i, s_r, s_i;    
+    rtty_mixer(rrx.mark_phase,  rrx.f_mark,  xr, xq, m_r, m_i);    
+    rtty_mixer(rrx.space_phase, rrx.f_space, xr, xq, s_r, s_i);
   
     int L = rrx.symbollen, idx = rrx.buf_idx;  
     rrx.sum_mi += m_r - rrx.buf_mi[idx]; rrx.buf_mi[idx] = m_r;  
@@ -643,17 +653,22 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",    
                       gtz_ntones, (unsigned long)sym_samples);    
         break;  
-    case RX_MODE_RTTY:  
-        memset(&rrx, 0, sizeof(rrx));  
-        rrx.fs        = fs_out;  
-        rrx.symbollen_f = fs_out / 45.45f;  
-        rrx.symbollen   = (int)(rrx.symbollen_f + 0.5f);   // 344  
-        rrx.nbits     = 5;  
-        rrx.stoplen   = (int)(1.5f * rrx.symbollen_f + 0.5f);  
-        rrx.f_mark    = -85.0f;    // тона измерены [SCAN]: -85 и +85  
-        rrx.f_space   = +85.0f;    // при зеркальном тексте поменять местами  
-        rrx.figs      = 0;  
-        rrx.lastchar  = 0;  
+    case RX_MODE_RTTY:    
+        memset(&rrx, 0, sizeof(rrx));    
+        rrx.fs          = fs_out;    
+        rrx.symbollen_f = fs_out / 45.45f;    
+        rrx.symbollen   = (int)(rrx.symbollen_f + 0.5f);   // 344    
+        rrx.nbits       = 5;    
+        rrx.stoplen     = (int)(1.5f * rrx.symbollen_f + 0.5f);    
+        // RX 3601500, TX 3600000: сигнал ниже LO -> тоны в минус-области:    
+        // mark = -1500-85 = -1585 Гц, space = -1500+85 = -1415 Гц.    
+        // При зеркальном тексте поменять местами.    
+        rrx.f_mark      = -1585.0f;    
+        rrx.f_space     = -1415.0f;    
+        rrx.figs        = 0;    
+        rrx.lastchar    = 0;    
+        rrx.dc_i        = 0.0f;    
+        rrx.dc_q        = 0.0f;    
         break;
 
         break;

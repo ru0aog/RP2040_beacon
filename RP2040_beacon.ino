@@ -1027,13 +1027,10 @@ void loop() {
   
   // Отслеживаем клик (переход из HIGH в LOW). 
   // Запуск возможен только из режима ожидания (USR_IDLE) и если станция абсолютно свободна (!is_transmitting)
-  if (current_button_state == LOW && old_button_state == HIGH && !is_transmitting && usr_chain_state == USR_IDLE && millis() > 1000) {
-    Serial.println(F("[Кнопка]  Нажата кнопка USR! Запуск цепочки с блокировкой планировщика..."));
-    LCD_init(true);
-    LCD_print("USR CHAIN ACTIVE", 0, 0);
-    is_transmitting = true;         // Включаем глобальную блокировку планировщика
-    usr_chain_state = USR_START_CW; // Переводим автомат на первый шаг
-  }
+    if (current_button_state == LOW && old_button_state == HIGH && usr_chain_state == USR_IDLE) {  
+        // тестовый запуск: только RTTY (цепочку CW/IFKP вернём после отладки приёма)  
+        usr_chain_state = USR_START_RTTY;  
+    }  
   old_button_state = current_button_state;
 
   // Отработка шагов автомата
@@ -1062,6 +1059,7 @@ void loop() {
         Serial.println(F("[Автомат] Шаг 2: Время вышло. Запуск передачи RTTY."));
         force_rtty_transmission = true; 
         usr_chain_state = USR_WAIT_FOR_IFKP;
+        usr_chain_state = USR_CLOSE_CHAIN;   // после RTTY сразу освобождаем шину
       } else {
         is_transmitting = true;   // Защитное удержание флага занятости во время тиканья таймера
       }

@@ -470,62 +470,65 @@ static void cw_decode_elements(void) {
 // on=false -> завершился тон (фронт отпускания)  
 // idx — sample_idx текущего блока, fs_x1000 = fs_out*1000  
 static void cw_on_edge(bool on, uint32_t idx, uint32_t fs_x1000) {  
-    // Если on == true, значит только что НАЧАЛСЯ тон (завершилась ПАУЗА)
-    // Если on == false, значит тон ЗАВЕРШИЛСЯ (завершился ИМПУЛЬС)
+    // on == true  -> тон НАЧАЛСЯ (завершилась ПАУЗА)  
+    // on == false -> тон ЗАВЕРШИЛСЯ (завершился ИМПУЛЬС)  
     uint32_t dur_smp = on ? (idx - cw.off_start) : (idx - cw.on_start);  
     float dur_ms = (float)dur_smp * 1.0e6f / (float)fs_x1000;  
   
+    if (dbg_rx)  
+        Serial.printf("[EDGE] %s dur=%.1fms dot=%.1f\n",  
+                      on ? "on " : "off", (double)dur_ms, (double)cw_dot_avg);  
+  
     if (on) {  
-        // ---------------- ЗАВЕРШИЛАСЬ ПАУЗА (Ключ нажат) ----------------
-        if (dur_ms < 20.0f) return; // Игнорируем микрощелчки эфира
-        
-        // Анализ паузы для разделения знаков и слов
-        if (dur_ms > cw_dot_avg * 4.5f) { 
-            cw_decode_elements(); 
-            Serial.write(' '); 
-        } else if (dur_ms > cw_dot_avg * 2.0f) { 
-            cw_decode_elements(); 
-        } 
-        
-        // Плавная адаптация межэлементного зазора
-        if (dur_ms < cw_dot_avg * 2.0f && dur_ms > 20.0f) {
-            cw_gap_avg += (dur_ms - cw_gap_avg) * 0.1f;
-        }
+        // ---------------- ЗАВЕРШИЛАСЬ ПАУЗА ----------------  
+        if (dur_ms < 20.0f) return;                          // микрощелчок  
+  
+        if      (dur_ms > cw_dot_avg * 4.5f) { cw_decode_elements(); Serial.write(' '); }  
+        else if (dur_ms > cw_dot_avg * 2.0f) { cw_decode_elements(); }  
+  
+        // Буфер насытился без паузы-разделителя (длинная помеха) —  
+        // сбрасываем мусор, иначе знак «зависнет» до следующего гэпа  
+        if (cw.elem_n >= sizeof(cw.elem_buf) - 1) {  
+            if (dbg_rx) Serial.println(F("[CW] elem_buf satur — сброс"));  
+            cw.elem_n = 0;  
+        }  
+  
+        // Плавная адаптация межэлементного зазора  
+        if (dur_ms < cw_dot_avg * 2.0f)  
+            cw_gap_avg += (dur_ms - cw_gap_avg) * 0.1f;  
+  
     } else {  
-        // ---------------- ЗАВЕРШИЛСЯ ИМПУЛЬС (Ключ отпущен) ----------------
-        if (dur_ms < 20.0f) return; // Защита от статических разрядов/глюков AGC
-        
-        // Классический порог fldigi/UHSDR: строгая середина между точкой и тире
+        // ---------------- ЗАВЕРШИЛСЯ ИМПУЛЬС ----------------  
+        if (dur_ms < 20.0f) return;                          // статический разряд  
+  
+        // Залипание > 2 с (помеха, перегрузка AGC) — не элемент Морзе,  
+        // не портим dash_avg и не пишем в буфер  
+        if (dur_ms > 2000.0f) { cw.elem_n = 0; return; }  
+  
         float pulse_avg = (cw_dot_avg + cw_dash_avg) * 0.5f;  
         char elem;  
-        
+  
         if (dur_ms < pulse_avg) {  
             elem = '.';  
-            // Защита: адаптируем точку, только если её длительность похожа на правду
-            if (dur_ms > 25.0f && dur_ms < cw_dot_avg * 1.8f) {
-                cw_dot_avg += (dur_ms - cw_dot_avg) * 0.15f; // чуть медленнее, для стабильности
-            }
+            if (dur_ms > 25.0f && dur_ms < cw_dot_avg * 1.8f)  
+                cw_dot_avg += (dur_ms - cw_dot_avg) * 0.15f;  
         } else {  
             elem = '-';  
-            // Адаптируем тире, только если оно укладывается в рамки разумного
-            if (dur_ms > cw_dot_avg * 2.0f && dur_ms < cw_dash_avg * 1.8f) {
-                cw_dash_avg += (dur_ms - cw_dash_avg) * 0.05f; // консервативный вес
-            }
+            if (dur_ms > cw_dot_avg * 2.0f && dur_ms < cw_dash_avg * 1.8f)  
+                cw_dash_avg += (dur_ms - cw_dash_avg) * 0.05f;  
         }  
-        
-        // Жесткое удержание соотношения 1:3 при сильных девиациях оператора
-        if (cw_dash_avg < cw_dot_avg * 2.5f) cw_dash_avg = cw_dot_avg * 3.0f;
-        if (cw_dash_avg > cw_dot_avg * 4.0f) cw_dash_avg = cw_dot_avg * 3.0f;
   
-        if (cw.elem_n < sizeof(cw.elem_buf) - 1) {
+        // Удержание соотношения тире:точка ~3:1  
+        if (cw_dash_avg < cw_dot_avg * 2.5f) cw_dash_avg = cw_dot_avg * 3.0f;  
+        if (cw_dash_avg > cw_dot_avg * 4.0f) cw_dash_avg = cw_dot_avg * 3.0f;  
+  
+        if (cw.elem_n < sizeof(cw.elem_buf) - 1)  
             cw.elem_buf[cw.elem_n++] = elem;  
-        }
-        
-        if (dbg_rx) {
+  
+        if (dbg_rx)  
             Serial.printf("[ELEM] '%c' dur=%.1fms thr=%.1f dot=%.1f dash=%.1f\n",  
                           elem, (double)dur_ms, (double)pulse_avg,  
                           (double)cw_dot_avg, (double)cw_dash_avg);  
-        }
     }  
 }
 

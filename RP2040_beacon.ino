@@ -867,7 +867,7 @@ void check_serial_commands() {
 
 void setup() {
   adc_init();  
-  
+
   // --- USB: общие дескрипторы устройства ДО регистрации интерфейсов ---  
   TinyUSBDevice.setManufacturerDescriptor("RU0AOG");  
   TinyUSBDevice.setProductDescriptor("RP2040 Beacon");  

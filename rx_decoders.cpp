@@ -38,7 +38,8 @@ extern void     rx_dsp_set_nco_hz(float f_hz);
 extern float    rx_dsp_fs_out(void);    
   
 extern uint32_t rx_capture_dropped(void);  
-  
+static void rtty_emit(uint8_t c);
+
 typedef enum {    
     RX_MODE_NONE=0, RX_MODE_CW, RX_MODE_RTTY,    
     RX_MODE_OLIVIA, RX_MODE_CONTESTIA,    
@@ -114,7 +115,194 @@ typedef struct {
 } cw_state_t;    
     
 static cw_state_t cw;    
+
+
+
+// ================= RTTY: порт rtty::rx_process/rx из fldigi =================  
+// cmplx z заменяем на float-пару; fftfilt -> boxcar MA длиной symbollen  
   
+#define RTTY_MAX_SYMLEN 512           // хватит под symbollen=344  
+  
+typedef struct {  
+    float fs;                 // входная частота дискретизации (fs_out)  
+    float symbollen_f;        // fs/baud (343.8)  
+    int   symbollen;          // округлённое, 344  
+    int   nbits;              // 5  
+    int   stoplen;            // 1.5 бита, отсчётов — для печати/контроля  
+  
+    // миксеры (n_мод rtty::mixer): фазы и комплексные шаги  
+    float mark_phase, space_phase;  
+    float f_mark, f_space;    // текущие центры тонов (AFC их сдвигает)  
+  
+    // boxcar-фильтры (замена fftfilt)  
+    float buf_mi[RTTY_MAX_SYMLEN], buf_mq[RTTY_MAX_SYMLEN];  
+    float buf_si[RTTY_MAX_SYMLEN], buf_sq[RTTY_MAX_SYMLEN];  
+    int   buf_idx;  
+    float sum_mi, sum_mq, sum_si, sum_sq;  
+  
+    // огибающие и шум (rtty.cxx:679-693)  
+    float mark_mag, space_mag;  
+    float mark_env, space_env;  
+    float mark_noise, space_noise;  
+    float noise_floor;  
+  
+    // сдвиговый регистр решений + автомат rx()  
+    bool  bit_buf[RTTY_MAX_SYMLEN];  
+    int   rxstate;            // 0=IDLE 1=START 2=DATA 3=STOP  
+    int   counter;  
+    int   bitcntr;  
+    int   rxdata;  
+    int   figs;               // регистр LTRS/FIGS  
+    char  lastchar;  
+  
+    // AFC (rtty.cxx:836-850): история baseband-комплексов для смежных битов  
+    float h_m_re[2], h_m_im[2], h_s_re[2], h_s_im[2];   // [0]=старее  
+    float freqerr;  
+    int   sym_since_char;                             // отсчёты от последнего char  
+} rtty_t;  
+  
+static rtty_t rrx;  
+
+// rtty.cxx:381-389  mixer  
+static inline void rtty_mixer(float &phase, float f, float xr, float xq,  
+                              float &or_, float &oi)  
+{  
+    float c = cosf(phase), s = sinf(phase);  
+    or_ = xr * c + xq * s;          // conj-вращение, как в оригинале  
+    oi  = xq * c - xr * s;  
+    phase -= 2.0f * (float)M_PI * f / rrx.fs;  
+    if (phase < -2.0f * (float)M_PI) phase += 2.0f * (float)M_PI;  
+    if (phase >  2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;  
+}  
+  
+static inline float rtty_decayavg(float a, float in, float w)  
+{ return a + (in - a) / w; }  
+  
+// rtty.cxx:453-465  старт-бит: mark в старом конце буфера + space в новом  
+static bool rtty_is_mark_space(int &correction)  
+{  
+    correction = 0;  
+    if (rrx.bit_buf[0] && !rrx.bit_buf[rrx.symbollen - 1]) {  
+        for (int i = 0; i < rrx.symbollen; i++)  
+            correction += rrx.bit_buf[i];  
+        if (abs(rrx.symbollen / 2 - correction) < 6)  
+            return true;  
+    }  
+    return false;  
+}  
+  
+static inline bool rtty_is_mark(void)  
+{ return rrx.bit_buf[rrx.symbollen / 2]; }  
+  
+// rtty.cxx:472-540  автомат состояний — копия  
+static bool rtty_rx(bool bit)  
+{  
+    bool flag = false;  
+    int correction;  
+  
+    for (int i = 1; i < rrx.symbollen; i++) rrx.bit_buf[i-1] = rrx.bit_buf[i];  
+    rrx.bit_buf[rrx.symbollen - 1] = bit;  
+  
+    switch (rrx.rxstate) {  
+    case 0: // IDLE  
+        if (rtty_is_mark_space(correction)) {  
+            rrx.rxstate = 1; rrx.counter = correction;  
+        }  
+        break;  
+    case 1: // START  
+        if (--rrx.counter == 0) {  
+            if (!rtty_is_mark()) {  
+                rrx.rxstate = 2; rrx.counter = rrx.symbollen;  
+                rrx.bitcntr = 0; rrx.rxdata = 0;  
+            } else rrx.rxstate = 0;  
+        }  
+        break;  
+    case 2: // DATA  
+        if (--rrx.counter == 0) {  
+            rrx.rxdata |= (rtty_is_mark() ? 1 : 0) << rrx.bitcntr++;  
+            rrx.counter = rrx.symbollen;  
+        }  
+        if (rrx.bitcntr == rrx.nbits) rrx.rxstate = 3;  
+        break;  
+    case 3: // STOP  
+        if (--rrx.counter == 0) {  
+            if (rtty_is_mark()) {  
+                uint8_t c = (uint8_t)(rrx.rxdata & 0x1F);  
+                rtty_emit(c);  
+                flag = true;  
+            }  
+            rrx.rxstate = 0;  
+        }  
+        break;  
+    }  
+    return flag;  
+}
+
+static void rtty_rx_sample(float xr, float xq)  
+{  
+    // boxcar-обновления: выталкиваем старое, кладём новое  
+    float m_r, m_i, s_r, s_i;  
+    rtty_mixer(rrx.mark_phase,  rrx.f_mark,  xr, xq, m_r, m_i);  
+    rtty_mixer(rrx.space_phase, rrx.f_space, xr, xq, s_r, s_i);  
+  
+    int L = rrx.symbollen, idx = rrx.buf_idx;  
+    rrx.sum_mi += m_r - rrx.buf_mi[idx]; rrx.buf_mi[idx] = m_r;  
+    rrx.sum_mq += m_i - rrx.buf_mq[idx]; rrx.buf_mq[idx] = m_i;  
+    rrx.sum_si += s_r - rrx.buf_si[idx]; rrx.buf_si[idx] = s_r;    
+    rrx.sum_sq += s_i - rrx.buf_sq[idx]; rrx.buf_sq[idx] = s_i;
+    if (++rrx.buf_idx >= L) rrx.buf_idx = 0;  
+  
+    rrx.mark_mag  = sqrtf(rrx.sum_mi*rrx.sum_mi + rrx.sum_mq*rrx.sum_mq) / L;  
+    rrx.space_mag = sqrtf(rrx.sum_si*rrx.sum_si + rrx.sum_sq*rrx.sum_sq) / L;  
+  
+    // rtty.cxx:679-693 — асимметричные decayavg  
+    float T = rrx.symbollen_f;  
+    rrx.mark_env   = rtty_decayavg(rrx.mark_env,  rrx.mark_mag,  
+                     rrx.mark_mag  > rrx.mark_env  ? T/4  : T*16);  
+    rrx.mark_noise = rtty_decayavg(rrx.mark_noise, rrx.mark_mag,  
+                     rrx.mark_mag  < rrx.mark_noise ? T/4  : T*48);  
+    rrx.space_env  = rtty_decayavg(rrx.space_env, rrx.space_mag,  
+                     rrx.space_mag > rrx.space_env ? T/4  : T*16);  
+    rrx.space_noise= rtty_decayavg(rrx.space_noise,rrx.space_mag,  
+                     rrx.space_mag < rrx.space_noise? T/4  : T*48);  
+    rrx.noise_floor = fminf(rrx.space_noise, rrx.mark_noise);  
+  
+    // clipped ATC + optimal v3 — rtty.cxx:696-725  
+    float mclipped = rrx.mark_mag  > rrx.mark_env  ? rrx.mark_env  : rrx.mark_mag;  
+    float sclipped = rrx.space_mag > rrx.space_env ? rrx.space_env : rrx.space_mag;  
+    if (mclipped < rrx.noise_floor) mclipped = rrx.noise_floor;  
+    if (sclipped < rrx.noise_floor) sclipped = rrx.noise_floor;  
+  
+    float mn = rrx.mark_env  - rrx.noise_floor;  
+    float sn = rrx.space_env - rrx.noise_floor;  
+    float v3 = (mclipped - rrx.noise_floor) * mn  
+             - (sclipped - rrx.noise_floor) * sn  
+             - 0.25f * (mn*mn - sn*sn);  
+  
+    bool bit = (v3 > 0);  
+
+    rrx.sym_since_char++;                        // считаем отсчёты между символами  
+    if (rtty_rx(bit)) {    
+        // поворот суммы mark-канала за интервал между двумя символами    
+        float dphi = atan2f(rrx.h_m_re[1]*rrx.h_m_im[0] - rrx.h_m_im[1]*rrx.h_m_re[0],    
+                            rrx.h_m_re[1]*rrx.h_m_re[0] + rrx.h_m_im[1]*rrx.h_m_im[0]);    
+        float ferr = 0;    
+        if (rrx.sym_since_char > 0)    
+            ferr = dphi * rrx.fs / (2.0f * (float)M_PI * (float)rrx.sym_since_char);    
+        if (fabsf(ferr) > 22.7f) ferr = 0;       // fldigi: clamp shift/8    
+        rrx.freqerr = rtty_decayavg(rrx.freqerr, ferr, 8);    
+        rrx.f_mark  -= rrx.freqerr;    
+        rrx.f_space -= rrx.freqerr;    
+        rrx.sym_since_char = 0;    
+        // сдвиг истории: [0] = сумма прошлого символа  
+        rrx.h_m_re[0] = rrx.h_m_re[1]; rrx.h_m_im[0] = rrx.h_m_im[1];  
+        rrx.h_s_re[0] = rrx.h_s_re[1]; rrx.h_s_im[0] = rrx.h_s_im[1];  
+        // [1] = сумма текущего символа (сумматоры живут до следующего бита)  
+        rrx.h_m_re[1] = rrx.sum_mi;  rrx.h_m_im[1] = rrx.sum_mq;  
+        rrx.h_s_re[1] = rrx.sum_si;  rrx.h_s_im[1] = rrx.sum_sq;
+    }  
+}
+
 // ============================================================================    
 // 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)    
 // ============================================================================    
@@ -260,99 +448,7 @@ static const char *baudot_rus[32] = {
 #define MTK2_LAT  0x1F    
 #define MTK2_FIG  0x1B  
   
-// Длина скользящего среднего = отсчётов на бит (344 при 45.45 бод, 15.6 кс/с).  
-// Запас 512 покрывает бодрейты до ~30 бод при fs_out=15.6к.  
-#define RTTY_MA_LEN 512  
-  
-typedef struct {  
-    // --- миксеры (NCO на тон) ---  
-    float    ph_m_re, ph_m_im;    // фазор миксера mark  
-    float    ph_s_re, ph_s_im;    // фазор миксера space  
-    float    stp_m_re, stp_m_im;  // шаг вращения mark  = e^{j 2π f_m/fs}  
-    float    stp_s_re, stp_s_im;  // шаг вращения space  
-    float    f_m_hz, f_s_hz;      // текущие частоты миксеров (AFC их двигает)  
-    float    f_m_nom, f_s_nom;    // номиналы (для ограничения AFC)  
-  
-    // --- boxcar согласованные фильтры (комплексные суммы) ---  
-    float    buf_mr[RTTY_MA_LEN], buf_mi[RTTY_MA_LEN];  
-    float    buf_sr[RTTY_MA_LEN], buf_si[RTTY_MA_LEN];  
-    float    sum_mr, sum_mi, sum_sr, sum_si;  
-    uint16_t ma_pos;              // позиция кольца  
-    uint16_t ma_len;              // = отсчётов на бит  
-    uint16_t ma_fill;             // сколько отсчётов реально набрано  
-  
-    // --- детекторы огибающей / ATC (fldigi) ---  
-    float    mark_env, space_env;  
-    float    noise_floor;  
-    float    v1, v2, v3;          // тройное сглаживание разности  
-  
-    // --- предыдущий выход согласованного фильтра (для AFC) ---  
-    float    prev_mac_m_re, prev_mac_m_im;  
-    float    prev_mac_s_re, prev_mac_s_im;  
-    float    freqerr;             // Гц, оценка расстройки (EMA)  
-  
-    // --- битовый таймер ---  
-    uint8_t  state;               // 0=idle(mark), 1=датабиты, 2=стоп  
-    uint8_t  bit_cnt;  
-    uint8_t  shreg;  
-    uint8_t  figs;                // 0=LTRS, 1=FIGS, 2=RUS  
-    uint16_t bit_timer;           // отсчётов до следующего решения  
-    uint16_t bit_period;          // отсчётов на бит  
-    bool     lastbit;             // предыдущее решение (фронт mark→space)  
-    uint8_t  space_cnt;           // деглитчинг старт-бита  
-    uint32_t renorm_cnt;          // счётчик для ренормировки фазоров  
-} rtty_rx_t;  
-  
-static rtty_rx_t rrx;  
-  
-// Инициализация миксера: частота f_hz в базовой полосе, фазор шага = e^{j w}  
-static inline void rtty_set_tone(float* sre, float* sim, float f_hz, float fs) {  
-    float w = 2.0f * PI * f_hz / fs;  
-    *sre = cosf(w);  
-    *sim = sinf(w);  
-}  
-  
-static void rtty_rx_init(float mark_hz, float space_hz, float baud, float fs) {    
-    // Безопасное явное обнуление скалярных полей структуры rtty_rx_t  
-    rrx.ma_pos    = 0;  
-    rrx.ma_fill   = 0;  
-    rrx.state     = 0;  
-    rrx.bit_cnt   = 0;  
-    rrx.shreg     = 0;  
-    rrx.space_cnt = 0;  
-    rrx.renorm_cnt = 0;  
-    rrx.figs      = 0;  // Стартовая раскладка: LAT (латиница)
-    rrx.bit_timer = 0;  
-    
-    rrx.sum_mr = rrx.sum_mi = rrx.sum_sr = rrx.sum_si = 0.0f;  
-    rrx.mark_env = rrx.space_env = rrx.v1 = rrx.v2 = rrx.v3 = 0.0f;  
-    rrx.prev_mac_m_re = rrx.prev_mac_m_im = rrx.prev_mac_s_re = rrx.prev_mac_s_im = 0.0f;  
-    rrx.freqerr   = 0.0f;  
-  
-    // Явное покомпонентное обнуление массивов скользящего Boxcar-фильтра
-    // Исключает невыровненные ассемблерные вставки memset больших структур в ARM-GCC
-    for (uint16_t i = 0; i < RTTY_MA_LEN; i++) {  
-        rrx.buf_mr[i] = 0.0f; rrx.buf_mi[i] = 0.0f;  
-        rrx.buf_sr[i] = 0.0f; rrx.buf_si[i] = 0.0f;  
-    }  
-  
-    // Запись номиналов частот и инициализация шагов вращения фазоров
-    rrx.f_m_hz  = rrx.f_m_nom = mark_hz;  
-    rrx.f_s_hz  = rrx.f_s_nom = space_hz;  
-    rtty_set_tone(&rrx.stp_m_re, &rrx.stp_m_im, mark_hz,  fs);  
-    rtty_set_tone(&rrx.stp_s_re, &rrx.stp_s_im, space_hz, fs);  
-    rrx.ph_m_re = rrx.ph_s_re = 1.0f;  
-  
-    rrx.bit_period = (uint16_t)(fs / baud + 0.5f);  
-    rrx.ma_len     = rrx.bit_period;  
-    if (rrx.ma_len > RTTY_MA_LEN) rrx.ma_len = RTTY_MA_LEN;  
-    rrx.lastbit    = true;           
-    rrx.noise_floor = 1.0f;  
-  
-    Serial.printf("[RTTY-RX] fldigi core: mark=%.0f space=%.0f baud=%.2f T=%u smp\n",  
-                  (double)mark_hz, (double)space_hz, (double)baud,  
-                  (unsigned)rrx.bit_period);  
-}
+
 
 
   
@@ -376,229 +472,7 @@ static void rtty_emit(uint8_t c) {
     }
 }  
 
-
-/**
- * Вычисление точной девиации частоты методом интерполяции Якобсена (Jacobsen IP).
- * Применяется для компенсации расстройки КВ-корреспондента на 100+ Гц.
- * Принимает текущие комплексные компоненты (реальная, мнимая) пика и его соседей.
- * Возвращает дробное смещение пика от центрального бина в диапазоне [-0.5 ... +0.5]
- */
-// резерв: Jacobsen-интерполятор, нужен FFT-банк
-static float rtty_interpolate_peak(float re_left,  float im_left,  
-                                   float re_peak,  float im_peak,  
-                                   float re_right, float im_right) {
-    // Вычисляем вещественные компоненты кросс-произведений комплексных спектров
-    // Математика: Real( (Y_{k-1} - Y_{k+1}) * conj(2*Y_k - Y_{k-1} - Y_{k+1}) )
-    float num_re = (re_left - re_right) * (2.0f * re_peak - re_left - re_right) +
-                   (im_left - im_right) * (2.0f * im_peak - im_left - im_right);
-
-    float den_re = (2.0f * re_peak - re_left - re_right) * (2.0f * re_peak - re_left - re_right) +
-                   (2.0f * im_peak - im_left - im_right) * (2.0f * im_peak - im_left - im_right);
-
-    // Защита от деления на ноль при отсутствии сигнала
-    if (den_re < 1.0e-5f) return 0.0f;
-
-    float delta = num_re / den_re;
-
-    // Жесткий защитный затвор: параболический сдвиг не может превышать половину бина
-    if (delta >  0.5f) delta =  0.5f;
-    if (delta < -0.5f) delta = -0.5f;
-
-    return delta;
-}
-
-
-
-// AFC: остаточное вращение согласованного фильтра за один бит.  
-// Если mac_winner повернулся на dphi за T бит → сигнал выше/ниже миксера на  
-// err = dphi*fs/(2π*T). Поправка двигает оба миксера (один NCO на частоте).  
-static void rtty_afc(void) {  
-    bool m_win = (rrx.mark_env >= rrx.space_env);  
-    float re  = m_win ? rrx.sum_mr : rrx.sum_sr;  
-    float im  = m_win ? rrx.sum_mi : rrx.sum_si;  
-    float pre = m_win ? rrx.prev_mac_m_re : rrx.prev_mac_s_re;  
-    float pim = m_win ? rrx.prev_mac_m_im : rrx.prev_mac_s_im;  
   
-    // Вычисляем квадраты модулей текущего и предыдущего векторов Boxcar-фильтра
-    float m2_curr = re*re + im*im;  
-    float m2_prev = pre*pre + pim*pim;
-  
-    // Защита от NaN-выбросов в паузах манипуляции
-    float thr2 = rrx.noise_floor * rrx.noise_floor * 4.0f;  // 2× над шумом  
-    if (m2_curr > thr2 && m2_prev > 0.01f) {
-        // Кросс-произведение для вычисления остаточного вращения фазы за бит
-        // ИСПРАВЛЕНО: Математически корректный знак комплексного дискриминатора fldigi.
-        // Восстанавливает отрицательную обратную связь: петля AFC начинает притягивать 
-        // частоты миксеров к истинному тону корреспондента, компенсируя расстройку до 250 Гц.
-        float d = re * pre + im * pim;  
-        float c = im * pre - re * pim;  
-
-        
-        // Быстрый замер фазового сдвига dphi = arg(z * conj(z_prev))
-        float dphi = atan2f(c, d);  
-        
-        // Переводим радианы в герцы ошибки частоты: err = dphi * fs / (2 * PI * T_bit)
-        float err_hz = dphi * fs_out / (2.0f * PI * (float)rrx.bit_period);  
-        
-        float total_err_hz = err_hz;   // интерполятору нужны FFT-бины, не boxcar-суммы
-
-        // Жесткое ограничение: не более четверти сдвига частоты за один шаг (один бит)
-        if (total_err_hz >  200.0f) total_err_hz =  200.0f;  
-        if (total_err_hz < -200.0f) total_err_hz = -200.0f;  
-        
-        // Фильтрация ошибки через EMA (коэффициент затухания fldigi = 0.25)
-        rrx.freqerr += (total_err_hz - rrx.freqerr) * 0.25f;  
-        
-        // Шаг подстройки петли (коэффициент жесткости = 0.2)
-        float corr = rrx.freqerr * 0.2f;  
-        float fm = rrx.f_m_hz + corr;  
-        float fs = rrx.f_s_hz + corr;  
-        
-        // КВ-барьер безопасности: удерживаем миксеры в коридоре ±250 Гц от номинальной частоты тона
-        fm = fminf(rrx.f_m_nom + 250.0f, fmaxf(rrx.f_m_nom - 250.0f, fm));  
-        fs = fminf(rrx.f_s_nom + 250.0f, fmaxf(rrx.f_s_nom - 250.0f, fs));  
-        
-        rrx.f_m_hz = fm; rrx.f_s_hz = fs;  
-        
-        // На лету перестраиваем шаги вращения комплексных гетеродинов NCO
-        rtty_set_tone(&rrx.stp_m_re, &rrx.stp_m_im, fm, fs_out);  
-        rtty_set_tone(&rrx.stp_s_re, &rrx.stp_s_im, fs, fs_out);  
-    }  
-    
-    // Сохраняем текущее комплексное состояние макроса для следующей итерации AFC
-    rrx.prev_mac_m_re = rrx.sum_mr; rrx.prev_mac_m_im = rrx.sum_mi;  
-    rrx.prev_mac_s_re = rrx.sum_sr; rrx.prev_mac_s_im = rrx.sum_si;  
-}  
-
-
-  
-// Обработка одного отсчёта базовой полосы — порт rtty::rx_process  
-static inline void rtty_rx_sample(int16_t xi, int16_t xq) {  
-    // Нормализуем вход (масштабируем в 256 раз), защищая 32-битный float  
-    // Boxcar-интегратор от знакового переполнения и улета в +Inf в блоке AFC
-    float xr = (float)xi / 256.0f, xq_ = (float)xq / 256.0f;  
-  
-    // --- миксеры: перенос тонов в DC ---  
-    float m_r = xr * rrx.ph_m_re + xq_ * rrx.ph_m_im;  
-    float m_i = xq_ * rrx.ph_m_re - xr * rrx.ph_m_im;  
-    float s_r = xr * rrx.ph_s_re + xq_ * rrx.ph_s_im;  
-    float s_i = xq_ * rrx.ph_s_re - xr * rrx.ph_s_im;  
-  
-    // вращение фазоров  
-    float t;  
-    t = rrx.ph_m_re * rrx.stp_m_re - rrx.ph_m_im * rrx.stp_m_im;  
-    rrx.ph_m_im = rrx.ph_m_re * rrx.stp_m_im + rrx.ph_m_im * rrx.stp_m_re;  
-    rrx.ph_m_re = t;  
-    t = rrx.ph_s_re * rrx.stp_s_re - rrx.ph_s_im * rrx.stp_s_im;  
-    rrx.ph_s_im = rrx.ph_s_re * rrx.stp_s_im + rrx.ph_s_im * rrx.stp_s_re;  
-    rrx.ph_s_re = t;  
-  
-    if (++rrx.renorm_cnt >= 2048) {  
-        rrx.renorm_cnt = 0;  
-        float n = 1.0f / sqrtf(rrx.ph_m_re*rrx.ph_m_re + rrx.ph_m_im*rrx.ph_m_im);  
-        rrx.ph_m_re *= n; rrx.ph_m_im *= n;  
-        n = 1.0f / sqrtf(rrx.ph_s_re*rrx.ph_s_re + rrx.ph_s_im*rrx.ph_s_im);  
-        rrx.ph_s_re *= n; rrx.ph_s_im *= n;  
-    }  
-  
-    // --- boxcar скользящее среднее ---  
-    uint16_t p = rrx.ma_pos;  
-    rrx.sum_mr += m_r - rrx.buf_mr[p]; rrx.buf_mr[p] = m_r;  
-    rrx.sum_mi += m_i - rrx.buf_mi[p]; rrx.buf_mi[p] = m_i;  
-    rrx.sum_sr += s_r - rrx.buf_sr[p]; rrx.buf_sr[p] = s_r;  
-    rrx.sum_si += s_i - rrx.buf_si[p]; rrx.buf_si[p] = s_i;  
-    if (++rrx.ma_pos >= rrx.ma_len) rrx.ma_pos = 0;  
-    if (rrx.ma_fill < rrx.ma_len) rrx.ma_fill++;  
-  
-    // --- огибающие (Асимметричный decayavg fldigi) ---  
-    float m_mag = sqrtf(rrx.sum_mr*rrx.sum_mr + rrx.sum_mi*rrx.sum_mi);  
-    float s_mag = sqrtf(rrx.sum_sr*rrx.sum_sr + rrx.sum_si*rrx.sum_si);  
-    
-    // Временные константы атаки и спада fldigi, привязанные к длительности бита:
-    // Атака (Fast Attack) = T_bit / 4 ≈ 85 отсчетов. Спад (Slow Decay) = T_bit * 16.
-    float t_attack = (float)rrx.bit_period / 4.0f;
-    float t_decay  = (float)rrx.bit_period * 16.0f;
-
-    rrx.mark_env  = decayavg(rrx.mark_env,  m_mag, (m_mag > rrx.mark_env)  ? t_attack : t_decay);  
-    rrx.space_env = decayavg(rrx.space_env, s_mag, (s_mag > rrx.space_env) ? t_attack : t_decay);  
-    
-    float lo = fminf(rrx.mark_env, rrx.space_env);  
-    rrx.noise_floor = decayavg(rrx.noise_floor, lo, (float)rrx.bit_period * 48.0f);  
-  
-    // --- ATC v3 (fldigi) ---  
-    float v = (rrx.mark_env - rrx.space_env) * 0.5f;  
-    rrx.v1 = decayavg(rrx.v1, v,      16.0f);  
-    rrx.v2 = decayavg(rrx.v2, rrx.v1, 32.0f);  
-    rrx.v3 = decayavg(rrx.v3, rrx.v2, 64.0f);  
-  
-    // --- решение о бите ---  
-    float sig_pk = fmaxf(rrx.mark_env, rrx.space_env);  
-    bool  curbit;  
-    if (rrx.ma_fill < rrx.ma_len || sig_pk < rrx.noise_floor * 1.5f)  
-        curbit = true;  
-    else  
-        curbit = (rrx.v3 > 0.0f);  
-  
-    // --- битовый таймер (старт-стопный автомат) ---  
-    switch (rrx.state) {  
-    case 0:                                       // idle = mark, ловим фронт в space  
-        if (!curbit) {  
-            if (++rrx.space_cnt >= 4) {           // ~0.25 мс деглитчинг  
-                rrx.state = 1;  
-                rrx.bit_cnt = 0;  
-                rrx.shreg = 0;  
-  
-                // Компенсация задержки тракта: boxcar даёт T/2, каскад v1/v2/v3  
-                // (EMA 16/32/64) добавляет ~112 отсчётов. Фронт обнаружен с  
-                // опозданием ~0.8T → центр бита 0 (1.5T от реального фронта)  
-                // наступает через ~0.7T от момента детекции.  
-                int32_t bt = (int32_t)rrx.bit_period  
-                           - 4                       // деглитчер  
-                           - 112;                    // лаг v1+v2+v3  
-                if (bt < 16) bt = 16;  
-                rrx.bit_timer = (uint16_t)bt;
-                
-                if (dbg_rx)  
-                    Serial.println(F("[RTTY] start"));  
-            }  
-        } else {  
-            rrx.space_cnt = 0;  
-        }  
-        break;  
-
-  
-    case 1:
-        if (--rrx.bit_timer == 0) {  
-            if (curbit) rrx.shreg |= (1u << rrx.bit_cnt);   
-            rtty_afc();                                   
-            if (++rrx.bit_cnt >= 5) {  
-                rrx.state = 2;  
-                // Строб стопа чуть раньше его центра: огибающие запаздывают  
-                // на ~T/2+112 отсч., половина стоп-бита компенсирует это.  
-                rrx.bit_timer = rrx.bit_period / 2;  
-            } else {  
-                rrx.bit_timer = rrx.bit_period;  
-            }  
-        }  
-        break;  
-  
-    case 2:  
-        if (--rrx.bit_timer == 0) {  
-            rrx.state = 0;  
-            rrx.space_cnt = 0;  
-            // fldigi-подход: символ эмитим всегда, стоп-бит нужен лишь как  
-            // точка ресинка. Space здесь — только пометка в логе.  
-            if (!curbit && dbg_rx) Serial.println(F("[RTTY] framing err"));  
-            rtty_emit(rrx.shreg);  
-            // Если стоп space — вероятно, мы уже в старт-бите следующего  
-            // символа: перезапускаем поиск фронта сразу, без паузы.  
-            if (!curbit) { rrx.state = 1; rrx.bit_cnt = 0; rrx.shreg = 0;  
-                           rrx.bit_timer = rrx.bit_period; }
-        }  
-        break;
-    }  
-    rrx.lastbit = curbit;  
-}  
 
   
 // ----------------------------------------------------------------------------    
@@ -769,13 +643,17 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
                       gtz_ntones, (unsigned long)sym_samples);    
         break;  
     case RX_MODE_RTTY:  
-        // ДИАГНОСТИКА: 7 бинов через 85 Гц вокруг нуля — найти реальные тона  
-        // gtz_bank_init(-256.0f, 85.33f, 7, fs_out);  
-        // rtty_scan = true;  
-
-        // Скан показал: реальные тоны на -85 и +85 Гц (bin2/bin4), сдвига LO нет.  
-        // TX mark = нижний тон -> mark-миксер на -85, space-миксер на +85.  
-        rtty_rx_init(-85.0f, 85.0f, 45.45f, fs_out);
+        memset(&rrx, 0, sizeof(rrx));  
+        rrx.fs        = fs_out;  
+        rrx.symbollen_f = fs_out / 45.45f;  
+        rrx.symbollen   = (int)(rrx.symbollen_f + 0.5f);   // 344  
+        rrx.nbits     = 5;  
+        rrx.stoplen   = (int)(1.5f * rrx.symbollen_f + 0.5f);  
+        rrx.f_mark    = -85.0f;    // тона измерены [SCAN]: -85 и +85  
+        rrx.f_space   = +85.0f;    // при зеркальном тексте поменять местами  
+        rrx.figs      = 0;  
+        rrx.lastchar  = 0;  
+        break;
 
         break;
     case RX_MODE_OLIVIA:    
@@ -905,7 +783,8 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
 // ------------- RTTY: поотсчётный тракт fldigi, окна символов не нужны -------  
 if (dec_mode == RX_MODE_RTTY) {  
-        for (uint8_t i = 0; i < n; i++) rtty_rx_sample(xi[i], xq[i]);  
+        for (uint8_t i = 0; i < n; i++)  
+            rtty_rx_sample((float)xi[i], (float)xq[i]);  
         return;  
     }
     

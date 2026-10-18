@@ -767,7 +767,8 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         // Дискриминатор RTTY: накапливаем по той же порции отсчётов.  
         // Знак кросс-произведения I/Q-последовательных отсчётов = знак частоты:  
         // положительный → тон выше NCO (mark), отрицательный → ниже (space).  
-        if (dec_mode == RX_MODE_RTTY) {  
+        if (dec_mode == RX_MODE_RTTY) {
+            rtty_disc = 0;                                  // НОВОЕ: свежее значение каждое подокно
             int16_t pi = (pos > 0) ? xi[pos - 1] : prev_i;   // предыдущий отсчёт  
             int16_t pq = (pos > 0) ? xq[pos - 1] : prev_q;   // в т.ч. через границу порций  
             for (uint8_t k = 0; k < chunk; k++) {  
@@ -780,8 +781,6 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
             }  
             prev_i = xi[pos + chunk - 1];  
             prev_q = xq[pos + chunk - 1];
-            // rtty_disc обнуляется в конце итерации подокна (ниже, после switch)
-            // rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;   // EMA за ~4 подокна
         }  
   
         sym_acc    += chunk;  
@@ -798,8 +797,12 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         switch (dec_mode) {
 
         case RX_MODE_RTTY:  
-            rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;  // один шаг на подокно  
-            rtty_bit(rtty_disc_ema < 0, sample_idx);  
+            rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;  
+            // Скелч: нет сигнала — автомату говорим "mark" (линия в покое),  
+            // чтобы шум не генерировал ложные старт-фронты  
+            int32_t sig = (int32_t)gtz_power(0) + (int32_t)gtz_power(1);  
+            bool mark = (sig < 300) ? true : (rtty_disc_ema < 0);  
+            rtty_bit(mark, sample_idx);
             if (dbg_rx) {  
                 static uint8_t rd = 0;  
                 if (++rd >= 16) {  

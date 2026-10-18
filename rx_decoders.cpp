@@ -95,7 +95,8 @@ static rx_mode_t  dec_mode = RX_MODE_NONE;
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
 static uint32_t   sym_acc = 0;        // накоплено в окне  
 static uint32_t   sample_idx = 0;
-static int32_t rtty_disc = 0;     // накопитель дискриминатора текущего окна  
+static int32_t rtty_disc = 0;     // накопитель дискриминатора текущего окна
+static int32_t rtty_disc_ema = 0;      // сглаженный дискриминатор (~4 подокна)
 static int16_t prev_i = 0, prev_q = 0;   // последние I/Q прошлой порции (стыковка)
 static float      fs_out = 15625.0f;  
 static float      f_center_hz = 0;    // для AFC  
@@ -594,7 +595,7 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
     if (dbg_rx) {Serial.printf("[DEC] fs_out=%.1f\n", (double)fs_out);}       // <-- fs валидна 
     f_center_hz = center_hz;  
     sym_acc = 0; sample_idx = 0;  
-    
+    rtty_disc = 0; rtty_disc_ema = 0;
     memset(&rt, 0, sizeof(rt)); memset(&cw, 0, sizeof(cw));  
     memset(&olv, 0, sizeof(olv)); memset(&ifk, 0, sizeof(ifk));
     // Гибридный CW: сброс детектора огибающей и адаптивных оценок таймингов  
@@ -775,7 +776,9 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
                 pi = ci; pq = cq;  
             }  
             prev_i = xi[pos + chunk - 1];  
-            prev_q = xq[pos + chunk - 1];  
+            prev_q = xq[pos + chunk - 1];
+            // rtty_disc обнуляется в конце итерации подокна (ниже, после switch)
+            // rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;   // EMA за ~4 подокна
         }  
   
         sym_acc    += chunk;  
@@ -789,19 +792,22 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         uint8_t tone = gtz_argmax(&pmax);
         afc_update(tone, pmax);  
   
-        switch (dec_mode) {  
+        switch (dec_mode) {
+
         case RX_MODE_RTTY:  
-            rtty_bit(RTTY_MARK(rtty_disc), sample_idx);  
+            rtty_disc_ema += (rtty_disc - rtty_disc_ema) >> 2;  // один шаг на подокно  
+            rtty_bit(rtty_disc_ema < 0, sample_idx);  
             if (dbg_rx) {  
                 static uint8_t rd = 0;  
-                if (++rd >= 16) {           // ~44 мс — раз в полбита  
+                if (++rd >= 16) {  
                     rd = 0;  
-                    Serial.printf("[RTTY] disc=%ld %s\n",  
-                                  (long)rtty_disc,  
-                                  RTTY_MARK(rtty_disc) ? "mark" : "space");  
+                    Serial.printf("[RTTY] raw=%ld ema=%ld %s\n",  
+                                  (long)rtty_disc, (long)rtty_disc_ema,  
+                                  (rtty_disc_ema < 0) ? "mark" : "space");  
                 }  
-            }
-            break;  
+            }  
+            break;
+
         case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
             olivia_on_tone(tone);  
             break;  
@@ -861,7 +867,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
         sym_acc   = 0;  
-        rtty_disc = 0;                           // новое окно — новый дискриминатор  
+        rtty_disc = 0;                           // новое окно — новый дискриминатор
     }  
 }
 

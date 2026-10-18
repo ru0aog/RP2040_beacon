@@ -167,7 +167,8 @@ void     rx_decoders_stop(void);
 uint32_t vfo_quadrature_lo_hz(void);  
 void     ZERO_LED_CYAN_ON(void);  
 void     ZERO_LED_OFF(void);  
-  
+void     usb_audio_set_enable(bool en);   // usb_audio.cpp: UAC-микрофон, тап xi на core1
+
 extern uint8_t rx_decoders_mode_by_name(const char* name);   // режим по имени, enum живёт в .cpp
 
 bool is_transmitting = false; // Флаг передачи 
@@ -487,22 +488,23 @@ void check_serial_commands() {
               }    
           }
 
-          else if (command.equalsIgnoreCase("rx off")) {  
-              // ПЕРВОЙ — иначе startsWith("rx ") перехватит  
-              if (!rx_active) {  
-                  Serial.println(F("[RX] Приёмник не был запущен"));  
-              } else {  
-                  rx_decoders_stop();  
-                  rx_dsp_stop();          // сначала гасим потребителя буферов  
-                  rx_capture_stop();      // потом источник (DMA + ADC)  
-                  uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);  
-                  if (cw_hz == 0) cw_hz = 3600000;  
-                  vfo_quadrature_stop(cw_hz, 1.0);  // LO выключаем последним
-                  rx_active = false;  
-                  ZERO_LED_OFF();  
-                  Serial.println(F("[RX] OFF"));  
-              }
-          }
+          else if (command.equalsIgnoreCase("rx off")) {    
+              // ПЕРВОЙ — иначе startsWith("rx ") перехватит    
+              if (!rx_active) {    
+                  Serial.println(F("[RX] Приёмник не был запущен"));    
+              } else {    
+                  rx_decoders_stop();    
+                  rx_dsp_stop();          // сначала гасим потребителя буферов    
+                  rx_capture_stop();      // потом источник (DMA + ADC)    
+                  uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);    
+                  if (cw_hz == 0) cw_hz = 3600000;    
+                  vfo_quadrature_stop(cw_hz, 1.0);  // LO выключаем последним  
+                  rx_active = false;    
+                  ZERO_LED_OFF();    
+                  Serial.println(F("[RX] OFF"));    
+              }  
+          }  
+ 
 
           else if (command.startsWith("rx ")) {  
             // rx <mode> [freq]  — пример: rx rtty 3608000  

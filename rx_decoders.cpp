@@ -30,7 +30,8 @@
   
 #include <Arduino.h>    
 #include "vfo_hardware.h"    
-  
+
+
 // ---- API из rx_dsp.cpp ----    
 extern bool     rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t* n);    
 extern void     rx_dsp_release_output(void);    
@@ -170,9 +171,9 @@ static inline void rtty_mixer(float &phase, float f, float xr, float xq,
     float c = cosf(phase), s = sinf(phase);  
     or_ = xr * c + xq * s;          // conj-вращение, как в оригинале  
     oi  = xq * c - xr * s;  
-    phase -= 2.0f * (float)M_PI * f / rrx.fs;  
-    if (phase < -2.0f * (float)M_PI) phase += 2.0f * (float)M_PI;  
+    phase += 2.0f * (float)M_PI * f / rrx.fs;  
     if (phase >  2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;  
+    if (phase < -2.0f * (float)M_PI) phase += 2.0f * (float)M_PI;
 }  
   
 static inline float rtty_decayavg(float a, float in, float w)  
@@ -717,8 +718,8 @@ static inline void jtty_push(uint8_t dibit) {
 void rx_decoders_stop(void) { dec_mode = RX_MODE_NONE; }    
     
 // Вызывается из цикла core1 (rx_dsp_entry) после заполнения out_i/out_q    
-void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {    
-    static uint32_t calls = 0;    
+void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {  
+    static uint32_t calls = 0;
     if (++calls == 1 || calls % 1000 == 0)    
         if (dbg_rx) {Serial.printf("[DEC] process: calls=%lu mode=%u n=%u\n",    
                       (unsigned long)calls, (unsigned)dec_mode, (unsigned)n);}  

@@ -89,7 +89,7 @@ uint8_t rx_decoders_mode_by_name(const char* name) {
     return RX_MODE_NONE;   // 0 — «режим не найден», вызывающий код проверяет на NONE  
 }
 
-bool              dbg_rx = false;     // флаг печати лога отладки
+bool              dbg_rx = true;     // флаг печати лога отладки
 
 static rx_mode_t  dec_mode = RX_MODE_NONE;  
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out  
@@ -346,7 +346,11 @@ static const char baudot_ltrs[32] = {
 static const char baudot_figs[32] = {  
     '\0','3','\n','-',' ','\'','8','7','\r','$','4','\a',',','!',':','(',  
     '5','+',')','2','#','6','0','1','9','?','&',0,'.','/',';',0 };  
-  
+    // МТК-2: русский регистр (коды ITA2-позиций → кириллица)  
+static const char baudot_rus[32] = {  
+    '\0','Е','\n','А',' ','С','И','У','\r','Д','Р','Й','Н','Ф','Ц','К',  
+    'Т','З','Л','В','Х','Ы','П','Я','О','Б','Г',0,'М','Ь','Ш',0 };
+
 typedef struct {  
     uint8_t  figs;              // регистр LTRS/FIGS  
     uint8_t  state;             // 0=idle, 1=start, 2=биты, 3=стоп  
@@ -356,6 +360,7 @@ typedef struct {
     uint8_t  prev_mark;         // решение предыдущего символа (для поиска фронта)    
     uint32_t next_sample;       // момент следующего отсчёта бита (в отсчётах)
     uint8_t  space_cnt;         // длительность текущего space-подряд (деглитчинг)
+    uint32_t edge_idx;          // sample_idx первого space-подокна фронта 
 } rtty_dec_t;  
 static rtty_dec_t rt;  
 
@@ -365,8 +370,14 @@ static int32_t  rt_pwr_mark = 0;    // Σ power тона 1 (mark)
 static int32_t  rt_pwr_space = 0;   // Σ power тона 0 (space)  
 static uint8_t  rt_pwr_n = 0;       // сколько подокон накоплено
 
-#define RTTY_FIGS 0x1F  
-#define RTTY_LTRS 0x1B  
+#define MTK2_RUS  0x00  
+#define MTK2_LAT  0x1F  
+#define MTK2_FIG  0x1B
+
+// Знак дискриминатора для mark (тон ВЫШЕ NCO).    
+// rtty_disc = -Im(z*conj(z_prev)) => при +85 Гц disc < 0.    
+// Если приём «зеркальный» — поменять на (disc > 0).  
+#define RTTY_MARK(disc)   ((disc) < 0)
 
 static inline bool sample_idx_ge(uint32_t a, uint32_t b) {  
     return (int32_t)(a - b) >= 0;  
@@ -376,21 +387,25 @@ static inline bool sample_idx_ge(uint32_t a, uint32_t b) {
 // Старт-бит ловим по фронту mark→space, датабиты читаем в их середине.  
 static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {  
     switch (rt.state) {  
-    case 0:                                // ждём устойчивый space-фронт  
+    case 0: {                              // ждём устойчивый фронт mark→space  
         if (!mark) {  
-            if (++rt.space_cnt >= 2 && rt.prev_mark) {  
-                // space держится ≥2 подокон — фронт был на первом из них  
-                rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;
-                // Фронт mark→space внутри первого space-подокна; опорная  
-                // точка = его середина = idx - 1.5·subwin = idx - T·3/16.  
-                // Центр бита 0 = +1.5·T от фронта → idx + T - T·3/16.  
-                // rt.next_sample = idx + rt.bit_period - rt.bit_period/4 - rt.bit_period/16;  // компенсация задержки деглитчинга 
-                rt.next_sample = idx + rt.bit_period - (3 * sym_samples) / 2; // устойчивее к смене размера подокна
+            if (rt.prev_mark) {            // первое space-подокно = кандидат на фронт  
+                rt.edge_idx  = idx;  
+                rt.space_cnt = 1;  
+            } else if (++rt.space_cnt >= 2) {  
+                // Фронт подтверждён: 2 подокна space подряд.    
+                // Центр старт-бита = edge + 0.5·T; центр бита0 = edge + 1.5·T.  
+                rt.state = 1; rt.bit_cnt = 0; rt.shreg = 0;  
+                rt.next_sample = rt.edge_idx + rt.bit_period + rt.bit_period / 2;  
+                if (dbg_rx)  
+                    Serial.printf("[RTTY] start-bit edge@%lu\n",  
+                                  (unsigned long)rt.edge_idx);  
             }  
         } else {  
-            rt.space_cnt = 0;  
+            rt.space_cnt = 0;              // mark — сброс деглитчера    
         }  
         break;  
+    } 
   
     case 1:                                  // читаем 5 датабитов в серединах  
         while (idx >= rt.next_sample) {  
@@ -406,13 +421,19 @@ static void rtty_bit(bool mark, uint32_t idx /*в отсчётах Fs_out*/) {
             // Стоп обязан быть mark. Space = framing error:  
             // ложный фронт, символ выбрасываем, ресинк сразу.  
             if (!mark) break;  
-            uint8_t c = rt.shreg;  
-            if (c == RTTY_FIGS) rt.figs = 1;  
-            else if (c == RTTY_LTRS) rt.figs = 0;  
+            uint8_t c = rt.shreg;
+            if (dbg_rx)  
+                Serial.printf("[RTTY] shreg=0x%02x figs=%u\n",  
+                              (unsigned)c, (unsigned)rt.figs);
+            if      (c == MTK2_FIG) rt.figs = 1;  
+            else if (c == MTK2_LAT) rt.figs = 0;  
+            else if (c == MTK2_RUS) rt.figs = 2;  
             else {  
-                char ch = rt.figs ? baudot_figs[c] : baudot_ltrs[c];  
+                char ch = (rt.figs == 2) ? baudot_rus[c]  
+                        : (rt.figs == 1) ? baudot_figs[c]  
+                                         : baudot_ltrs[c];  
                 if (ch) Serial.write(ch);  
-            }  
+            }
         }  
         break;  
     }  
@@ -597,7 +618,9 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
                       gtz_ntones, (unsigned long)sym_samples);  
         break;
     case RX_MODE_RTTY:  
-        gtz_bank_init(-85.0f, 170.0f, 2, fs_out);                // mark/space = ±85 Гц  
+        // Тоны реально сидят ~+63 Гц выше базовой полосы (остаточный сдвиг LO,    
+        // тот же замер что у CW): space = -85+63 = -22, mark = +85+63 = +148.  
+        gtz_bank_init(-22.0f, 170.0f, 2, fs_out);                // space/mark
         rt.bit_period = (uint32_t)(fs_out / 45.45f);             // ~344 отсчёта на бит  
         sym_samples   = rt.bit_period / 8;                       // подокно ~2.75 мс  
         rt.prev_mark  = 1;                                       // idle-канал = mark  
@@ -763,7 +786,16 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
   
         switch (dec_mode) {  
         case RX_MODE_RTTY:  
-            rtty_bit(rtty_disc > 0, sample_idx);   // знак дискриминатора = mark  
+            rtty_bit(RTTY_MARK(rtty_disc), sample_idx);  
+            if (dbg_rx) {  
+                static uint8_t rd = 0;  
+                if (++rd >= 16) {           // ~44 мс — раз в полбита  
+                    rd = 0;  
+                    Serial.printf("[RTTY] disc=%ld %s\n",  
+                                  (long)rtty_disc,  
+                                  RTTY_MARK(rtty_disc) ? "mark" : "space");  
+                }  
+            }
             break;  
         case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  
             olivia_on_tone(tone);  

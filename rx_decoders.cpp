@@ -71,7 +71,8 @@ static uint32_t   sample_idx = 0;
 static float      fs_out = 15625.0f;    
 static float      f_center_hz = 0;    // для AFC    
 static bool       afc_on = false;  
-  
+static bool rtty_scan = false;
+
 // ---------- JTTY приёмник ----------    
 // Кадр: 59 символов = 13 sync (is13) + 46 данных (дибиты кода).    
 static uint8_t  jtty_sym[78];       // текущий кадр (тоны 0..3)    
@@ -753,13 +754,16 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         Serial.printf("[CW-RX] bank ready, gtz_ntones=%u sym=%lu\n",    
                       gtz_ntones, (unsigned long)sym_samples);    
         break;  
-    case RX_MODE_RTTY:    
-        // Ядро fldigi: миксеры на тоны с учётом остаточного сдвига LO (+63 Гц).    
-        // space = -85+63 = -22 Гц, mark = +85+63 = +148 Гц, 45.45 бод.    
-        // AFC скорректирует расстройку ±250 Гц сам.    
-        gtz_ntones = 0;                              // банк Гёрцеля не нужен    
-        rtty_rx_init(148.0f, -22.0f, 45.45f, fs_out);    
-        break;    
+    case RX_MODE_RTTY:  
+        // ДИАГНОСТИКА: 7 бинов через 85 Гц вокруг нуля — найти реальные тона  
+        // gtz_bank_init(-256.0f, 85.33f, 7, fs_out);  
+        // rtty_scan = true;  
+
+        // Скан показал: реальные тоны на -85 и +85 Гц (bin2/bin4), сдвига LO нет.  
+        // TX mark = нижний тон -> mark-миксер на -85, space-миксер на +85.  
+        rtty_rx_init(-85.0f, 85.0f, 45.45f, fs_out);
+
+        break;
     case RX_MODE_OLIVIA:    
     case RX_MODE_CONTESTIA:    
         gtz_bank_init(-109.375f, 31.25f, 8, fs_out);    
@@ -886,25 +890,10 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
     }  
   
 // ------------- RTTY: поотсчётный тракт fldigi, окна символов не нужны -------  
-    if (dec_mode == RX_MODE_RTTY) {  
-        for (uint8_t i = 0; i < n; i++)  
-            rtty_rx_sample(xi[i], xq[i]);  
-  
-        // Отладка: огибающие + AFC раз в ~0.5 с  
-        if (dbg_rx) {  
-            static uint32_t rd2 = 0;  
-            rd2 += n;  
-            if (rd2 >= 8000) {  
-                rd2 = 0;  
-                Serial.printf("[RTTY] m=%.1f s=%.1f nf=%.1f v3=%.3f err=%.1fHz\n",  
-                              (double)rrx.mark_env, (double)rrx.space_env,  
-                              (double)rrx.noise_floor, (double)rrx.v3,  
-                              (double)rrx.freqerr);  
-            }  
-        }  
-        sample_idx += n;  
+if (dec_mode == RX_MODE_RTTY) {  
+        for (uint8_t i = 0; i < n; i++) rtty_rx_sample(xi[i], xq[i]);  
         return;  
-    }  
+    }
     
     // ------------- Остальные моды: символьная синхронизация по блокам ----------    
     uint8_t pos = 0;    

@@ -360,19 +360,20 @@ static void rtty_rx_init(float mark_hz, float space_hz, float baud, float fs) {
 static void rtty_emit(uint8_t c) {  
     if (dbg_rx)  
         Serial.printf("[RTTY] shreg=0x%02x figs=%u err=%.1f\n",  
-                      (unsigned)c, (unsigned)rrx.figs, (double)rrx.freqerr);  
-    if      (c == MTK2_FIG) rrx.figs = 1;  
-    else if (c == MTK2_LAT) rrx.figs = 0;  
-    else if (c == MTK2_RUS) rrx.figs = 2;  
-    else {  
-        if (rrx.figs == 2) {  
-            const char *s = baudot_rus[c];  
-            if (s && s[0]) Serial.print(s);  
-        } else {  
-            char ch = rrx.figs ? baudot_figs[c] : baudot_ltrs[c];  
-            if (ch) Serial.write(ch);  
-        }  
-    }  
+                      (unsigned)c, (unsigned)rrx.figs, (double)rrx.freqerr);
+    if (c == MTK2_FIG)      { rrx.figs = 1; return; }  
+    if (c == MTK2_LAT)      { rrx.figs = 0; return; }  
+    // 0x00 = blank (ITA-2), НЕ переключаем регистр: иначе каждый blank/  
+    // сбитый символ уводит декодер в RUS и латиница печатается кириллицей.  
+    if (c == 0x00) return;  
+  
+    if (rrx.figs == 2) {  
+        const char *s = baudot_rus[c];  
+        if (s[0]) Serial.print(s);  
+    } else {  
+        char ch = rrx.figs ? baudot_figs[c] : baudot_ltrs[c];  
+        if (ch) Serial.write(ch);  
+    }
 }  
 
 
@@ -423,7 +424,8 @@ static void rtty_afc(void) {
     float m2_prev = pre*pre + pim*pim;
   
     // Защита от NaN-выбросов в паузах манипуляции
-    if (m2_curr > 0.01f && m2_prev > 0.01f) {  
+    float thr2 = rrx.noise_floor * rrx.noise_floor * 4.0f;  // 2× над шумом  
+    if (m2_curr > thr2 && m2_prev > 0.01f) {
         // Кросс-произведение для вычисления остаточного вращения фазы за бит
         // ИСПРАВЛЕНО: Математически корректный знак комплексного дискриминатора fldigi.
         // Восстанавливает отрицательную обратную связь: петля AFC начинает притягивать 
@@ -545,12 +547,16 @@ static inline void rtty_rx_sample(int16_t xi, int16_t xq) {
                 rrx.state = 1;  
                 rrx.bit_cnt = 0;  
                 rrx.shreg = 0;  
-                
-                // ИСПРАВЛЕНО: Центрирование стробирования с учетом физики Boxcar-фильтра.
-                // Групповая задержка скользящего среднего равна rrx.bit_period / 2.
-                // Чтобы попасть строго в середину бита 0, первый дедлайн таймера должен составить
-                // ровно половину периода бита (минус 4 отсчета деглитчера).
-                rrx.bit_timer = rrx.bit_period + rrx.bit_period / 2 - 4;
+  
+                // Компенсация задержки тракта: boxcar даёт T/2, каскад v1/v2/v3  
+                // (EMA 16/32/64) добавляет ~112 отсчётов. Фронт обнаружен с  
+                // опозданием ~0.8T → центр бита 0 (1.5T от реального фронта)  
+                // наступает через ~0.7T от момента детекции.  
+                int32_t bt = (int32_t)rrx.bit_period  
+                           - 4                       // деглитчер  
+                           - 112;                    // лаг v1+v2+v3  
+                if (bt < 16) bt = 16;  
+                rrx.bit_timer = (uint16_t)bt;
                 
                 if (dbg_rx)  
                     Serial.println(F("[RTTY] start"));  
@@ -561,27 +567,35 @@ static inline void rtty_rx_sample(int16_t xi, int16_t xq) {
         break;  
 
   
-    case 1:                                       
+    case 1:
         if (--rrx.bit_timer == 0) {  
             if (curbit) rrx.shreg |= (1u << rrx.bit_cnt);   
             rtty_afc();                                   
             if (++rrx.bit_cnt >= 5) {  
                 rrx.state = 2;  
-                rrx.bit_timer = rrx.bit_period;           
+                // Строб стопа чуть раньше его центра: огибающие запаздывают  
+                // на ~T/2+112 отсч., половина стоп-бита компенсирует это.  
+                rrx.bit_timer = rrx.bit_period / 2;  
             } else {  
                 rrx.bit_timer = rrx.bit_period;  
             }  
         }  
         break;  
   
-    case 2:                                       
+    case 2:  
         if (--rrx.bit_timer == 0) {  
             rrx.state = 0;  
             rrx.space_cnt = 0;  
-            if (curbit) rtty_emit(rrx.shreg);  
-            else if (dbg_rx) Serial.println(F("[RTTY] framing err"));  
+            // fldigi-подход: символ эмитим всегда, стоп-бит нужен лишь как  
+            // точка ресинка. Space здесь — только пометка в логе.  
+            if (!curbit && dbg_rx) Serial.println(F("[RTTY] framing err"));  
+            rtty_emit(rrx.shreg);  
+            // Если стоп space — вероятно, мы уже в старт-бите следующего  
+            // символа: перезапускаем поиск фронта сразу, без паузы.  
+            if (!curbit) { rrx.state = 1; rrx.bit_cnt = 0; rrx.shreg = 0;  
+                           rrx.bit_timer = rrx.bit_period; }
         }  
-        break;  
+        break;
     }  
     rrx.lastbit = curbit;  
 }  

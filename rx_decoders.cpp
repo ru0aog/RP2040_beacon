@@ -27,9 +27,13 @@
  *     cw_dot_avg/cw_dash_avg, композитный порог, бинарное дерево Морзе.  
  * ============================================================================  
  */  
-  
-#include <Arduino.h>    
-#include "vfo_hardware.h"    
+
+#include <Arduino.h>
+#include "vfo_hardware.h"
+
+       bool dbg_rx       = false;    // флаг печати лога отладки
+static bool dbg_spectrum = false;    // спектроскан полосы: [SPEC] печать мощностей бинов
+       bool dbg_bits     = true;     // [RTTY-BITS] печать каждого решённого бита: S=старт, 0-4=данные, P=стоп
 
 
 // ---- API из rx_dsp.cpp ----    
@@ -40,6 +44,9 @@ extern float    rx_dsp_fs_out(void);
   
 extern uint32_t rx_capture_dropped(void);  
 static void rtty_emit(uint8_t c);
+static void spec_reset(void);
+static void spec_sample(int16_t xr, int16_t xq);
+static bool rtty_rx(bool bit);        // fwd — используется в rtty_rx_sample ниже
 
 typedef enum {    
     RX_MODE_NONE=0, RX_MODE_CW, RX_MODE_RTTY,    
@@ -63,8 +70,7 @@ uint8_t rx_decoders_mode_by_name(const char* name) {
     if (!strcmp(name, "jtty"))     return RX_MODE_JTTY;    
     return RX_MODE_NONE;    
 }  
-  
-bool              dbg_rx = true;     // флаг печати лога отладки  
+
   
 static rx_mode_t  dec_mode = RX_MODE_NONE;    
 static uint32_t   sym_samples;        // отсчётов на символ при Fs_out    
@@ -201,38 +207,59 @@ static inline bool rtty_is_mark(void)
 static bool rtty_rx(bool bit)  
 {  
     bool flag = false;  
-    int correction;  
+    int  correction;  
   
-    for (int i = 1; i < rrx.symbollen; i++) rrx.bit_buf[i-1] = rrx.bit_buf[i];  
+    // сдвиг окна на 1 отсчёт  
+    for (int i = 1; i < rrx.symbollen; i++)  
+        rrx.bit_buf[i - 1] = rrx.bit_buf[i];  
     rrx.bit_buf[rrx.symbollen - 1] = bit;  
   
     switch (rrx.rxstate) {  
-    case 0: // IDLE  
+  
+    case 0: // IDLE — ждём фронт «mark → space» (старт-бит)  
         if (rtty_is_mark_space(correction)) {  
-            rrx.rxstate = 1; rrx.counter = correction;  
+            rrx.rxstate = 1;  
+            rrx.counter = correction;  
+            if (dbg_bits) Serial.println("[RTTY-B] S");  
         }  
         break;  
-    case 1: // START  
+  
+    case 1: // START — подтверждаем space в середине старт-бита  
         if (--rrx.counter == 0) {  
             if (!rtty_is_mark()) {  
-                rrx.rxstate = 2; rrx.counter = rrx.symbollen;  
-                rrx.bitcntr = 0; rrx.rxdata = 0;  
-            } else rrx.rxstate = 0;  
+                rrx.rxstate = 2;  
+                rrx.counter = rrx.symbollen;  
+                rrx.bitcntr = 0;  
+                rrx.rxdata  = 0;  
+            } else {  
+                rrx.rxstate = 0;                     // ложный фронт — шум  
+            }  
         }  
         break;  
-    case 2: // DATA  
+  
+    case 2: // DATA — nbits стробов по середине каждого бита  
         if (--rrx.counter == 0) {  
-            rrx.rxdata |= (rtty_is_mark() ? 1 : 0) << rrx.bitcntr++;  
+            bool mk = rtty_is_mark();  
+            if (dbg_bits)  
+                Serial.printf("[RTTY-B] %d:%c\n", rrx.bitcntr, mk ? '1' : '0');  
+            rrx.rxdata |= (mk ? 1u : 0u) << rrx.bitcntr++;  
             rrx.counter = rrx.symbollen;  
         }  
-        if (rrx.bitcntr == rrx.nbits) rrx.rxstate = 3;  
+        if (rrx.bitcntr >= rrx.nbits)  
+            rrx.rxstate = 3;  
         break;  
-    case 3: // STOP  
+  
+    case 3: // STOP — ждём mark  
         if (--rrx.counter == 0) {  
-            if (rtty_is_mark()) {  
+            bool mk = rtty_is_mark();  
+            if (dbg_bits)  
+                Serial.printf("[RTTY-B] P:%c\n", mk ? '1' : '0');  
+            if (mk) {  
                 uint8_t c = (uint8_t)(rrx.rxdata & 0x1F);  
                 rtty_emit(c);  
                 flag = true;  
+            } else {  
+                if (dbg_rx) Serial.println("[RTTY] framing err");  
             }  
             rrx.rxstate = 0;  
         }  
@@ -663,8 +690,10 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         // RX 3601500, TX 3600000: сигнал ниже LO -> тоны в минус-области:    
         // mark = -1500-85 = -1585 Гц, space = -1500+85 = -1415 Гц.    
         // При зеркальном тексте поменять местами.    
-        rrx.f_mark      = -1585.0f;    
-        rrx.f_space     = -1415.0f;    
+        // SPEC-PK: тона реально на ~-1520 (mark, нижний) и ~-1400 (space)  
+        rrx.f_mark    = -1520.0f;  
+        rrx.f_space   = -1400.0f;
+        spec_reset();  
         rrx.figs        = 0;    
         rrx.lastchar    = 0;    
         rrx.dc_i        = 0.0f;    
@@ -798,9 +827,12 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
     }  
   
 // ------------- RTTY: поотсчётный тракт fldigi, окна символов не нужны -------  
-if (dec_mode == RX_MODE_RTTY) {  
-        for (uint8_t i = 0; i < n; i++)  
-            rtty_rx_sample((float)xi[i], (float)xq[i]);  
+// RTTY: per-sample fldigi-конвейер, Goertzel-путь не используется  
+    if (dec_mode == RX_MODE_RTTY) {  
+        for (uint8_t i = 0; i < n; i++) {  
+            if (dbg_spectrum) spec_sample(xi[i], xq[i]);  
+            rtty_rx_sample(xi[i], xq[i]);  
+        }  
         return;  
     }
     
@@ -888,4 +920,61 @@ case 2:                                     // в кадре: собираем 7
         sym_acc   = 0;  
     }                                                   // конец while (pos < n)  
 }                                                       // конец rx_decoders_process
+
+
+// ---------------- Спектроскан: банк NCO+интеграторов по полосе ----------------  
+// Каждый бин — как канал rtty_mixer+boxcar: миксер на f_k, суммирование за окно.  
+// Частота бина i: SPEC_F0 + i*SPEC_STEP. Печать раз в SPEC_WIN отсчётов.  
+#define SPEC_NBINS 50  
+#define SPEC_F0    (-1900.0f)        // нижний край скана, Гц  
+#define SPEC_STEP  (40.0f)          // шаг, Гц  (-2000..+1840)  
+#define SPEC_WIN   344               // окно интегрирования, отсчётов (~33 мс)  
+  
+static float    spec_zr[SPEC_NBINS], spec_zi[SPEC_NBINS];  // текущий фазор e^{jφ}  
+static float    spec_sr[SPEC_NBINS], spec_si[SPEC_NBINS];  // шаг e^{j2πf/fs}  
+static double   spec_ar[SPEC_NBINS];    
+static double   spec_ai[SPEC_NBINS];    
+static uint16_t spec_n = 0;  
+  
+static void spec_reset(void) {    
+    for (uint8_t k = 0; k < SPEC_NBINS; k++) {    
+        float w = 2.0f * (float)M_PI * (SPEC_F0 + k * SPEC_STEP) / rrx.fs;    
+        spec_sr[k] = cosf(w); spec_si[k] = sinf(w);   // шаг — один раз    
+        spec_zr[k] = 1.0f;  spec_zi[k] = 0.0f;    
+        spec_ar[k] = 0;     spec_ai[k] = 0;    
+    }    
+    spec_n = 0;    
+}    
+  
+static float spec_peak[SPEC_NBINS];  
+  
+void spec_sample(int16_t xr, int16_t xq) {  
+    for (uint8_t k = 0; k < SPEC_NBINS; k++) {  
+        spec_ar[k] += xr * spec_zr[k] + xq * spec_zi[k];  
+        spec_ai[k] += xq * spec_zr[k] - xr * spec_zi[k];  
+        float nr = spec_zr[k] * spec_sr[k] - spec_zi[k] * spec_si[k];  
+        float ni = spec_zr[k] * spec_si[k] + spec_zi[k] * spec_sr[k];  
+        spec_zr[k] = nr; spec_zi[k] = ni;  
+    }  
+    if (++spec_n >= SPEC_WIN) {  
+        for (uint8_t k = 0; k < SPEC_NBINS; k++) {  
+            float m = sqrtf(spec_ar[k]*spec_ar[k] + spec_ai[k]*spec_ai[k]);  
+            if (m > spec_peak[k]) spec_peak[k] = m;   // peak-hold  
+        }  
+        memset(spec_ar, 0, sizeof(spec_ar));  
+        memset(spec_ai, 0, sizeof(spec_ai));  
+        spec_n = 0;  
+  
+        static uint8_t rep = 0;  
+        if (++rep >= 30) {                            // ~1 с усреднения  
+            rep = 0;  
+            Serial.printf("[SPEC-PK]");  
+            for (uint8_t k = 0; k < SPEC_NBINS; k++) {  
+                Serial.printf(" %.0f", (double)spec_peak[k]);  
+                spec_peak[k] = 0;  
+            }  
+            Serial.println();  
+        }  
+    }  
+}
 

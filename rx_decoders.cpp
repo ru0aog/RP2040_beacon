@@ -34,7 +34,8 @@
        bool dbg_rx       = false;    // флаг печати лога отладки
 static bool dbg_spectrum = false;    // спектроскан полосы: [SPEC] печать мощностей бинов
        bool dbg_bits     = true;     // [RTTY-BITS] печать каждого решённого бита: S=старт, 0-4=данные, P=стоп
-
+static bool dbg_trace    = false;    // [TRC] огибающие+v3+state: фронты bit и каждые 32 отсчёта  
+static bool rtty_afc_en  = false;    // AFC ВЫКЛЮЧЕН по умолчанию — включаем только после стабильного декода
 
 // ---- API из rx_dsp.cpp ----    
 extern bool     rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t* n);    
@@ -162,12 +163,21 @@ typedef struct {
     int   figs;               // регистр LTRS/FIGS  
     char  lastchar;  
   
-// AFC (rtty.cxx:836-850): история baseband-комплексов для смежных битов    
-    float h_m_re[2], h_m_im[2], h_s_re[2], h_s_im[2];   // [0]=старее    
-    float freqerr;    
-    int   sym_since_char;                             // отсчёты от последнего char    
+// AFC: угол между boxcar-суммами на СТРОБАХ БИТОВ (не между отсчётами!):  
+// per-sample dphi — это шум, т.к. тон уже переведён в DC. Здесь храним  
+// комплексную сумму на прошлом стробе, dphi считаем через symbollen отсчётов.  
+    float h_m_re, h_m_im;         // сумма mark-канала на предыдущем битовом стробе  
+    bool  h_m_valid;              // строб был — можно считать dphi  
+    float freqerr;                // оценка остаточной расстройки, Гц  
+    int   sym_since_char;         // отсчёты от последнего char (диагностика)  
   
-    float dc_i, dc_q;           // EMA оценка DC-смещения I/Q (вычитаем до миксеров)  
+    float dc_i, dc_q;             // EMA оценка DC-смещения I/Q  
+  
+    // [TRC]-диагностика: момент измерения лага v3 на фронте mark->space  
+    int   edge_cnt;               // отсчёты от последнего фронта bit 1->0  
+    bool  edge_armed;             // ждём переворота v3 обратно
+    uint32_t sample_cnt;          // счётчик отсчётов для [TRC]  
+    bool     lastbit;             // прошлое решение — для фронтов [TRC]
 } rtty_t;
   
 static rtty_t rrx;  
@@ -210,8 +220,7 @@ static bool rtty_rx(bool bit)
     int  correction;  
   
     // сдвиг окна на 1 отсчёт  
-    for (int i = 1; i < rrx.symbollen; i++)  
-        rrx.bit_buf[i - 1] = rrx.bit_buf[i];  
+    memmove(rrx.bit_buf, rrx.bit_buf + 1, rrx.symbollen - 1);  
     rrx.bit_buf[rrx.symbollen - 1] = bit;  
   
     switch (rrx.rxstate) {  
@@ -220,7 +229,7 @@ static bool rtty_rx(bool bit)
         if (rtty_is_mark_space(correction)) {  
             rrx.rxstate = 1;  
             rrx.counter = correction;  
-            if (dbg_bits) Serial.println("[RTTY-B] S");  
+            if (dbg_bits) Serial.printf("[RTTY-B] S corr=%d\n", correction);
         }  
         break;  
   
@@ -244,9 +253,9 @@ static bool rtty_rx(bool bit)
                 Serial.printf("[RTTY-B] %d:%c\n", rrx.bitcntr, mk ? '1' : '0');  
             rrx.rxdata |= (mk ? 1u : 0u) << rrx.bitcntr++;  
             rrx.counter = rrx.symbollen;  
+            if (rrx.bitcntr >= rrx.nbits)  
+                rrx.rxstate = 3;          // переход внутри строба — counter уже перезагружен  
         }  
-        if (rrx.bitcntr >= rrx.nbits)  
-            rrx.rxstate = 3;  
         break;  
   
     case 3: // STOP — ждём mark  
@@ -318,28 +327,56 @@ static void rtty_rx_sample(float xr, float xq)
              - 0.25f * (mn*mn - sn*sn);  
   
     bool bit = (v3 > 0);  
-
-    rrx.sym_since_char++;                        // считаем отсчёты между символами  
-    if (rtty_rx(bit)) {    
-        // поворот суммы mark-канала за интервал между двумя символами    
-        float dphi = atan2f(rrx.h_m_re[1]*rrx.h_m_im[0] - rrx.h_m_im[1]*rrx.h_m_re[0],    
-                            rrx.h_m_re[1]*rrx.h_m_re[0] + rrx.h_m_im[1]*rrx.h_m_im[0]);    
-        float ferr = 0;    
-        if (rrx.sym_since_char > 0)    
-            ferr = dphi * rrx.fs / (2.0f * (float)M_PI * (float)rrx.sym_since_char);    
-        if (fabsf(ferr) > 22.7f) ferr = 0;       // fldigi: clamp shift/8    
-        rrx.freqerr = rtty_decayavg(rrx.freqerr, ferr, 8);    
-        rrx.f_mark  -= rrx.freqerr;    
-        rrx.f_space -= rrx.freqerr;    
-        rrx.sym_since_char = 0;    
-        // сдвиг истории: [0] = сумма прошлого символа  
-        rrx.h_m_re[0] = rrx.h_m_re[1]; rrx.h_m_im[0] = rrx.h_m_im[1];  
-        rrx.h_s_re[0] = rrx.h_s_re[1]; rrx.h_s_im[0] = rrx.h_s_im[1];  
-        // [1] = сумма текущего символа (сумматоры живут до следующего бита)  
-        rrx.h_m_re[1] = rrx.sum_mi;  rrx.h_m_im[1] = rrx.sum_mq;  
-        rrx.h_s_re[1] = rrx.sum_si;  rrx.h_s_im[1] = rrx.sum_sq;
+  
+    // ---- [TRC]: измерение лага ATC — сколько отсчётов v3 отстаёт от фронта  
+    // mark->space (bit 1->0). Если лаг ~T/4 — строб стоп-бита сдвигаем.  
+    if (dbg_trace) {  
+        if (rrx.lastbit && !bit) { rrx.edge_armed = true; rrx.edge_cnt = 0; }  
+        if (rrx.edge_armed) {  
+            rrx.edge_cnt++;  
+            if (bit) {   // v3 вернулся в mark — край лага виден  
+                Serial.printf("[TRC] v3 lag=%d smp\n", rrx.edge_cnt);  
+                rrx.edge_armed = false;  
+            }  
+        }  
+        // периодический дамп состояния тракта  
+        if ((rrx.sample_cnt & 31) == 0)  
+            Serial.printf("[TRC] m=%.1f s=%.1f nf=%.1f v3=%.2f bit=%d st=%d c=%d\n",  
+                          (double)rrx.mark_env, (double)rrx.space_env,  
+                          (double)rrx.noise_floor, (double)v3,  
+                          bit, rrx.rxstate, rrx.counter);  
+        rrx.sample_cnt++;  
+    }  
+  
+    bool valid = rtty_rx(bit);  
+    rrx.lastbit = bit;  
+    rrx.sym_since_char++;  
+  
+    // ---- AFC: dphi между стробами битов, применение на валидном символе ----  
+    if (valid) {  
+        if (rtty_afc_en && rrx.h_m_valid) {  
+            float dphi = atan2f(  
+                rrx.sum_mi * rrx.h_m_im - rrx.sum_mq * rrx.h_m_re,  
+                rrx.sum_mi * rrx.h_m_re + rrx.sum_mq * rrx.h_m_im);  
+            // угол накоплен за sym_since_char отсчётов от прошлого строба  
+            int n = rrx.sym_since_char; if (n < 1) n = 1;  
+            rrx.freqerr = dphi * rrx.fs / (2.0f * (float)M_PI * n);  
+            float corr = rrx.freqerr;  
+            if (corr >  22.7f) corr =  22.7f;  
+            if (corr < -22.7f) corr = -22.7f;  
+            rrx.f_mark  -= corr * 0.25f;  
+            rrx.f_space -= corr * 0.25f;  
+        }  
+        // snapshot текущей суммы — эталон для следующего символа  
+        rrx.h_m_re = rrx.sum_mi; rrx.h_m_im = rrx.sum_mq;  
+        rrx.h_m_valid = true;  
+        rrx.sym_since_char = 0;  
+        if (dbg_rx)  
+            Serial.printf("[RTTY] shreg=0x%02x err=%.1f\n",  
+                          rrx.rxdata & 0x1F, (double)rrx.freqerr);  
     }  
 }
+
 
 // ============================================================================    
 // 1. GOERTZEL-ДЕТЕКТОР (комплексный банк тонов)    
@@ -698,6 +735,8 @@ void rx_decoders_start(uint8_t mode, float center_hz) {
         rrx.lastchar    = 0;    
         rrx.dc_i        = 0.0f;    
         rrx.dc_q        = 0.0f;    
+        rrx.h_m_valid   = false;  
+        rrx.freqerr     = 0.0f;  
         break;
 
         break;
@@ -948,7 +987,7 @@ static void spec_reset(void) {
   
 static float spec_peak[SPEC_NBINS];  
   
-void spec_sample(int16_t xr, int16_t xq) {  
+static void spec_sample(int16_t xr, int16_t xq) {  
     for (uint8_t k = 0; k < SPEC_NBINS; k++) {  
         spec_ar[k] += xr * spec_zr[k] + xq * spec_zi[k];  
         spec_ai[k] += xq * spec_zr[k] - xr * spec_zi[k];  

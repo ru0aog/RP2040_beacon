@@ -381,6 +381,7 @@ static void rtty_emit(uint8_t c) {
  * Принимает текущие комплексные компоненты (реальная, мнимая) пика и его соседей.
  * Возвращает дробное смещение пика от центрального бина в диапазоне [-0.5 ... +0.5]
  */
+// резерв: Jacobsen-интерполятор, нужен FFT-банк
 static float rtty_interpolate_peak(float re_left,  float im_left,  
                                    float re_peak,  float im_peak,  
                                    float re_right, float im_right) {
@@ -548,7 +549,7 @@ static inline void rtty_rx_sample(int16_t xi, int16_t xq) {
                 // Групповая задержка скользящего среднего равна rrx.bit_period / 2.
                 // Чтобы попасть строго в середину бита 0, первый дедлайн таймера должен составить
                 // ровно половину периода бита (минус 4 отсчета деглитчера).
-                rrx.bit_timer = (rrx.bit_period / 2) - 4;  
+                rrx.bit_timer = rrx.bit_period + rrx.bit_period / 2 - 4;
                 
                 if (dbg_rx)  
                     Serial.println(F("[RTTY] start"));  
@@ -959,54 +960,34 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
                 if (tone == 0) { jtty_state = 1; jtty_symcnt = 0; jtty_inframe = 1; }  
                 break;  
             case 1:                                     // ждём тон 1  
-                if (tone == 1) {  
-                    jtty_state = 2;
-                    jtty_sym[jtty_symcnt++] = 1;  
-                } else if (tone != 0) {  
-                    jtty_state = 0; jtty_inframe = 0;   // нарушена альтернация — ресинк  
-                } else {  
-                    jtty_sym[jtty_symcnt++] = 0;  
-                    if (jtty_symcnt >= 78) { jtty_symcnt = 0; jtty_inframe = 0; jtty_state = 0; }  
+                if (tone == 1) { jtty_state = 2; }  
+                else if (tone != 0) {  
+                    jtty_push(1);  
                 }  
                 break;  
-            case 2:                                     // ждём тон 0  
-                if (tone == 0) {  
-                    jtty_state = 1;  
-                    jtty_sym[jtty_symcnt++] = 0;  
-                    if (jtty_symcnt >= 78) {  
-                        // кадр собран  
-                        jtty_inframe = 0;  
-                        Serial.print(F("[JTTY] frame:"));  
-                        for (uint8_t i = 13; i < 59; i++)  
-                            Serial.printf("%d", jtty_sym[i]);  
-                        Serial.println();  
-                        // TODO: 46 дибитов -> 92 бита -> soft/hard Viterbi TBCC  
-                        // -> CRC12 -> распаковка pack28 (порт из WSJT-X tbcc.f90)  
-                        jtty_symcnt = 0;  
-                        jtty_state  = 0;  
-                    }  
-                } else if (tone != 1) {  
-                    jtty_state = 0; jtty_inframe = 0;  
-                } else {  
-                    jtty_sym[jtty_symcnt++] = 1;  
-                    if (jtty_symcnt >= 78) { jtty_symcnt = 0; jtty_inframe = 0; jtty_state = 0; }  
+case 2:                                     // в кадре: собираем 78 дибитов  
+                if (jtty_inframe) {  
+                    jtty_push(tone);  
+                } else if (tone == 1) {  
+                    jtty_push(1);  
                 }  
                 break;  
             default:  
                 jtty_state = 0; jtty_inframe = 0;  
                 break;  
-            }  
-            break;  
+            }                                           // конец switch (jtty_state)  
+            break;                                      // конец case RX_MODE_JTTY  
         }  
   
         default: break;  
-        }  
+        }                                               // конец switch (dec_mode)  
   
-        // Сброс резонаторов — для ВСЕХ режимов, включая RTTY.  
+        // Сброс резонаторов — для всех символьных режимов.  
         // gtz — однополюсный ИНТЕГРАТОР (s = x + c·s): без сброса ar/ai  
-        // растут бесконечно → gtz_power насыщается в INT32_MAX у обоих бинов,  
-        // diff = mark - space вырождается в шум около нуля.  
+        // растут бесконечно → gtz_power насыщается в INT32_MAX.  
+        // (CW и RTTY выше выходят через return и сюда не доходят.)  
         for (uint8_t t = 0; t < gtz_ntones; t++) gtz_reset(&gtz[t]);  
         sym_acc   = 0;  
-    }  
-}
+    }                                                   // конец while (pos < n)  
+}                                                       // конец rx_decoders_process
+

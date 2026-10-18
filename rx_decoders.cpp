@@ -772,7 +772,10 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
             int16_t pq = (pos > 0) ? xq[pos - 1] : prev_q;   // в т.ч. через границу порций  
             for (uint8_t k = 0; k < chunk; k++) {  
                 int16_t ci = xi[pos + k], cq = xq[pos + k];  
-                rtty_disc += (int32_t)ci * pq - (int32_t)cq * pi;  
+                static int64_t disc_acc = 0;  
+                disc_acc += (int32_t)ci * pq - (int32_t)cq * pi;  
+                rtty_disc = (int32_t)(disc_acc >  INT32_MAX ?  INT32_MAX :  
+                                    disc_acc < -INT32_MAX ? -INT32_MAX : disc_acc);
                 pi = ci; pq = cq;  
             }  
             prev_i = xi[pos + chunk - 1];  
@@ -805,7 +808,14 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
                                   (long)rtty_disc, (long)rtty_disc_ema,  
                                   (rtty_disc_ema < 0) ? "mark" : "space");  
                 }  
-            }  
+            }
+            static uint32_t dbg2 = 0;  
+            if (dbg_rx && (++dbg2 >= 48)) {  
+                dbg2 = 0;  
+                Serial.printf("[RTTY-PWR] bin0=%lu bin1=%lu\n",  
+                                        (unsigned long)gtz_power(0),  
+                                        (unsigned long)gtz_power(1));
+            }
             break;
 
         case RX_MODE_OLIVIA: case RX_MODE_CONTESTIA:  

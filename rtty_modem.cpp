@@ -194,7 +194,7 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
     // Центр полосы RTTY = mark - shift/2.  
     rsid_send(39 /*RSID_RTTY45*/, (double)rtty_mark_hz - (double)rtty_shift_hz / 2.0);  
     // rsid_send перенастроила VFO на свою сетку — вернуть RTTY-сетку  
-    vfo_set_narrowband(true);  // mfsk_prepare мог сбросить narrowband  
+    //vfo_set_narrowband(true);  // mfsk_prepare мог сбросить narrowband  
     // Сетка растёт вверх от базы: base = min(mark, space), step = shift.  
     // Нормальный режим: tone0=SPACE, tone1=MARK. Инверсия — наоборот.  
     uint32_t base_hz = invert ? mark_hz : space_hz;  

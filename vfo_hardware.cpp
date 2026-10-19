@@ -1346,7 +1346,6 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
     
     PllConfig target_pll;
 
-
     // ========================================================================
     // АРХИТЕКТУРНЫЙ АРБИТРАЖ ЧАСТОТЫ ШИНЫ
     // Честный сквозной автотюн при каждом старте (без эффекта памяти)
@@ -1447,7 +1446,30 @@ void vfo_hardware_init(unsigned int base_freq_hz, double step_hz) {
         Serial.printf("PIO Regs   : INT=%u, FRAC=%u\n", real_base_params.pio_int, real_base_params.pio_frac);  
         Serial.printf("DDS Step   : 0x%08X (%u)  dist_to_k8=%u LSB\n",  
                     real_base_params.dds_step, real_base_params.dds_step,  
-                    (unsigned)dds_step_min_dist_to_k8(real_base_params.dds_step)); 
+                    (unsigned)dds_step_min_dist_to_k8(real_base_params.dds_step));
+
+        // === ДИАГНОСТИКА ТАБЛИЦЫ ТОНОВ: что реально выйдет из PIO ===  
+        // Эффективный делитель D = int + frac/256 + dds_step/(256·2^32)  
+        // f_out = clk_sys / (2·D). Печатаем цель, факт и ошибку по каждому тону.  
+        Serial.printf("[TONES] n=%u  base=%llu mHz  step=%llu mHz  clk=%u Hz\n",  
+                      (unsigned)VFO_TONES_COUNT,  
+                      (unsigned long long)vfo_base_mhz,  
+                      (unsigned long long)vfo_step_mhz,  
+                      (unsigned)current_clk_sys_hz);  
+        for (int i = 0; i < VFO_TONES_COUNT; i++) {  
+            const VfoParameters& t = vfo_tones[i];  
+            double D = (double)t.pio_int  
+                     + (double)t.pio_frac / 256.0  
+                     + (double)t.dds_step / (256.0 * 4294967296.0);  
+            double f_act  = (double)current_clk_sys_hz / (2.0 * D);  
+            double f_want = (vfo_base_mhz + (uint64_t)i * vfo_step_mhz) / 1000.0;  
+            Serial.printf("[TONES] %2u: want=%11.2f  act=%11.2f  err=%+8.2f Hz  "  
+                          "int=%u frac=%u step=0x%08lX\n",  
+                          i, f_want, f_act, f_act - f_want,  
+                          (unsigned)t.pio_int, (unsigned)t.pio_frac,  
+                          (unsigned long)t.dds_step);  
+        }  
+
         Serial.printf("-------------------------------\n");  
     #endif
 
@@ -2151,30 +2173,30 @@ void __not_in_flash_func(vfo_set_tone_instant)(uint8_t tone_index) {
     // — это относительная ФМ-глубина ~mask/(256·int). На малых int  
     // (ВЧ-диапазоны) даже ±1 поднимает ближнюю юбку — выключаем.  
     if (vfo_narrowband_mode) {  
-        vfo_frac_dither_mask = 0x00u;  // Olivia: дизер выключен — чистые линии  
+        vfo_frac_dither_mask = 0x00u;  // дизер выключен — чистые линии
     } else if (target_pio_int >= 38) {  
-        vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 38–56)  
+        vfo_frac_dither_mask = 0x03u;  // ±3  (80 м: int 38–56)
     } else if (target_pio_int >= 19) {  
-        vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–37)  
+        vfo_frac_dither_mask = 0x01u;  // ±1  (40/30 м: int 19–37)
     } else {  
-        vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤18)  
+        vfo_frac_dither_mask = 0x00u;  // off (20 м и выше: int ≤18)
     }
-
-/*
-    // Все накопители сбрасываем
-    dds_accum_m2    = 0;  
-    m2_carry_prev   = 0;  
-    dds_accumulator = 0;  
-  
-    tone_changed    = true;        // ← поднимаем флаг последним  
-    spin_unlock(vfo_spin_lock, save);
-*/
 
     // Накопители НЕ сбрасываем: переход mark/space фазово-непрерывный,  
     // спектрального всплеска на битовых границах RTTY больше нет.  
     tone_changed    = true;        // ← поднимаем флаг последним    
     spin_unlock(vfo_spin_lock, save); 
-  
+
+#if VFO_PLL_DEBUG 
+    // в конце vfo_set_tone_instant, после spin_unlock — только под VFO_PLL_DEBUG:  
+    uint32_t d = lo_pio->sm[lo_sm].clkdiv;  
+    Serial.printf("[TONE] idx=%u applied: int=%lu frac=%lu step=0x%08lX | table: int=%u frac=%u step=0x%08lX\n",  
+        tone_index,  
+        (unsigned long)(d >> 16), (unsigned long)((d >> 8) & 0xFF),  
+        (unsigned long)dds_step,  
+        (unsigned)vfo_tones[tone_index].pio_int, (unsigned)vfo_tones[tone_index].pio_frac,  
+        (unsigned long)vfo_tones[tone_index].dds_step);
+#endif
     current_active_tone = tone_index;
 }
 

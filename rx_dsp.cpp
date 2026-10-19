@@ -1,24 +1,24 @@
-/**    
- * ============================================================================    
- *  rx_dsp.cpp — модуль децимирующего DSP-тракта (core1)    
- *  Версия 2.25 от 2026-10-14, автор RU0AOG    
- *    
- *  Тракт: 32-бит слова [I|Q] из rx_capture → центрирование → NCO-сдвиг →    
- *  3 каскада half-band FIR (/8) → дублированные буферы базовой полосы    
- *  int16 I/Q по 64 отсчёта на блок.    
- *    
- *  Fs на канал = RX_ADC_SAMPLE_RATE_HZ/2 (~125 ksps при 250k слов/с),    
- *  Fs_out = Fs/8 ≈ 15.6 ksps на канал (Nyquist ±7.8 кГц — покрывает    
- *  полосу всех узкополосных модов и ПЧ-сдвиг).    
- * ============================================================================    
+/**  
+ * ============================================================================  
+ *  rx_dsp.cpp — модуль децимирующего DSP-тракта (core1)  
+ *  Версия 2.25 от 2026-10-14, автор RU0AOG  
+ *  
+ *  Тракт: 32-бит слова [I|Q] из rx_capture → центрирование → NCO-сдвиг →  
+ *  3 каскада half-band FIR (/8) → SPSC-очередь базовой полосы  
+ *  int16 I/Q по 64 отсчёта на блок.  
+ *  
+ *  Fs на канал = RX_ADC_SAMPLE_RATE_HZ/2 (~125 ksps при 250k слов/с),  
+ *  Fs_out = Fs/8 ≈ 15.6 ksps на канал (Nyquist ±7.8 кГц — покрывает  
+ *  полосу всех узкополосных модов и ПЧ-сдвиг).  
+ * ============================================================================  
  */  
-
+  
 #include <Arduino.h>  
 #include "vfo_hardware.h"  
 #include "pico/multicore.h"  
   
 // ---- Параметры тракта ----  
-#define RX_FS_IN_HZ           (RX_ADC_SAMPLE_RATE_HZ / 2.0f)  // Fs на канал
+#define RX_FS_IN_HZ           (RX_ADC_SAMPLE_RATE_HZ / 2.0f)  // Fs на канал  
 #define RX_DECIM_STAGES       3                     // 3 half-band каскада: /8  
 #define RX_FS_OUT_HZ          (RX_FS_IN_HZ / 8.0f)  // ~15.6 ksps при 250k  
   
@@ -49,8 +49,8 @@ static const int16_t hb_taps[15] = {
   
 typedef struct {  
     int32_t d[HB_NTAPS];   // линия задержки (накопленные I или Q)  
-    uint8_t w;             // указатель записи
-    uint8_t phase;         // свой бит чётности на каждый канал — I и Q независимы
+    uint8_t w;             // указатель записи  
+    uint8_t phase;         // свой бит чётности на каждый канал — I и Q независимы  
 } hb_state_t;  
   
 static hb_state_t hb_i[RX_DECIM_STAGES], hb_q[RX_DECIM_STAGES];  
@@ -69,25 +69,28 @@ static inline bool hb_push(hb_state_t* st, int32_t x, int32_t* out) {
     *out = acc >> 15;  
     return true;  
 }  
-
+  
 static inline int16_t sat16(int32_t v) {  
     return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));  
 }  
-
-// ---- Выходные буферы базовой полосы: ДВОЙНАЯ буферизация ----  
-// Пока декодер (core0) читает буфер X, DSP (core1) пишет буфер Y.  
-// Без этого декодер обязан был успеть за один период блока (~2 мс).  
+  
+// ---- Выходная SPSC-очередь базовой полосы: core1 -> core0 ----  
+// head изменяет только producer (core1), tail — только consumer (core0).  
+// Кольцо из 4 слотов имеет вместимость 3 блока: один слот резервируется,  
+// чтобы отличать полное состояние от пустого.  
+// Исправление двойной буферизации: раньше consumer всегда читал  
+// ПОСЛЕДНИЙ опубликованный буфер → дубли/пропуски блоков → блочная  
+// модуляция на частоте блоков Fs/64 ≈ 244 Гц (гребёнка в спектре).  
 #define RX_OUT_SAMPLES   (RX_BLOCK_SAMPLES / 8)   // 64 пары I/Q за блок  
-#define RX_OUT_BUFS      2  
+#define RX_OUT_BUFS      4  
   
 static int16_t out_i[RX_OUT_BUFS][RX_OUT_SAMPLES];  
 static int16_t out_q[RX_OUT_BUFS][RX_OUT_SAMPLES];  
-static volatile uint8_t out_wr = 0;      // индекс буфера, куда пишет DSP  
-static volatile uint8_t out_ready = 0;   // маска готовых буферов (биты 0..1)  
-static volatile uint8_t out_read = 0;    // индекс буфера, отданного consumer'у  
+static volatile uint8_t  out_head = 0;    // запись: только core1  
+static volatile uint8_t  out_tail = 0;    // запись: только core0  
+static volatile uint32_t out_dropped = 0; // диагностика переполнений  
   
 // Точка входа DSP на core1  
-// rx_dsp.cpp — rx_dsp_entry, исправленный вариант  
 static void __not_in_flash_func(rx_dsp_entry)(void) {  
     // Оценка DC-смещения АЦП: EMA по входным отсчётам.  
     // alpha=1/256 → постоянная ~0.4 с, сигнал тона за символ усредняется в 0.  
@@ -98,7 +101,11 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
         const volatile uint32_t* blk = rx_capture_get_block();  
         if (!blk) { tight_loop_contents(); watchdog_update(); continue; }  
   
-        uint8_t wr = out_wr;  
+        uint8_t wr        = out_head;  
+        uint8_t next_head = (uint8_t)((wr + 1) % RX_OUT_BUFS);  
+        // Слот head — резервный: при полной очереди входной блок всё равно  
+        // обрабатываем (NCO/DC/FIR не разрываются), но результат не публикуем.  
+        bool    queue_full = (next_head == out_tail);  
         uint8_t n_out = 0;  
   
         // DMA_SIZE_16: каждое 32-битное слово FIFO = пара отсчётов  
@@ -132,7 +139,7 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
                 if (!ri || !rq) { emit = false; break; }  
                 vi = oi; vq = oq;  
             }  
-            if (emit && n_out < RX_OUT_SAMPLES) {  
+            if (emit && !queue_full && n_out < RX_OUT_SAMPLES) {  
                 out_i[wr][n_out] = sat16(vi);  
                 out_q[wr][n_out] = sat16(vq);  
                 n_out++;  
@@ -140,17 +147,20 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
         }  
         rx_capture_release();  
   
-        out_read  = wr;  
-        out_ready |= (1u << wr);  
-        out_wr    = wr ^ 1;  
+        if (queue_full) {  
+            out_dropped++;            // блок выхода потерян, вход обработан  
+        } else {  
+            __dmb();                  // данные блока видимы до публикации head  
+            out_head = next_head;  
+        }  
     }  
-} 
+}  
   
 // ---- Публичный API ----  
   
-// if_hz — ЖЕЛАЕМАЯ частота приёма (несущая мода). Точная ПЧ вычисляется
-// от фактического квантованного LO: сигнал в базовой полосе сидит на
-// f_if_actual = f_target - f_lo_actual.
+// if_hz — ЖЕЛАЕМАЯ частота приёма (несущая мода). Точная ПЧ вычисляется  
+// от фактического квантованного LO: сигнал в базовой полосе сидит на  
+// f_if_actual = f_target - f_lo_actual.  
 void rx_dsp_start(float f_target_hz) {  
     // Ошибка квантования LO вносится в NCO:  
     float f_nco = f_target_hz - (float)vfo_quadrature_lo_hz();  
@@ -161,17 +171,21 @@ void rx_dsp_start(float f_target_hz) {
                   (double)f_target_hz,  
                   (unsigned long)vfo_quadrature_lo_hz(),  
                   (double)f_nco,  
-                  (unsigned long)nco_step);
+                  (unsigned long)nco_step);  
   
-    memset(hb_i, 0, sizeof(hb_i));
-    memset(hb_q, 0, sizeof(hb_q));
-    memset(out_i, 0, sizeof(out_i));
-    memset(out_q, 0, sizeof(out_q));
-    out_wr = out_read = out_ready = 0;
-
-    nco_lut_init();
-    multicore_reset_core1();
-    multicore_launch_core1(rx_dsp_entry);
+    // Сначала гасим core1 — иначе он может перезаписать буферы/состояния  
+    // между memset и reset, и очередь стартует в грязном состоянии.  
+    multicore_reset_core1();  
+  
+    memset(hb_i, 0, sizeof(hb_i));  
+    memset(hb_q, 0, sizeof(hb_q));  
+    memset(out_i, 0, sizeof(out_i));  
+    memset(out_q, 0, sizeof(out_q));  
+    out_head = out_tail = 0;  
+    out_dropped = 0;  
+  
+    nco_lut_init();  
+    multicore_launch_core1(rx_dsp_entry);  
 }  
   
 // AFC/тонкая подстройка без перезапуска тракта  
@@ -179,28 +193,39 @@ void rx_dsp_set_nco_hz(float f_hz) {
     nco_step = (uint32_t)(4294967296.0f * f_hz / RX_FS_IN_HZ);  
 }  
   
-// Отдаёт СВЕЖИЙ заполненный буфер; consumer обязан вызвать  
-// rx_dsp_release_output() после чтения.  
+// Отдаёт ОЧЕРЕДНОЙ заполненный буфер (FIFO по tail); consumer обязан  
+// вызвать rx_dsp_release_output() после чтения — ровно один раз на блок.  
 bool rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t* n) {  
-    if (!out_ready) return false;  
-    uint8_t rd = out_read;                    // последний опубликованный  
-    *i = out_i[rd]; *q = out_q[rd]; *n = RX_OUT_SAMPLES;  
+    uint8_t tail = out_tail;  
+    if (tail == out_head) return false;    // очередь пуста  
+  
+    // После наблюдения нового head данные опубликованного блока  
+    // должны быть видимы до того, как consumer начнёт их читать.  
+    __dmb();  
+    *i = out_i[tail];  
+    *q = out_q[tail];  
+    *n = RX_OUT_SAMPLES;  
     return true;  
 }  
+  
 void rx_dsp_release_output(void) {  
-    out_ready &= ~(1u << out_read);  
+    // Все чтения текущего блока должны завершиться до освобождения слота.  
+    __dmb();  
+    out_tail = (uint8_t)((out_tail + 1) % RX_OUT_BUFS);  
 }  
   
+// Счётчик потерянных выходных блоков — для диагностики захвата.  
+// Для чистого спектрального измерения приращение за захват должно быть 0.  
+uint32_t rx_dsp_out_dropped(void) { return out_dropped; }  
+  
 // Возвращает Fs выхода базовой полосы — нужна декодерам для таймингов  
-float rx_dsp_fs_out(void) { return RX_FS_OUT_HZ; }
-
-// Останавливает DSP-тракт: снимает core1 и гасит выходные буферы.  
+float rx_dsp_fs_out(void) { return RX_FS_OUT_HZ; }  
+  
+// Останавливает DSP-тракт: снимает core1 и гасит выходную очередь.  
 // Вызывается из rx off до rx_capture_stop — иначе core1 продолжит  
 // крутиться на освобождённых DMA-буферах.  
 void rx_dsp_stop(void) {  
-    multicore_reset_core1();   // гасим DSP-ядро (дизеринг VFO тоже жил бы здесь — в RX он не нужен)  
-    out_ready = 0;  
-    out_wr = out_read = 0;  
+    multicore_reset_core1();   // гасим DSP-ядро  
+    out_head = out_tail = 0;  
+    out_dropped = 0;  
 }
-
-

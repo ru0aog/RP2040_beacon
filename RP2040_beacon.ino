@@ -518,7 +518,7 @@ void check_serial_commands() {
                 int sp = rest.indexOf(' ');  
                 String mode_s = (sp < 0) ? rest : rest.substring(0, sp);  
                 uint32_t f = (sp < 0) ? 0 : strtoul(rest.substring(sp+1).c_str(), NULL, 10);  
-                if (f == 0) f = 3601500;  
+                if (f == 0) f = 3600000;  
                 mode_s.toLowerCase();  
   
                 // Маппинг режима — внутри rx_decoders.cpp, единый источник enum.  

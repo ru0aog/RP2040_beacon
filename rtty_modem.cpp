@@ -188,6 +188,7 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
   }
   else {
     // Для программного VFO RP2040
+    vfo_clk_boost_enter(0);   // активация режима разгона
     vfo_set_narrowband(true);
     // RSID-маркер режима до пилот-тона: fldigi переключит декодер на RTTY.  
     // Центр полосы RTTY = mark - shift/2.  
@@ -226,8 +227,10 @@ static void send_rtty_bit(TransmitterState state) {
 
     if (state == MARK) {
         ZERO_LED_GREEN_ON();
+        // while(1) {watchdog_update();} // марк-холд
     } else {
         ZERO_LED_RED_ON();
+        // while(1) {watchdog_update();} // спейс-холд
     }
 
     // Засекаем точное время начала передачи бита

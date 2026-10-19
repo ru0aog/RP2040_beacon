@@ -31,9 +31,11 @@
 #include <Arduino.h>
 #include "vfo_hardware.h"
 
-       bool dbg_rx       = false;    // флаг печати лога отладки
+// флаги отладки
+    bool    dbg_iq       = true;    // [IQ] стрим сырого I/Q в Serial: заголовок + пакеты 64×(i,q)
+    bool    dbg_rx       = false;    // флаг печати лога отладки
 static bool dbg_spectrum = false;    // спектроскан полосы: [SPEC] печать мощностей бинов
-       bool dbg_bits     = true;     // [RTTY-BITS] печать каждого решённого бита: S=старт, 0-4=данные, P=стоп
+    bool    dbg_bits     = false;    // [RTTY-BITS] печать каждого решённого бита: S=старт, 0-4=данные, P=стоп
 static bool dbg_trace    = false;    // [TRC] огибающие+v3+state: фронты bit и каждые 32 отсчёта  
 static bool rtty_afc_en  = false;    // AFC ВЫКЛЮЧЕН по умолчанию — включаем только после стабильного декода
 
@@ -818,7 +820,16 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
         if (dbg_rx) {Serial.printf("[DEC] process: calls=%lu mode=%u n=%u\n",    
                       (unsigned long)calls, (unsigned)dec_mode, (unsigned)n);}  
   
-    if (dec_mode == RX_MODE_NONE || n == 0) return;  
+    if (dec_mode == RX_MODE_NONE || n == 0) return;
+
+    // ---- IQ-дамп в COM: пакет 'IQ'+len + n пар int16 (I,Q) LE ----  
+    if (dbg_iq) {  
+        Serial.write('I'); Serial.write('Q'); Serial.write(n);  
+        for (uint8_t i = 0; i < n; i++) {  
+            Serial.write((uint8_t*)&xi[i], 2);  
+            Serial.write((uint8_t*)&xq[i], 2);  
+        }  
+    } 
   
 // ---------------- CW: блок = одно окно детектора огибающей ----------------    
     if (dec_mode == RX_MODE_CW) {    
@@ -945,7 +956,7 @@ void rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n) {
                     jtty_push(1);  
                 }  
                 break;  
-case 2:                                     // в кадре: собираем 78 дибитов  
+            case 2:                                     // в кадре: собираем 78 дибитов  
                 if (jtty_inframe) {  
                     jtty_push(tone);  
                 } else if (tone == 1) {  

@@ -138,6 +138,7 @@ extern PllConfig pll_overclock;   // из vfo_hardware.cpp
 extern void jtty_send_string(const char* str);  
 extern void prepare_jtty_frequencies(uint32_t base_hz);
 extern bool dbg_rx;
+extern bool dbg_iq;
 
 // --- НАСТРОЙКИ АВТОМАТА КНОПКИ USR ---
 const uint8_t PIN_USR_BUTTON = 24; // Системный пин кнопки BOOT/USR на большинстве плат RP2040
@@ -707,6 +708,10 @@ void check_serial_commands() {
               }  
           }
 
+          else if (command.startsWith("iq ")) {  
+              dbg_iq = command.indexOf("on") >= 0;  
+              Serial.printf("[IQ] stream %s\n", dbg_iq ? "ON" : "OFF");  
+          }
 
           // .ino, рядом с обработчиком "adc"  
           else if (command == "adcr") {  
@@ -1319,11 +1324,12 @@ void loop() {
         // Вызов обновленной функции модема
         prepare_rtty_frequencies(rtty_mark_hz, rtty_shift_hz, rtty_invert);
         
-        if (debug_flag) {
-          Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.print(F(" БОД, "));
-          Serial.print(F("длительность бита ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));
-        }
-        
+        Serial.print(F("[Скорость]: ")); Serial.print(1000000.0f / RTTY_BIT_TIME_US, 2); Serial.println(F(" бод"));  
+        Serial.print(F("  длительность бита: ")); Serial.print(RTTY_BIT_TIME_US / 1000); Serial.println(F(" мс"));  
+        Serial.print(F("  частота: ")); Serial.print(rtty_mark_hz); Serial.println(F(" Гц"));  
+        Serial.print(F("  разнос: ")); Serial.print(rtty_shift_hz); Serial.println(F(" Гц"));  
+        Serial.print(F("  инверсия: ")); Serial.println(rtty_invert ? F("да") : F("нет"));  
+          
         // ШАГ 1: RTTY передача позывного и локатора
         if (!pc_file_written && !soft_restart_flag) {
           Serial.print(F("[ЭФИР_RTTY] Вызов: "));

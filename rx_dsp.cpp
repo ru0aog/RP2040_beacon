@@ -1,7 +1,7 @@
 /**  
  * ============================================================================  
  *  rx_dsp.cpp — модуль децимирующего DSP-тракта (core1)  
- *  Версия 2.25 от 2026-10-14, автор RU0AOG  
+ *  Версия 2.26 от 2026-10-20, автор RU0AOG  
  *  
  *  Тракт: 32-бит слова [I|Q] из rx_capture → центрирование → NCO-сдвиг →  
  *  3 каскада half-band FIR (/8) → SPSC-очередь базовой полосы  
@@ -18,9 +18,9 @@
 #include "pico/multicore.h"  
   
 // ---- Параметры тракта ----  
-#define RX_FS_IN_HZ           (RX_ADC_SAMPLE_RATE_HZ / 2.0f)  // Fs на канал  
-#define RX_DECIM_STAGES       3                     // 3 half-band каскада: /8  
-#define RX_FS_OUT_HZ          (RX_FS_IN_HZ / 8.0f)  // ~15.6 ksps при 250k  
+#define RX_FS_IN_HZ           (RX_ADC_SAMPLE_RATE_HZ / 2.0f)    // Fs на канал  
+#define RX_DECIM_STAGES       3                                 // кол-во последовательных КИХ-фильтров (3)
+#define RX_FS_OUT_HZ          (RX_FS_IN_HZ / 8.0f)              // ~15.6 ksps при 250k  
   
 // NCO: 32-битный фазовый аккумулятор  
 static volatile uint32_t nco_phase = 0;  
@@ -39,155 +39,211 @@ static inline void nco_sincos(uint32_t ph, int16_t* s, int16_t* c) {
 }  
   
 // ---- Half-band FIR, 15 отводов, коэффициенты для децимации на 2 ----  
-// Стандартный HB-фильтр: чётные отводы (кроме центра) = 0.  
-// Q15-коэффициенты (окно на классическом HB):  
+// Стандартный HB-фильтр: в массиве нулевые элементы находятся на нечётных индексах 1, 3, 5, 9, 11 и 13. Центральный индекс - 7.
+// общий масштаб 1.0 = 32768
+// Коэффициенты представлены в целочисленном формате фиксированной запятой Q15
+// Фильтр обладает идеальной зеркальной симметрией (линейная фаза — нет искажений фазы сигнала).
+// Нулевые коэффициенты теоретически позволяют исключить часть операций умножения при оптимизации компилятором
 static const int16_t hb_taps[15] = {  
-    -39, 0, 294, 0, -1076, 0, 10375, 16384,  
-    10375, 0, -1076, 0, 294, 0, -39  
+    -39,     0,   294,     0,  -1076,     0,  10375,  16384,    // Левая половина и центр (16384 - это коэффициент 0,5 в Q15)
+  10375,     0,  -1076,    0,    294,     0,    -39             // Правая зеркальная половина
 };  
-#define HB_NTAPS 15  
-  
-typedef struct {  
+#define HB_NTAPS 15        // 15 отводов
+
+typedef struct {
     int32_t d[HB_NTAPS];   // линия задержки (накопленные I или Q)  
     uint8_t w;             // указатель записи  
     uint8_t phase;         // свой бит чётности на каждый канал — I и Q независимы  
-} hb_state_t;  
-  
-static hb_state_t hb_i[RX_DECIM_STAGES], hb_q[RX_DECIM_STAGES];  
-  
-// Один отсчёт через HB-фильтр; true, когда готов прореженный выход.  
-static inline bool hb_push(hb_state_t* st, int32_t x, int32_t* out) {  
-    st->d[st->w] = x;  
-    st->w = (st->w + 1) % HB_NTAPS;  
-    st->phase ^= 1;  
-    if (st->phase) return false;      // нечётный вход — выхода нет  
-    int32_t acc = 0;  
-    for (int k = 0; k < HB_NTAPS; k++) {  
-        int idx = (int)st->w + k; if (idx >= HB_NTAPS) idx -= HB_NTAPS;  
+} hb_state_t;
+
+static hb_state_t hb_i[RX_DECIM_STAGES], hb_q[RX_DECIM_STAGES];
+
+// реализует один шаг фильтрации и децимации (прореживания) данных через Half-Band FIR (КИХ) фильтр
+static inline bool hb_push(hb_state_t* st, int32_t x, int32_t* out) {
+    // Новый входящий отсчёт x записывается в историю фильтра (линию задержки st->d) по текущему указателю записи st->w
+    st->d[st->w] = x;
+    // Указатель st->w сдвигается на следующий элемент
+    // Операция % HB_NTAPS (в данном случае % 15) зацикливает массив,
+    // обеспечивает циклический переход индекса в программном коде, который компилятор может оптимизировать.
+    st->w = (st->w + 1) % HB_NTAPS;
+    // Прореживание частоты на 2
+    st->phase ^= 1;     // Переменная st->phase это однобитный триггер чётности 
+    // (флаг, который при каждом вызове функции переключается между 0 и 1 с помощью операции XOR ^= 1)
+    // Если шаг нечётный (st->phase == 1), функция просто сохраняет семпл в историю и мгновенно выходит, возвращая false
+    if (st->phase) return false;      // нечётный вход — выхода нет
+    // Математическое вычисление свертки КИХ-фильтра
+    int32_t acc = 0;    // аккумулятор сбрасывается в ноль
+    // Запускается цикл свертки на 15 отводов (HB_NTAPS)
+    for (int k = 0; k < HB_NTAPS; k++) {
+        // быстрое вычисление правильного физического индекса внутри кольцевого массива, 
+        // начиная от самой старой сохраненной точки к самой новой
+        int idx = (int)st->w + k; if (idx >= HB_NTAPS) idx -= HB_NTAPS;
+        // цифровое умножение отсчёта сигнала на соответствующий коэффициент фильтра (hb_taps)
         acc += (int32_t)st->d[idx] * hb_taps[k];  
-    }  
-    *out = acc >> 15;  
-    return true;  
-}  
-  
-static inline int16_t sat16(int32_t v) {  
-    return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));  
-}  
-  
-// ---- Выходная SPSC-очередь базовой полосы: core1 -> core0 ----  
-// head изменяет только producer (core1), tail — только consumer (core0).  
-// Кольцо из 4 слотов имеет вместимость 3 блока: один слот резервируется,  
-// чтобы отличать полное состояние от пустого.  
-// Исправление двойной буферизации: раньше consumer всегда читал  
-// ПОСЛЕДНИЙ опубликованный буфер → дубли/пропуски блоков → блочная  
-// модуляция на частоте блоков Fs/64 ≈ 244 Гц (гребёнка в спектре).  
-#define RX_OUT_SAMPLES   (RX_BLOCK_SAMPLES / 8)   // 64 пары I/Q за блок  
-#define RX_OUT_BUFS      4  
-  
-static int16_t out_i[RX_OUT_BUFS][RX_OUT_SAMPLES];  
-static int16_t out_q[RX_OUT_BUFS][RX_OUT_SAMPLES];  
-static volatile uint8_t  out_head = 0;    // запись: только core1  
-static volatile uint8_t  out_tail = 0;    // запись: только core0  
-static volatile uint32_t out_dropped = 0; // диагностика переполнений  
-  
-// Точка входа DSP на core1  
+    }
+    // Масштабирование и выдача готового отсчёта
+    *out = acc >> 15;
+    return true;
+}
+
+// 16-битный ограничитель
+static inline int16_t sat16(int32_t v) {
+// Если значение превысило верхний порог 32767, оно жестко ограничивается до максимума 32767
+// Если значение ушло ниже минимального порога -32768, оно ограничивается снизу до -32768
+// Если значение находится в безопасных пределах, оно возвращается без изменений
+    if ((v >> 15) ^ (v >> 31)) {
+        return (v >> 31) ^ 0x7FFF;
+    }
+    return (int16_t)v;
+}
+
+#define RX_OUT_SAMPLES   (RX_BLOCK_SAMPLES / 8)     // 64 пары отсчётов I/Q на блок  
+#define RX_OUT_BUFS      4                          // кол-во выходных буферов
+
+static int16_t out_i[RX_OUT_BUFS][RX_OUT_SAMPLES];  // выходные буферы обработанных данных I/Q
+static int16_t out_q[RX_OUT_BUFS][RX_OUT_SAMPLES];
+static volatile uint8_t  out_head = 0;              // запись: только core1  
+static volatile uint8_t  out_tail = 0;              // запись: только core0  
+static volatile uint32_t out_dropped = 0;           // диагностика переполнений  
+
+// бесконечный изолированный рабочий цикл ядра Core 1
+// цифровой преобразователь частоты вниз (DDC — Digital Down Converter)
 static void __not_in_flash_func(rx_dsp_entry)(void) {  
-    // Оценка DC-смещения АЦП: EMA по входным отсчётам.  
-    // alpha=1/256 → постоянная ~0.4 с, сигнал тона за символ усредняется в 0.  
-    static int32_t dc_i = 2048 << 8, dc_q = 2048 << 8;  
-  
-    while (true) {  
-        watchdog_update();  
-        const volatile uint32_t* blk = rx_capture_get_block();  
-        if (!blk) { tight_loop_contents(); watchdog_update(); continue; }  
-  
-        uint8_t wr        = out_head;  
-        uint8_t next_head = (uint8_t)((wr + 1) % RX_OUT_BUFS);  
-        // Слот head — резервный: при полной очереди входной блок всё равно  
-        // обрабатываем (NCO/DC/FIR не разрываются), но результат не публикуем.  
-        bool    queue_full = (next_head == out_tail);  
-        uint8_t n_out = 0;  
-  
+    // Оценка DC-смещения АЦП: EMA-фильтр по входным отсчётам
+    // постоянная времени усреднения ~2 мс
+    static int32_t dc_i = 2048 << 8, dc_q = 2048 << 8;
+    // бесконечный цикл ядра Core 1
+    while (true) {
+        // кормим собачку
+        watchdog_update();
+        // проверяем очередь АЦП (функция в rx_capture.cpp)
+        const volatile uint32_t* blk = rx_capture_get_block();
+        // если данных ещё нет - на следующую итерацию
+        if (!blk) {
+            tight_loop_contents();  // подсказка компилятору для цикла ожидания; в этой итерации новых данных нет
+            continue;
+        }
+        // данные из DMA пришли
+        uint8_t wr        = out_head;                           // индекс текущего свободного буфера выходной очереди
+        uint8_t next_head = (uint8_t)((wr + 1) % RX_OUT_BUFS);  // следующий шаг кольцевого буфера
+        // Если очередь полна (queue_full == true), код не останавливает работу. 
+        // Блок всё равно будет обработан, чтобы не разорвать внутренние состояния 
+        // цифрового гетеродина и фильтров, но результат в конце будет просто сброшен в мусорку.
+        bool    queue_full = (next_head == out_tail);
+        uint8_t n_out = 0;
+        // устанавливаем указатель
+        const volatile int16_t* s = (const volatile int16_t*)blk;
         // DMA_SIZE_16: каждое 32-битное слово FIFO = пара отсчётов  
-        // [15:0] = ADC0 (I), [31:16] = ADC1 (Q). Пар в блоке = RX_BLOCK_SAMPLES.  
-        const volatile int16_t* s = (const volatile int16_t*)blk;  
+        // [15:0] = ADC0 (I), [31:16] = ADC1 (Q). Пар в блоке = RX_BLOCK_SAMPLES. 
+        // внутренний цикл обработки блока данных. Обрабатываем пары I/Q
+        for (int n = 0; n < RX_BLOCK_SAMPLES; n++) {
+            // извлекаем текущие отсчёты из массива
+            int32_t i_meas = s[2 * n];
+            int32_t q_meas = s[2 * n + 1];
+            // Центрирование
+                // EMA с коэффициентом 1/256
+                dc_i += (i_meas - (dc_i >> 8));        // dc в Q8  
+                dc_q += (q_meas - (dc_q >> 8));
+                // текущее вычисленное среднее (сдвинутое обратно на 8 бит вправо)
+                // вычитается из измерений.
+                // Получаем сигнал в i_raw и q_raw, компенсированный от постоянного смещения
+                int32_t i_raw = i_meas - (dc_i >> 8);  
+                int32_t q_raw = q_meas - (dc_q >> 8);  
   
-        for (int n = 0; n < RX_BLOCK_SAMPLES; n++) {  
-            int32_t i_meas = s[2 * n];  
-            int32_t q_meas = s[2 * n + 1];  
-  
-            // EMA DC и центрирование  
-            dc_i += (i_meas - (dc_i >> 8));        // dc в Q8  
-            dc_q += (q_meas - (dc_q >> 8));  
-            int32_t i_raw = i_meas - (dc_i >> 8);  
-            int32_t q_raw = q_meas - (dc_q >> 8);  
-  
-            // Комплексное вращение NCO: сдвиг спектра на -f_nco  
-            int16_t sn, cs;  
-            nco_sincos(nco_phase, &sn, &cs);  
-            nco_phase += nco_step;  
-            int32_t i_rot = (i_raw * cs + q_raw * sn) >> 15;  
-            int32_t q_rot = (q_raw * cs - i_raw * sn) >> 15;  
-  
-            // Каскад HB-децимации /8  
+            // Комплексный перенос частоты (Смеситель NCO)
+                int16_t sn, cs;
+                // Из таблицы синусов (NCO LUT) берутся значения опорного сигнала нужной частоты подстройки
+                nco_sincos(nco_phase, &sn, &cs);
+                // Фазовый аккумулятор продвигается вперед на величину nco_step
+                nco_phase += nco_step;
+                // Производится комплексное умножение вектора входного сигнала на вектор гетеродинирования
+                // Сдвиг >> 15 возвращает результат из формата Q15 обратно к обычным целым числам
+                // После этой операции целевой радиосигнал математически смещается в нулевую промежуточную частоту
+                int32_t i_rot = (i_raw * cs + q_raw * sn) >> 15;
+                int32_t q_rot = (q_raw * cs - i_raw * sn) >> 15;
+
+            // Трехкаскадная Half-Band фильтрация и децимация
             int32_t vi = i_rot, vq = q_rot;  
-            bool emit = true;  
-            for (int st = 0; st < RX_DECIM_STAGES; st++) {  
-                int32_t oi, oq;  
-                bool ri = hb_push(&hb_i[st], vi, &oi);  
-                bool rq = hb_push(&hb_q[st], vq, &oq);  
-                if (!ri || !rq) { emit = false; break; }  
-                vi = oi; vq = oq;  
-            }  
-            if (emit && !queue_full && n_out < RX_OUT_SAMPLES) {  
-                out_i[wr][n_out] = sat16(vi);  
-                out_q[wr][n_out] = sat16(vq);  
-                n_out++;  
-            }  
-        }  
-        rx_capture_release();  
-  
+            bool emit = true;
+                // цепочка последовательных КИХ-фильтров (RX_DECIM_STAGES = 3)
+                for (int st = 0; st < RX_DECIM_STAGES; st++) {  
+                    int32_t oi, oq;
+                    // hb_push укладывает данные в линию задержки очередного каскада
+                    bool ri = hb_push(&hb_i[st], vi, &oi);  
+                    bool rq = hb_push(&hb_q[st], vq, &oq);
+                    // Если хотя бы один из каскадов на текущем шаге вернул false (выхода нет, сработал пропуск прореживания)
+                    if (!ri || !rq) {  // флаг emit сбрасывается в false, и обработка текущего отсчета завершается
+                        emit = false;
+                        break; }
+                    vi = oi; vq = oq;
+            // частота дискретизации на выходе каскада падает ровно в 2*2*2 = 8 раз
+            }
+
+            // Насыщение и запись в буфер базовой полосы
+            // Если фильтры выдали отсчет (emit == true), выходная очередь не полна, и мы не вылезли за размер блока (64 отсчета)
+            if (emit && !queue_full && n_out < RX_OUT_SAMPLES) {
+                // данные проходят через функцию ограничения sat16 (защита от клиппинга)
+                // и записываются в выходной буфер out_i/out_q под текущим индексом n_out
+                out_i[wr][n_out] = sat16(vi);
+                out_q[wr][n_out] = sat16(vq);
+                n_out++;
+            }
+        }
+        // После окончания внутреннего цикла 
+        // функция rx_capture_release() сообщает DMA-движку на Core 0,
+        // что входной буфер blk полностью обработан и его можно использовать повторно
+        rx_capture_release();
+        // Если выходная очередь была переполнена, инкрементируется диагностический счетчик потерь out_dropped
         if (queue_full) {  
             out_dropped++;            // блок выхода потерян, вход обработан  
-        } else {  
+        } else {
+            // Если всё в порядке, инструкция барьера памяти __dmb() 
+            // принудительно обеспечивает порядок операций с памятью между ядрами.
+            // Только после этого индекс out_head сдвигается на next_head, делая новый блок видимым для декодеров на Core 0
             __dmb();                  // данные блока видимы до публикации head  
-            out_head = next_head;  
-        }  
-    }  
-}  
-  
+            out_head = next_head;
+        }
+    }
+}
+
+
 // ---- Публичный API ----  
   
-// if_hz — ЖЕЛАЕМАЯ частота приёма (несущая мода). Точная ПЧ вычисляется  
-// от фактического квантованного LO: сигнал в базовой полосе сидит на  
-// f_if_actual = f_target - f_lo_actual.  
+// запуск цифрового сигнального процессора (DSP) на втором ядре (Core 1)
 void rx_dsp_start(float f_target_hz) {  
-    // Ошибка квантования LO вносится в NCO:  
+    // Остановка ядра
+    // Принудительно гасит Core 1, исключая состояние гонки данных
+    multicore_reset_core1();
+    // Очистка памяти
+    // Полностью обнуляет буферы фильтров промежуточной частоты 
+    // и кольцевую межъядерную очередь
+    memset(hb_i, 0, sizeof(hb_i));
+    memset(hb_q, 0, sizeof(hb_q));
+    memset(out_i, 0, sizeof(out_i));
+    memset(out_q, 0, sizeof(out_q));
+    out_head = out_tail = 0;
+    out_dropped = 0;
+    // Инициализация гетеродина
+    // Генерирует в ОЗУ таблицу синусов для быстрого смешивания частот
+    nco_lut_init();
+    // Расчет шага сетки NCO
+    // Вычисляет точную математическую разницу между желаемой частотой приема
+    // и фактической частотой аппаратного генератора для цифровой подстройки
     float f_nco = f_target_hz - (float)vfo_quadrature_lo_hz();  
     nco_step  = (uint32_t)(4294967296.0f * f_nco / RX_FS_IN_HZ);  
-    nco_phase = 0;  
-  
+    nco_phase = 0;
+    // вывод диагностики
     Serial.printf("[RXDBG] target=%.1f  lo_actual=%lu  f_nco=%.3f  nco_step=0x%08lX\n",  
                   (double)f_target_hz,  
                   (unsigned long)vfo_quadrature_lo_hz(),  
                   (double)f_nco,  
                   (unsigned long)nco_step);  
-  
-    // Сначала гасим core1 — иначе он может перезаписать буферы/состояния  
-    // между memset и reset, и очередь стартует в грязном состоянии.  
-    multicore_reset_core1();  
-  
-    memset(hb_i, 0, sizeof(hb_i));  
-    memset(hb_q, 0, sizeof(hb_q));  
-    memset(out_i, 0, sizeof(out_i));  
-    memset(out_q, 0, sizeof(out_q));  
-    out_head = out_tail = 0;  
-    out_dropped = 0;  
-  
-    nco_lut_init();  
+    
+    // Старт конвейера
+    // Запускает изолированный DSP-процесс rx_dsp_entry на Core 1
     multicore_launch_core1(rx_dsp_entry);  
-}  
-  
+}
+
 // AFC/тонкая подстройка без перезапуска тракта  
 void rx_dsp_set_nco_hz(float f_hz) {  
     nco_step = (uint32_t)(4294967296.0f * f_hz / RX_FS_IN_HZ);  

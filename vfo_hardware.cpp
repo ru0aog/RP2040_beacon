@@ -66,8 +66,11 @@ static bool quad_program_loaded = false;
 static bool quad_active = false;          // true = SM сконфигурирована под RX-квадратуру
   
 // Фактическая квантованная частота LO (для NCO)  
-static uint32_t quad_lo_actual_hz = 0;  
-uint32_t vfo_quadrature_lo_hz(void) { return quad_lo_actual_hz; }
+static uint32_t quad_lo_actual_hz = 0;
+
+uint32_t vfo_quadrature_lo_hz(void) {
+    return quad_lo_actual_hz; 
+}
 
 
 

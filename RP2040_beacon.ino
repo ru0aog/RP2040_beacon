@@ -1002,22 +1002,9 @@ void setup() {
   system_ready = true;
 }
 
-void loop() {
 
-    // RX: забираем децимированный блок I/Q с core1 и кормим демодулятор.  
-    // Блоки 64 отсчёта приходят каждые ~4 мс — обработка должна влезать  
-    // в этот бюджет, иначе декодер видит только свежий буфер.  
-  {  
-      const int16_t *bi, *bq; uint8_t bn;  
-      while (rx_dsp_get_output(&bi, &bq, &bn)) {  
-          static uint32_t blk_cnt = 0;  
-          if (++blk_cnt == 1 || blk_cnt % 500 == 0)  
-              if (dbg_rx) {Serial.printf("[LOOP] blk=%lu bn=%u\n",  
-                            (unsigned long)blk_cnt, (unsigned)bn);}   // <-- данные доходят до core0  
-          rx_decoders_process(bi, bq, bn);  
-          rx_dsp_release_output();  
-      }  
-  }
+
+void loop() {
 
   #if defined(ARDUINO_ARCH_RP2040) && !defined(ARDUINO_ARCH_MBED)
   TinyUSBDevice.task(); 

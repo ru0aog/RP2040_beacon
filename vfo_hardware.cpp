@@ -1492,11 +1492,12 @@ static uint16_t vsel_to_mv(uint32_t vsel) {
 
 
 
-
+extern bool rx_active;
 // === ТЕМПЕРАТУРА ЯДРА RP2040 (ADC канал 4, встроенный датчик) ===  
 // Формула из даташита RP2040: T = 27 - (V_bead - 0.706) / 0.001721  
 // СКОРРЕКТИРОВАННОЕ ПОМЕХОЗАЩИЩЕННОЕ ЧТЕНИЕ ТЕМПЕРАТУРЫ [Исправлено]
 static float vfo_read_core_temp_c(void) {
+    if (rx_active) return NAN;
     // Восстановление clk_adc после смены clk_sys (48 МГц от PLL_USB)  
     clock_configure(clk_adc,  
                     CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,  

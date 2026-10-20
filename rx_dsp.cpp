@@ -145,6 +145,13 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
             // извлекаем текущие отсчёты из массива
             int32_t i_meas = s[2 * n];
             int32_t q_meas = s[2 * n + 1];
+
+//обходка DC и NCO
+    int32_t i_raw = i_meas;  
+    int32_t q_raw = q_meas;
+    int32_t i_rot = i_raw;
+    int32_t q_rot = q_raw;
+/*
             // Центрирование
                 // EMA с коэффициентом 1/256
                 dc_i += (i_meas - (dc_i >> 8));        // dc в Q8  
@@ -166,7 +173,7 @@ static void __not_in_flash_func(rx_dsp_entry)(void) {
                 // После этой операции целевой радиосигнал математически смещается в нулевую промежуточную частоту
                 int32_t i_rot = (i_raw * cs + q_raw * sn) >> 15;
                 int32_t q_rot = (q_raw * cs - i_raw * sn) >> 15;
-
+*/
             // Трехкаскадная Half-Band фильтрация и децимация
             int32_t vi = i_rot, vq = q_rot;  
             bool emit = true;

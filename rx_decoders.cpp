@@ -31,6 +31,7 @@
 #include <Arduino.h>
 #include "vfo_hardware.h"
 
+
 // флаги отладки
     bool    dbg_iq       = true;    // [IQ] стрим сырого I/Q в Serial: заголовок + пакеты 64×(i,q)
     bool    dbg_rx       = false;    // флаг печати лога отладки
@@ -251,16 +252,7 @@ static bool rtty_rx(bool bit)
   
     case 2: // DATA — nbits стробов по середине каждого бита  
         if (--rrx.counter == 0) {  
-            bool mk = rtty_is_mark();    
-            if (dbg_bits) {    
-                float den  = rrx.mark_mag + rrx.space_mag;    
-                float marg = (den > 1e-6f) ? fabsf(rrx.mark_mag - rrx.space_mag) / den : 0.0f;    
-                Serial.printf("[RTTY-B] %d:%c v3=%+.0f mg=%.2f |m|=%.0f |s|=%.0f env=%.0f/%.0f\n",    
-                  rrx.bitcntr, mk ? '1' : '0',    
-                  (double)rrx.v3, (double)marg,    
-                  (double)rrx.mark_mag, (double)rrx.space_mag,    
-                  (double)rrx.mark_env, (double)rrx.space_env);    
-            }
+            bool mk = rtty_is_mark();
             rrx.rxdata |= (mk ? 1u : 0u) << rrx.bitcntr++;  
             rrx.counter = rrx.symbollen;  
             if (rrx.bitcntr >= rrx.nbits)  

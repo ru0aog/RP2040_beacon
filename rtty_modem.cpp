@@ -80,6 +80,9 @@
 #include "thor_modem.h"
 #include <hardware/watchdog.h>
 
+// ДИАГНОСТИКА
+#define RTTY_DEBUG              0         // 0 — выключить отладочный вывод тонов
+
 // Внешние ссылки на глобальные переменные управления
 extern bool soft_restart_flag;
 extern volatile bool pc_file_written;
@@ -213,6 +216,19 @@ void prepare_rtty_frequencies(uint32_t rtty_freq, uint32_t shift_hz, bool invert
 // Передача бита на чип Si5351 (8-байтный пакет + команда старта)
 static void send_rtty_bit(TransmitterState state) {
     if (pc_file_written || soft_restart_flag) return;
+
+#if RTTY_DEBUG 
+        while(1) {
+        watchdog_update();
+        vfo_set_tone_instant(0);
+        ZERO_LED_RED_ON();
+        delay(1000);
+        vfo_set_tone_instant(1);
+        ZERO_LED_GREEN_ON();
+        delay(1000);
+        }
+#endif 
+
       if (device_SI[0]) {
         uint8_t* data = (state == MARK) ? rtty_reg_mark : rtty_reg_space;
         setFrq_si5351(data); // установить частоту
@@ -226,10 +242,10 @@ static void send_rtty_bit(TransmitterState state) {
       }
 
     if (state == MARK) {
-        ZERO_LED_GREEN_ON();
+        ZERO_LED_RED_ON();
         // while(1) {watchdog_update();} // марк-холд
     } else {
-        ZERO_LED_RED_ON();
+        ZERO_LED_GREEN_ON();
         // while(1) {watchdog_update();} // спейс-холд
     }
 

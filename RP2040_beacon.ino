@@ -553,6 +553,28 @@ void check_serial_commands() {
             }  
         }
 
+          else if (command.equalsIgnoreCase("q")) {
+            uint32_t f = 3600000;
+            const char* mode_name = "rtty";
+            uint8_t mode = rx_decoders_mode_by_name(mode_name);
+            Serial.print("Запуск приёма на частоте "); Serial.println(f);
+            Serial.println("Старт квадратурного гетеродина:");
+            vfo_quadrature_start(f);
+            Serial.println("Включение диапазонного фильтра:");
+            vfo_subband_apply(f);
+            Serial.println("Запуск модуля DSP:");
+            rx_dsp_start((float)f);
+            Serial.println("Запуск потока АЦП:");
+            rx_capture_start();
+            Serial.print("Запуск модуля декодеров в режиме "); Serial.print(mode); Serial.print(" ("); Serial.print(mode_name); Serial.println(").");
+            rx_decoders_start(mode, (float)f);
+            Serial.print("Устанавливаем флаг активности приёмника...");
+            rx_active = true;
+            rx_freq_hz = f;  
+            rx_mode = mode;
+            Serial.println("ОК.");
+          }
+
           else if (command.equalsIgnoreCase("clear log")) {
             if (is_transmitting) {
               Serial.println(F("[Ошибка] Нельзя стирать журнал во время активной передачи в эфир!"));

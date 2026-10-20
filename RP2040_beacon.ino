@@ -76,6 +76,7 @@
  * ============================================================================  
  */
 
+#include "rx_spectrum.h"
 #include "file_manager.h"
 #include "si5351_driver.h"
 #include "scheduler.h"
@@ -161,7 +162,10 @@ bool old_button_state = HIGH;              // Предыдущее состоя�
 void     rx_capture_start(void);
 void     rx_capture_stop(void);  
 void     rx_dsp_start(float f_target_hz);  
-void     rx_dsp_stop(void);  
+void     rx_dsp_stop(void);
+bool     rx_dsp_get_output(const int16_t** i, const int16_t** q, uint8_t* n);
+void     rx_dsp_release_output(void);
+float    rx_dsp_fs_out(void);
 void     rx_decoders_start(uint8_t mode, float center_hz);
 void     rx_decoders_process(const int16_t* xi, const int16_t* xq, uint8_t n);
 void     rx_decoders_stop(void);  
@@ -494,7 +498,11 @@ void check_serial_commands() {
               if (!rx_active) {    
                   Serial.println(F("[RX] Приёмник не был запущен"));    
               } else {    
-                  rx_decoders_stop();    
+                  if (rx_mode == 0xFF) {
+                    rx_spectrum_stop();
+                  } else {
+                    rx_decoders_stop();
+                  }
                   rx_dsp_stop();          // сначала гасим потребителя буферов    
                   rx_capture_stop();      // потом источник (DMA + ADC)    
                   uint32_t cw_hz = strtoul(my_freq_cw_var.c_str(), NULL, 10);    
@@ -521,9 +529,10 @@ void check_serial_commands() {
                 if (f == 0) f = 3600000;  
                 mode_s.toLowerCase();  
   
-                // Маппинг режима — внутри rx_decoders.cpp, единый источник enum.  
-                // 0 = "режим не распознан".  
-                uint8_t mode = rx_decoders_mode_by_name(mode_s.c_str());  
+                // 0xFF — специальный режим полного спектра, не режим декодера.
+                uint8_t mode = mode_s.equalsIgnoreCase("spec")
+                             ? 0xFF
+                             : rx_decoders_mode_by_name(mode_s.c_str());
   
                 if (mode == 0) {  
                     Serial.println(F("[RX] Неизвестный режим. Доступны: rtty cw olivia contestia thor mfsk16 dominoex fsq ifkp jtty"));  
@@ -539,8 +548,12 @@ void check_serial_commands() {
                     // 3. ADC+DMA поток  
                     rx_capture_start();  
   
-                    // 4. Декодер выбранного режима  
-                    rx_decoders_start(mode, (float)f);  
+                    // 4. Запускаем либо спектроанализатор, либо декодер.
+                    if (mode == 0xFF) {
+                      rx_spectrum_start(rx_dsp_fs_out());
+                    } else {
+                      rx_decoders_start(mode, (float)f);
+                    }
   
                     rx_active = true;  
                     rx_freq_hz = f;  
@@ -1011,6 +1024,28 @@ void loop() {
   #endif
   
   watchdog_update();  // сброс сторожевого таймера
+
+  // Вычитываем очередь DSP. Блок принадлежит потребителю до release_output().
+  // В каждый момент времени у очереди только один потребитель:
+  // декодер ИЛИ спектроанализатор.
+  if (rx_active) {
+    const int16_t* bi = nullptr;
+    const int16_t* bq = nullptr;
+    uint8_t bn = 0;
+
+    while (rx_dsp_get_output(&bi, &bq, &bn)) {
+      if (rx_mode == 0xFF) {
+        rx_spectrum_process(bi, bq, bn);
+      } else {
+        rx_decoders_process(bi, bq, bn);
+      }
+      rx_dsp_release_output();
+    }
+
+    if (rx_mode == 0xFF) {
+      rx_spectrum_poll();
+    }
+  }
 
   vfo_encoder_poll(); // энкодер
   // перестройка делается в poll(), не в прерывании: boost-цикл переконфигурирует PLL и перезапускает Core 1, из ISR это запрещено.

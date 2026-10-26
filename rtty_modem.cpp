@@ -108,7 +108,7 @@ const mtk2_map_t table_lat[] PROGMEM = {
     {"k", 0x0F}, {"l", 0x12}, {"m", 0x1C}, {"n", 0x0C}, {"o", 0x18}, 
     {"p", 0x16}, {"q", 0x17}, {"r", 0x0A}, {"s", 0x05}, {"t", 0x10}, 
     {"u", 0x07}, {"v", 0x1E}, {"w", 0x13}, {"x", 0x1D}, {"y", 0x15}, {"z", 0x11},
-    {" ", 0x04}, {"\n", 0x08}, {"\r", 0x02}, {NULL, 0}
+    {" ", 0x04}, {"\n", 0x02}, {"\r", 0x08}, {NULL, 0}
 };
 
 const mtk2_map_t table_fig[] PROGMEM = {
@@ -311,8 +311,8 @@ void send_rtty_raw(const char* s) {
         // Шаг 1. Сначала ищем универсальные символы (пробел, перевод строки) в текущем регистре,
         // чтобы предотвратить паразитную отправку кодов смены языка.
         if (*s == ' ')        { code = 0x04; char_len = 1; found = true; Serial.print(F(" ")); LCD_push_char(" ", 0, 16);}
-        else if (*s == '\n')  { code = 0x08; char_len = 1; found = true; LCD_push_char(" ", 0, 16);}
-        else if (*s == '\r')  { code = 0x02; char_len = 1; found = true; LCD_push_char(" ", 0, 16);}
+        else if (*s == '\n')  { code = 0x02; char_len = 1; found = true; LCD_push_char(" ", 0, 16);}
+        else if (*s == '\r')  { code = 0x08; char_len = 1; found = true; LCD_push_char(" ", 0, 16);}
         
         // Шаг 2. Если это обычный символ — ищем по языковым таблицам
         if (!found) {
@@ -342,8 +342,8 @@ void send_rtty_raw(const char* s) {
     }
     // ФИНАЛ СТРОКИ: отправляем служебные CR/LF
     if (!pc_file_written && !soft_restart_flag) {
-        send_rtty_code(0x02); // CR
-        send_rtty_code(0x08); // LF
+        send_rtty_code(0x08); // CR
+        send_rtty_code(0x02); // LF
     }
     ZERO_LED_OFF();
     Serial.println("");

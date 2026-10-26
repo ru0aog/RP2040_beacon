@@ -812,7 +812,9 @@ bool rsid_send(uint16_t code, double center_hz) {
     uint8_t rsid[RSID_NSYMBOLS];  
     rsid_encode(code, rsid);  
     mfsk_prepare((uint32_t)(center_hz - 7.0 * RSID_STEP_HZ + 0.5), RSID_STEP_HZ, 16);  
-  
+
+		Serial.print(F("[  RSID ] Передача метки ")); Serial.print(code); Serial.print(F(" на частоте ")); Serial.println(center_hz);
+
     // 5 символов тишины — несущая выключена  
     mfsk_carrier(false);  
     mfsk_sync_deadline();  

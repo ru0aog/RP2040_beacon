@@ -74,6 +74,7 @@
 #include "lcd.h"
 #include "vfo_hardware.h"
 #include "led_blink.h"
+#include "thor_modem.h"
 #include <hardware/watchdog.h>
 
 extern bool soft_restart_flag;
@@ -123,6 +124,14 @@ void prepare_cw_frequency(uint32_t freq_hz) {
         Serial.print("[CW_ГОТОВ] Частота несущей CW готова: ");
         Serial.print(format_freq(freq_hz)); Serial.println(" Гц");
     }
+
+    // Для программного VFO RP2040
+    vfo_clk_boost_enter(0);   // активация режима разгона
+    vfo_set_narrowband(true);
+    // RSID-маркер режима до пилот-тона: fldigi переключит декодер на RTTY.  
+    // Центр полосы RTTY = mark - shift/2.  
+    rsid_send(26 /*RSID_CW*/, freq_hz);
+
     vfo_hardware_init(freq_hz, 10.0);
     vfo_set_narrowband(true);  
     vfo_operation_set(false);   // отключить генерацию программного VFO

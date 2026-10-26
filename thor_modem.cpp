@@ -808,30 +808,43 @@ void rsid_encode(uint16_t code, uint8_t* rsid /*15*/) {
 // Оставляет в mfsk_prepare сетку RSID — вызывающий восстанавливает свою.  
 // Несущая гасится на границе последнего символа: между RSID и данными  
 // в эфир не уходит «хвост» последнего тона на время перестройки сетки.  
+// файл thor_modem.cpp  
+  
+// Код ESCAPE для доступа ко второму набору RSID (RSID_LIST2) во fldigi.  
+#define RSID_ESCAPE_CODE 6  
+  
+// Один RSID-бёрст: 5 символов тишины + 15 тонов.  
+static bool rsid_send_burst(uint16_t code, double center_hz) {    
+    uint8_t rsid[RSID_NSYMBOLS];    
+    rsid_encode(code, rsid);    
+    mfsk_prepare((uint32_t)(center_hz - 7.0 * RSID_STEP_HZ + 0.5), RSID_STEP_HZ, 16);    
+  
+		Serial.print(F("[  RSID ] Передача метки ")); Serial.print(code); Serial.print(F(" на частоте ")); Serial.println(center_hz);  
+  
+    // 5 символов тишины — несущая выключена    
+    mfsk_carrier(false);    
+    mfsk_sync_deadline();    
+    for (int i = 0; i < 5; i++)    
+        if (!mfsk_wait_symbol(RSID_SYMBOL_US, false)) return false;    
+    
+    // 15 символов RSID    
+    mfsk_set_tone(rsid[0]);    
+    mfsk_carrier(true);    
+    for (int i = 0; i < RSID_NSYMBOLS; i++)    
+        if (!mfsk_emit_tone(rsid[i], RSID_SYMBOL_US)) { mfsk_carrier(false); return false; }    
+    
+    mfsk_carrier(false);    
+    return true;    
+}  
+  
 bool rsid_send(uint16_t code, double center_hz) {  
-    uint8_t rsid[RSID_NSYMBOLS];  
-    rsid_encode(code, rsid);  
-    mfsk_prepare((uint32_t)(center_hz - 7.0 * RSID_STEP_HZ + 0.5), RSID_STEP_HZ, 16);  
-
-		Serial.print(F("[  RSID ] Передача метки ")); Serial.print(code); Serial.print(F(" на частоте ")); Serial.println(center_hz);
-
-    // 5 символов тишины — несущая выключена  
-    mfsk_carrier(false);  
-    mfsk_sync_deadline();  
-    for (int i = 0; i < 5; i++)  
-        if (!mfsk_wait_symbol(RSID_SYMBOL_US, false)) return false;  
-  
-    // 15 символов RSID  
-    mfsk_set_tone(rsid[0]);  
-    mfsk_carrier(true);  
-    for (int i = 0; i < RSID_NSYMBOLS; i++)  
-        if (!mfsk_emit_tone(rsid[i], RSID_SYMBOL_US)) { mfsk_carrier(false); return false; }  
-  
-    // Последний тон отзвучал ровно на дедлайне — выключаем несущую,  
-    // иначе rsid[14] продолжит звучать всё время vfo_hardware_init  
-    // вызывающей стороны и декодер увидит лишний символ после RSID.  
-    mfsk_carrier(false);  
-    return true;  
+    // Коды из второго набора RSID (>255, напр. IFKP=1171) требуют  
+    // предварительного ESCAPE-бёрста: fldigi по нему переключается  
+    // на RSID_LIST2 и ждёт второй бёрст с кодом моды.  
+    if (code > 255) {  
+        if (!rsid_send_burst(RSID_ESCAPE_CODE, center_hz)) return false;  
+    }  
+    return rsid_send_burst(code, center_hz);  
 }
 
 // =========================================================================

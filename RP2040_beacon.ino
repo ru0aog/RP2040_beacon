@@ -1080,7 +1080,7 @@ void loop() {
   // Запуск возможен только из режима ожидания (USR_IDLE) и если станция абсолютно свободна (!is_transmitting)
     if (current_button_state == LOW && old_button_state == HIGH && usr_chain_state == USR_IDLE) {  
         // тестовый запуск: только CW (цепочку CW/IFKP вернём после отладки приёма)  
-        usr_chain_state = USR_START_CW;  
+        usr_chain_state = USR_START_IFKP;  
     }  
   old_button_state = current_button_state;
 

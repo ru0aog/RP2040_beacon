@@ -84,6 +84,7 @@
 #include "scheduler.h"
 #include "vfo_hardware.h"
 #include "led_blink.h"
+#include "thor_modem.h"
 #include <hardware/watchdog.h>
 
 uint32_t IFKP_Base_freq = 3601307;
@@ -160,6 +161,13 @@ void prepare_ifkp_frequencies(uint32_t base_hz) {
 
     // ЕСЛИ СИНТЕЗАТОР ОТСУТСТВУЕТ - ИНИЦИАЛИЗИРУЕМ PIO ЯДРО И ВЫХОДИМ
     if (!device_SI[0] || SI_FAIL == true) {
+
+        // Для программного VFO RP2040
+        vfo_clk_boost_enter(0);   // активация режима разгона
+        vfo_set_narrowband(true);
+        // RSID-маркер режима до пилот-тона
+        rsid_send(1171 /*RSID_IFKP*/, base_hz);
+
         vfo_hardware_init(base_hz - IFKP_CENTER_OFFSET_HZ, IFKP_STEP_HZ);
         vfo_operation_set(true);    // запустить генерацию программного VFO
         vfo_set_tone_instant(0);

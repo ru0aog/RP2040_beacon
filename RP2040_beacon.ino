@@ -1076,6 +1076,7 @@ void loop() {
   // =========================================================================
   bool current_button_state = digitalRead(PIN_USR_BUTTON);
   
+   /*
   // Отслеживаем клик (переход из HIGH в LOW). 
   // Запуск возможен только из режима ожидания (USR_IDLE) и если станция абсолютно свободна (!is_transmitting)
     if (current_button_state == LOW && old_button_state == HIGH && usr_chain_state == USR_IDLE) {  
@@ -1083,6 +1084,27 @@ void loop() {
         usr_chain_state = USR_START_IFKP;  
     }  
   old_button_state = current_button_state;
+   */
+
+  // /*
+  if (current_button_state == LOW && old_button_state == HIGH && usr_chain_state == USR_IDLE) {    
+        // запуск передачи THOR по кнопке (по аналогии с командой "START THOR")    
+        if (is_transmitting) {    
+          Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));    
+        } else {    
+          update_scheduler();    
+          uint32_t thor_hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10);    
+          if (thor_hz == 0) thor_hz = 3602500;    
+          char buf[148];    
+          snprintf(buf, sizeof(buf),    
+                  "[Система] %02d:%02d:%02d - Нажата кнопка USR. Выходим в эфир OLIVIA 8/250 на частоте %s Гц...",    
+                  rtc_hour, rtc_min, rtc_sec, format_freq(thor_hz).c_str());    
+          Serial.println(buf);    
+          force_contestia_transmission = true;    
+        }    
+    }    
+  old_button_state = current_button_state;
+  // */
 
   // Отработка шагов автомата
   switch (usr_chain_state) {
@@ -1469,7 +1491,7 @@ void loop() {
         if (!pc_file_written && !soft_restart_flag) {
           Serial.print(F("[ЭФИР_IFKP] Калибровочная лесенка "));
           // Вызываем готовую безопасную функцию из модема
-          send_ifkp_calibration_ladder(); 
+          // send_ifkp_calibration_ladder(); 
           Serial.println(F("ОК"));
         }
         
@@ -1483,7 +1505,7 @@ void loop() {
         if (!pc_file_written && !soft_restart_flag) {
           Serial.print(F("[ЭФИР_IFKP] Калибровочная лесенка "));
           // Вызываем готовую безопасную функцию из модема
-          send_ifkp_calibration_ladder(); 
+          // send_ifkp_calibration_ladder(); 
           Serial.println(F("ОК"));
         }
         

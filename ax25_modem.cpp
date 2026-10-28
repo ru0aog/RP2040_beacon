@@ -8,6 +8,7 @@
 #include "file_manager.h"       // pc_file_written (volatile), my_call_variable, my_ax25_*_var  
 #include "led_blink.h"          // ZERO_LED_RED_ON / ZERO_LED_GREEN_ON  
 #include "vfo_hardware.h"       // vfo_hardware_init, vfo_set_tone_instant, vfo_set_narrowband, vfo_clk_boost_enter  
+#include "thor_modem.h"
 #include <hardware/watchdog.h>  // watchdog_update  
   
 // Внешние ссылки (как в rtty_modem.cpp)  

@@ -86,6 +86,7 @@
 #include "olivia_modem.h"
 #include "thor_modem.h"
 #include "jtty_modem.h"
+#include "ax25_modem.h"   // после jtty_modem.h
 #include "hayes_modem.h"
 #include "bme280.h"
 #include "lcd.h"
@@ -132,6 +133,7 @@ bool force_mfsk16_transmission = false;   // Флаг ручного запус�
 bool force_dominoex_transmission = false; // Флаг ручного запуска DOMINOEX
 bool force_fsq_transmission = false;      // Флаг ручного запуска FSQ
 bool force_jtty_transmission = false;     // Флаг ручного запуска JTTY
+bool force_ax25_transmission = false;     // Флаг ручного запуска AX.25
 volatile bool system_ready = false;     // Флаг готовности: setup() полностью отработал, баннер напечатан 
 
 extern volatile bool tx_launching; 
@@ -438,6 +440,22 @@ void check_serial_commands() {
               Serial.println(buf);  
               force_fsq_transmission = true;  
             }  
+          }
+
+          else if (command.equalsIgnoreCase("START AX25")) {    
+            if (is_transmitting) {    
+              Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));    
+            } else {    
+              update_scheduler();    
+              uint32_t ax25_hz = strtoul(my_freq_ax25_var.c_str(), NULL, 10);    
+              if (ax25_hz == 0) ax25_hz = 14079000;    
+              char buf[148];    
+              snprintf(buf, sizeof(buf),    
+                      "[Система] %02d:%02d:%02d - Заявка принята. Выходим в эфир AX.25 300bd на частоте %s Гц...",    
+                      rtc_hour, rtc_min, rtc_sec, format_freq(ax25_hz).c_str());    
+              Serial.println(buf);    
+              force_ax25_transmission = true;    
+            }    
           }
 
 
@@ -2163,6 +2181,84 @@ void loop() {
       update_scheduler();    
     }    
   }
+
+
+// =========================================================================  
+  // РЕЖИМ N. СЕАНС СВЯЗИ AX.25 300 bd  
+  // =========================================================================  
+  if ((force_ax25_transmission) && !is_transmitting && !pc_file_written && !soft_restart_flag) {  
+    force_ax25_transmission = false;  
+    is_transmitting = true;  
+    tx_launching = false;  
+  
+    if ((my_call_variable.length() > 0 || my_text_variable.length() > 0) && !soft_restart_flag) {  
+  
+      uint32_t ax25_session_start_ms = millis();  
+      dev_TX_state = true;  
+      update_scheduler();  
+      SI_POWER_ON();  
+  
+      if (!pc_file_written && !soft_restart_flag) {  
+        uint32_t ax25_hz = (scheduled_freq_hz > 0) ? scheduled_freq_hz  
+                   : strtoul(my_freq_ax25_var.c_str(), NULL, 10);  
+        if (ax25_hz == 0) ax25_hz = 14079000;  
+  
+        bool ax25_invert = (my_ax25_invert_var == "1");  
+        prepare_ax25_frequencies(ax25_hz, ax25_invert);  
+  
+        Serial.print(F("[AX25] 300 bd, AFSK 1200/2200, центр: "));  
+        Serial.print(ax25_hz); Serial.println(F(" Гц"));  
+  
+        // ШАГ 1: позывной и локатор — один UI-frame  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_AX25] Вызов: "));  
+          send_ax25_packet("BEACON DE " + my_call_variable + "/B, QTH " + my_qth_variable);  
+        }  
+  
+        // ШАГ 2: основной текст  
+        if (!pc_file_written && !soft_restart_flag) {  
+          Serial.print(F("[ЭФИР_AX25] Текст: "));  
+          send_ax25_packet(my_text_variable);  
+        }  
+  
+        // ШАГ 3: телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          String telemetry = get_telemetry_string();  
+          Serial.print(F("[ЭФИР_AX25] Телем: "));  
+          send_ax25_packet(telemetry);  
+        }  
+  
+        // ШАГ 4: климатическая телеметрия  
+        if (!pc_file_written && !soft_restart_flag) {  
+          if (device_BM[0] == 1) {  
+            Serial.print(F("[ЭФИР_AX25] Телем: "));  
+            send_ax25_packet(get_climate_telemetry());  
+          } else {  
+            Serial.println(F("[Система] отсутствует климатический модуль. Погодная телеметрия не передаётся"));  
+          }  
+        }  
+  
+        if (!pc_file_written && !soft_restart_flag) {  
+          uint32_t ax25_session_duration_sec = (millis() - ax25_session_start_ms) / 1000;  
+          update_scheduler();  
+          char end_buf[128];  
+          snprintf(end_buf, sizeof(end_buf), "[Система] %02d:%02d:%02d - Сеанс AX.25 завершен. Длительность: %lu сек.", rtc_hour, rtc_min, rtc_sec, ax25_session_duration_sec);  
+          Serial.println(end_buf);  
+          if (debug_flag) {  
+            log_file_write_line("Сеанс AX.25 завершен. Длительность: " + String(ax25_session_duration_sec) + " сек.");  
+          }  
+        }  
+      }  
+  
+      // ГАРАНТИРОВАННЫЙ БЛОК ВЫХОДА ИЗ СЕАНСА  
+      is_transmitting = false;  
+      scheduled_freq_hz = 0;  
+      SI_POWER_OFF();  
+      dev_TX_state = false;  
+      update_scheduler();  
+    }  
+  }
+
 
   // =========================================================================
   // РЕЖИМ 254. ЦЕПОЧКА

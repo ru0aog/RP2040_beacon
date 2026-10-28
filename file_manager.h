@@ -46,6 +46,7 @@ extern String my_freq_thor_var;
 extern String my_freq_mfsk16_var;
 extern String my_freq_dominoex_var;
 extern String my_freq_fsq_var;
+extern String my_freq_ax25_var;
 extern String my_rtty_mark_var;    // Базовая частота MARK
 extern String my_rtty_shift_var;   // Расстояние между частотами (Гц)
 extern String my_rtty_invert_var;  // Флаг инверсии частот RTTY (0 или 1)

@@ -76,6 +76,7 @@
 #include "olivia_modem.h"
 #include "thor_modem.h"
 #include "jtty_modem.h"
+#include "ax25_modem.h"
 #include "lcd.h"
 
 extern bool soft_restart_flag;
@@ -108,12 +109,13 @@ enum HayesAirMode : uint8_t {
   AIR_MFSK16   = 7,
   AIR_DOMINOEX = 8,
   AIR_FSQ      = 9,
-  AIR_JTTY     = 10, 
+  AIR_JTTY     = 10,
+  AIR_AX25     = 11,
   AIR_COUNT  
 };  
   
 static const char* const AIR_MODE_NAME[AIR_COUNT] =  
-  { "LOOP", "CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA", "MFSK16", "DOMINOEX", "FSQ", "JTTY" };
+  { "LOOP", "CW", "RTTY", "IFKP", "OLIVIA", "THOR", "CONTESTIA", "MFSK16", "DOMINOEX", "FSQ", "JTTY", "AX25" };
 
 struct HayesProfile {
   bool    echo;          // E
@@ -227,7 +229,8 @@ static uint32_t default_air_freq(HayesAirMode mode) {
     case AIR_MFSK16:    hz = strtoul(my_freq_mfsk16_var.c_str(), NULL, 10);     if (hz == 0) hz = 3601307; break;
     case AIR_DOMINOEX:  hz = strtoul(my_freq_dominoex_var.c_str(), NULL, 10);   if (hz == 0) hz = 3601307; break;
     case AIR_FSQ:       hz = strtoul(my_freq_fsq_var.c_str(), NULL, 10);        if (hz == 0) hz = 3601307; break;
-    case AIR_JTTY:      hz = strtoul(my_freq_jtty_var.c_str(), NULL, 10);       if (hz == 0) hz = 14079000; break;  
+    case AIR_JTTY:      hz = strtoul(my_freq_jtty_var.c_str(), NULL, 10);       if (hz == 0) hz = 14079000; break;
+    case AIR_AX25:      hz = strtoul(my_freq_ax25_var.c_str(), NULL, 10);       if (hz == 0) hz = 14079000; break;
     default: break;
   }
   return hz;
@@ -518,7 +521,7 @@ static bool show_info(long n) {
     case 1: modem_info("000"); return true;
     case 2: return true;
     case 3: modem_info("RP2040_beacon v" + BCN_VER + " " + BCN_DAT); return true;
-    case 4: modem_info("ATD0=LOOP ATD1=CW ATD2=RTTY ATD3=IFKP ATD4=OLIVIA ATD5=THOR ATD6=CONTESTIA ATD7=MFSK16 ATD8=DOMINOEX ATD9=FSQ [,FREQ_HZ]"); return true;
+    case 4: modem_info("ATD0=LOOP ATD1=CW ATD2=RTTY ATD3=IFKP ATD4=OLIVIA ATD5=THOR ATD6=CONTESTIA ATD7=MFSK16 ATD8=DOMINOEX ATD9=FSQ ATD10=JTTY ATD11=AX25 [,FREQ_HZ]"); return true;
     default: return false;
   }
 }

@@ -115,8 +115,9 @@ String my_freq_thor_var   = "";
 String my_freq_mfsk16_var = "";
 String my_freq_dominoex_var = "";
 String my_freq_fsq_var    = "";
-String my_freq_contestia_var   = "";
-String my_freq_jtty_var        = "";
+String my_freq_contestia_var = "";
+String my_freq_jtty_var      = "";
+String my_freq_ax25_var      = "";
 String my_FAT             = "";
 String scan_exclude_list  = "";
 String scan_result_data   = "";
@@ -456,7 +457,8 @@ static void create_default_fat_with_info_file() {
     "[FREQ_MFSK16]=10001500\r\n"
     "[FREQ_DOMINOEX]=10001500\r\n"
     "[FREQ_FSQ]=10001500\r\n"
-    "[FREQ_JTTY]=10001500\r\n\r\n"
+    "[FREQ_JTTY]=10001500\r\n"
+    "[FREQ_AX25]=10001500\r\n\r\n"
     "=== МАТРИЦА РАСПИСАНИЯ ПЕРЕДАЧ ===\r\n"
     "// ДНИ: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс, 0=Каждый день\r\n"
     "// МОДЫ: CW, RTTY, IFKP, OLIVIA, CONTESTIA, THOR, MFSK16, DOMINOEX, FSQ, JTTY, SEQ (Сквозной цикл CW->RTTY->IFKP)\r\n"
@@ -628,7 +630,7 @@ void read_and_parse_INFO_txt() {
   my_call_variable = "";  my_qth_variable  = "";  my_text_variable = "";
   my_rtty_variable = "";  my_ifkp_variable = "";  my_cw_variable = "";    
   my_freq_cw_var = "";    my_freq_ifkp_var = "";  my_rtty_mark_var = "";  my_freq_olivia_var = "";  my_freq_thor_var = "";  my_freq_contestia_var = ""; my_freq_jtty_var = "";
-  my_freq_mfsk16_var = "";  my_freq_dominoex_var = "";  my_freq_fsq_var = "";
+  my_freq_mfsk16_var = "";  my_freq_dominoex_var = "";  my_freq_fsq_var = "";  my_freq_ax25_var = "";
   my_rtty_shift_var = ""; my_rtty_invert_var = ""; my_cw_wpm_var = "";    my_rtty_baud_var = "";
 
   // Обнуляем старый массив матричного расписания задач
@@ -682,6 +684,7 @@ void read_and_parse_INFO_txt() {
           else if (tag == "FREQ_DOMINOEX")  target_str = &my_freq_dominoex_var;
           else if (tag == "FREQ_FSQ")       target_str = &my_freq_fsq_var;
           else if (tag == "FREQ_JTTY")      target_str = &my_freq_jtty_var;
+          else if (tag == "FREQ_AX25")      target_str = &my_freq_ax25_var;
           else if (tag == "CW")             target_str = &my_cw_variable;    // НОВОЕ  
           else if (tag == "RTTY")           target_str = &my_rtty_variable;  // НОВОЕ  
           else if (tag == "IFKP")           target_str = &my_ifkp_variable;  // НОВОЕ
@@ -707,7 +710,7 @@ void read_and_parse_INFO_txt() {
           if (c == '\n' || c == '\r' || c == '[') { i = j - 1; break; }
           
           if (!is_task_line && (target_str == &my_freq_ifkp_var || target_str == &my_rtty_mark_var || target_str == &my_freq_olivia_var || target_str == &my_freq_thor_var || target_str == &my_freq_contestia_var || 
-              target_str == &my_freq_mfsk16_var || target_str == &my_freq_dominoex_var || target_str == &my_freq_fsq_var || target_str == &my_freq_jtty_var || 
+              target_str == &my_freq_mfsk16_var || target_str == &my_freq_dominoex_var || target_str == &my_freq_fsq_var || target_str == &my_freq_jtty_var || target_str == &my_freq_ax25_var ||
               target_str == &my_rtty_shift_var || target_str == &my_rtty_invert_var || target_str == &my_freq_cw_var)) {
             if (c >= '0' && c <= '9') value += c;
           } else {
@@ -1012,6 +1015,7 @@ void print_current_settings() {
   Serial.print("Частота  [FREQ_DOMINOEX]: "); Serial.print(my_freq_dominoex_var); Serial.println(" Гц");
   Serial.print("Частота       [FREQ_FSQ]: "); Serial.print(my_freq_fsq_var); Serial.println(" Гц");
   Serial.print("Частота      [FREQ_JTTY]: "); Serial.print(my_freq_jtty_var); Serial.println(" Гц");
+  Serial.print("Частота      [FREQ_AX25]: "); Serial.print(my_freq_ax25_var); Serial.println(" Гц");
 
   // Вывод аппаратной конфигурации пинов из SET.TXT
   Serial.println("--- Аппаратная конфигурация (SET.TXT) ---");

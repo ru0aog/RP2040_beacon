@@ -1088,23 +1088,26 @@ void loop() {
 
   // /*
   if (current_button_state == LOW && old_button_state == HIGH && usr_chain_state == USR_IDLE) {    
-        // запуск передачи THOR по кнопке (по аналогии с командой "START THOR")    
+        // запуск передачи JTTY по кнопке
         if (is_transmitting) {    
           Serial.println(F("[Ошибка] Сейчас уже идет трансляция!"));    
         } else {    
           update_scheduler();    
-          uint32_t thor_hz = strtoul(my_freq_olivia_var.c_str(), NULL, 10);    
+          uint32_t thor_hz = strtoul(my_freq_jtty_var.c_str(), NULL, 10);    
           if (thor_hz == 0) thor_hz = 3602500;    
           char buf[148];    
           snprintf(buf, sizeof(buf),    
-                  "[Система] %02d:%02d:%02d - Нажата кнопка USR. Выходим в эфир OLIVIA 8/250 на частоте %s Гц...",    
+                  "[Система] %02d:%02d:%02d - Нажата кнопка USR. Выходим в эфир JTTY на частоте %s Гц...",    
                   rtc_hour, rtc_min, rtc_sec, format_freq(thor_hz).c_str());    
           Serial.println(buf);    
-          force_contestia_transmission = true;    
+          force_jtty_transmission = true;    
         }    
     }    
   old_button_state = current_button_state;
   // */
+
+
+
 
   // Отработка шагов автомата
   switch (usr_chain_state) {

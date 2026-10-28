@@ -617,9 +617,16 @@ static void jtty_build_frame(uint64_t payload34, uint8_t* itone /*59*/) {
 void prepare_jtty_frequencies(uint32_t freq_hz) {  
     JTTY_Base_freq = freq_hz;  
     double f0 = (double)freq_hz - JTTY_CENTER_OFFSET;   // центрирование  
+
+    // Для программного VFO RP2040
+    vfo_clk_boost_enter(0);   // активация режима разгона
+    vfo_set_narrowband(true);
+    // RSID-маркер режима
+    rsid_send(1172 /*RSID_JTTY*/, (double)f0);  
+
     mfsk_prepare((uint32_t)(f0 + 0.5), JTTY_BAUD_HZ, JTTY_NTONES);  
 }  
-  
+
 // Один кадр: 59 символов по 32 мс.  
 static bool jtty_tx_frame(const uint8_t* itone) {  
     for (int i = 0; i < JTTY_NSYMS; i++) {  
@@ -627,7 +634,7 @@ static bool jtty_tx_frame(const uint8_t* itone) {
     }  
     return true;  
 }  
-  
+
 // Передача сообщения (блокирующая, как остальные модемы).  
 void jtty_send_string(const char* str) {    
     if (!str || !*str) return;    

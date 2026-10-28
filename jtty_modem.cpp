@@ -621,8 +621,9 @@ void prepare_jtty_frequencies(uint32_t freq_hz) {
     // Для программного VFO RP2040
     vfo_clk_boost_enter(0);   // активация режима разгона
     vfo_set_narrowband(true);
-    // RSID-маркер режима
-    rsid_send(1172 /*RSID_JTTY*/, (double)f0);  
+    // RSID-маркер режима — в центре полосы JTTY (как у Olivia/IFKP:  
+    // метка посередине 4-тонной решётки, r->freq_hz = центр сигнала)  
+    rsid_send(1172 /*RSID_JTTY*/, (double)f0 + JTTY_CENTER_OFFSET);
 
     mfsk_prepare((uint32_t)(f0 + 0.5), JTTY_BAUD_HZ, JTTY_NTONES);  
 }  

@@ -3,25 +3,16 @@
 #include "ax25_modem.h"  
   
 // ---- внешние зависимости (как у rtty_modem) ----  
-extern bool device_SI[2];  
-extern bool soft_restart_flag;  
-extern bool pc_file_written;  
-extern bool debug_flag;  
-extern String my_callsign_var;  
-extern String my_ax25_dest_var;  
-extern String my_ax25_txdelay_var;  
-extern String my_ax25_invert_var;  
+// ---- внешние зависимости (как у rtty_modem) ----  
+#include "si5351_driver.h"       // device_SI (uint8_t[5]), setFrq_si5351, VFO_TX_ON, format_freq  
+#include "file_manager.h"       // pc_file_written (volatile), my_call_variable, my_ax25_*_var  
+#include "led_blink.h"          // ZERO_LED_RED_ON / ZERO_LED_GREEN_ON  
+#include "vfo_hardware.h"       // vfo_hardware_init, vfo_set_tone_instant, vfo_set_narrowband, vfo_clk_boost_enter  
+#include <hardware/watchdog.h>  // watchdog_update  
   
-void watchdog_update();  
-void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out);  
-void setFrq_si5351(uint8_t* data);  
-void VFO_TX_ON();  
-void vfo_clk_boost_enter(uint8_t mode);  
-void vfo_set_narrowband(bool nb);  
-void vfo_hardware_init(uint32_t base_hz, uint32_t step_hz);  
-void vfo_set_tone_instant(uint8_t tone);  
-#define ZERO_LED_RED_ON()  
-#define ZERO_LED_GREEN_ON()  
+// Внешние ссылки (как в rtty_modem.cpp)  
+extern bool soft_restart_flag;  
+extern void si_calculate_freq_bytes_mHz(uint64_t freq_mHz, uint8_t* out_data);
   
 // ---- параметры ----  
 #define AX25_SHIFT_HZ     1000   // разнос AFSK-тонов 1200/2200  
@@ -244,6 +235,6 @@ void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,
   
 void send_ax25_packet(const String& payload) {  
   send_ax25_frame(my_ax25_dest_var.length() ? my_ax25_dest_var.c_str() : "APRS", 0,  
-                  my_callsign_var.c_str(), 0,  
-                  (const uint8_t*)payload.c_str(), payload.length());  
+                my_call_variable.c_str(), 0,  
+                (const uint8_t*)payload.c_str(), payload.length());
 }

@@ -124,7 +124,6 @@ String scan_result_data   = "";
 String my_debug_var       = "";
 String s_led_enable       = "";
 
-String my_freq_ax25_var      = "";  
 String my_ax25_dest_var      = "APRS";   // destination callsign  
 String my_ax25_txdelay_var   = "30";     // флаги преамбулы  
 String my_ax25_invert_var    = "0";      // инверсия тонов

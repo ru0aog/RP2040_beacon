@@ -53,6 +53,10 @@ extern String my_rtty_invert_var;  // Флаг инверсии частот RTT
 extern String my_cw_variable;      // Строка минут запуска (например, "15:22,17:22")
 extern String my_rtty_baud_var;
 extern String my_FAT;
+
+extern String my_ax25_dest_var;  
+extern String my_ax25_txdelay_var;  
+extern String my_ax25_invert_var;
   
 extern bool debug_flag;   // [DEBUG]=1 в SET.TXT: вывод служебных сообщений
 

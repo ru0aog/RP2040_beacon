@@ -124,6 +124,11 @@ String scan_result_data   = "";
 String my_debug_var       = "";
 String s_led_enable       = "";
 
+String my_freq_ax25_var      = "";  
+String my_ax25_dest_var      = "APRS";   // destination callsign  
+String my_ax25_txdelay_var   = "30";     // флаги преамбулы  
+String my_ax25_invert_var    = "0";      // инверсия тонов
+
 // Физическое выделение памяти под инженерные переменные железа
 // Значения по умолчанию, если теги не найдены
 uint32_t CW_DOT_TIME_MS  = 60;              // Время точки в мс (по умолчанию ~20 WPM)
@@ -684,10 +689,13 @@ void read_and_parse_INFO_txt() {
           else if (tag == "FREQ_DOMINOEX")  target_str = &my_freq_dominoex_var;
           else if (tag == "FREQ_FSQ")       target_str = &my_freq_fsq_var;
           else if (tag == "FREQ_JTTY")      target_str = &my_freq_jtty_var;
-          else if (tag == "FREQ_AX25")      target_str = &my_freq_ax25_var;
           else if (tag == "CW")             target_str = &my_cw_variable;    // НОВОЕ  
           else if (tag == "RTTY")           target_str = &my_rtty_variable;  // НОВОЕ  
           else if (tag == "IFKP")           target_str = &my_ifkp_variable;  // НОВОЕ
+          else if (tag == "FREQ_AX25")      target_str = &my_freq_ax25_var;  
+          else if (tag == "AX25_DEST")      target_str = &my_ax25_dest_var;  
+          else if (tag == "AX25_TXDELAY")   target_str = &my_ax25_txdelay_var;  
+          else if (tag == "AX25_INVERT")    target_str = &my_ax25_invert_var;
 
           // --- БЛОК Б: Матрица расписания [TASK_XX] ---  
           else if (tag.startsWith("TASK_")) {  

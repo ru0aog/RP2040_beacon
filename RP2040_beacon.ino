@@ -2212,9 +2212,9 @@ void loop() {
         // ШАГ 1: позывной и локатор — один UI-frame  
         if (!pc_file_written && !soft_restart_flag) {  
           Serial.print(F("[ЭФИР_AX25] Вызов: "));  
-          send_ax25_packet("BEACON DE " + my_call_variable + "/B, QTH " + my_qth_variable);  
+          send_ax25_packet("\r\n\r\nVVV BEACON DE " + my_call_variable + "/B DE " + my_call_variable + "/B, QTH " + my_qth_variable + " " + my_qth_variable + " \r\n"); 
         }  
-  
+
         // ШАГ 2: основной текст  
         if (!pc_file_written && !soft_restart_flag) {  
           Serial.print(F("[ЭФИР_AX25] Текст: "));  

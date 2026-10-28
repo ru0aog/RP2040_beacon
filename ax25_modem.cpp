@@ -159,9 +159,11 @@ void prepare_ax25_frequencies(uint32_t ax25_freq_hz, bool invert) {
   } else {  
     vfo_clk_boost_enter(0);  
     vfo_set_narrowband(true);  
-    // vfo_tones[i] = base + i*step — таблица строится ТОЛЬКО вверх от базы,  
-    // поэтому база всегда нижний тон (mark_hz), независимо от invert  
-    vfo_hardware_init(mark_hz, AX25_SHIFT_HZ);  
+    // RSID-маркер до пилот-тона: центр полосы = (mark + space) / 2  
+    rsid_send(70 /*RSID_AX25*/, (double)ax25_freq_hz);
+    // rsid_send перенастроила VFO на свою сетку — возвращаем сетку AX.25  
+    vfo_set_narrowband(true);  
+    vfo_hardware_init(mark_hz, AX25_SHIFT_HZ); 
     if (debug_flag) {  
       Serial.println(F("[AX25] PIO VFO: AFSK 1200/2200, 300 bd"));  
       Serial.print(F("   MARK : ")); Serial.println(mark_hz);  
@@ -234,7 +236,8 @@ void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,
 }  
   
 void send_ax25_packet(const String& payload) {  
+  Serial.println(payload);          // эхо передаваемого текста — как у rtty/thor/jtty  
   send_ax25_frame(my_ax25_dest_var.length() ? my_ax25_dest_var.c_str() : "APRS", 0,  
-                my_call_variable.c_str(), 0,  
-                (const uint8_t*)payload.c_str(), payload.length());
+                  my_call_variable.c_str(), 0,  
+                  (const uint8_t*)payload.c_str(), payload.length());  
 }

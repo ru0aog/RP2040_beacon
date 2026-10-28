@@ -1,4 +1,5 @@
-// ax25_modem.cpp — AX.25 300 bd TX: AFSK 1200/2200 Гц, NRZI, HDLC, UI-frame  
+// ax25_modem.cpp — AX.25 300 bd TX: FSK 1200/2200 Гц, NRZI, HDLC, UI-frame  
+// FSK-модем AX.25
 #include "ax25_modem.h"  
   
 // ---- внешние зависимости (как у rtty_modem) ----  
@@ -65,18 +66,19 @@ static void ax25_wait_slot() {
   }  
 }  
   
-// один битовый слот: сначала дожидаемся начала слота, потом переключаем тон  
+// один битовый слот: сначала дожидаемся начала слота,  
+// потом переключаем генератор — только если тон реально изменился  
 static void ax25_bit_slot(bool mark) {  
   ax25_wait_slot();  
   if (ax25_stop_requested()) return;  
   
-  // генератор перенастраиваем только при смене тона  
   if (!tone_initialized || mark != last_tone_mark) {  
     if (device_SI[0]) {  
       setFrq_si5351(mark ? ax25_reg_mark : ax25_reg_space);  
       VFO_TX_ON();  
     } else {  
-      // сетка: tone0 = нижний тон (mark при норме), tone1 = верхний (space)  
+      // сетка: tone0 = нижний тон (mark), tone1 = верхний (space);  
+      // инверсия — только перестановка логических mark/space на индексы  
       uint8_t tone = mark ? (ax25_inverted ? 1 : 0)  
                           : (ax25_inverted ? 0 : 1);  
       vfo_set_tone_instant(tone);  
@@ -130,8 +132,10 @@ static uint16_t ax25_fcs_update(uint16_t fcs, uint8_t b) {
   
 // ---------- адресация (безопасная) ----------  
   
-// AX.25 адрес: 6 символов callsign<<1 (padding пробелами) + байт SSID  
+// AX.25 адрес: 6 символов callsign<<1 (padding пробелами) + байт SSID;  
+// last=true ставит Extension bit — только у ПОСЛЕДНЕГО адреса цепочки  
 static void ax25_put_addr(const char* call, uint8_t ssid, bool last, uint16_t& fcs) {  
+  if (!call) { tx_aborted = true; return; }  
   size_t len = strlen(call);  
   if (len > 6) len = 6;            // поле адреса = 6 символов  
   for (int i = 0; i < 6; i++) {  
@@ -150,8 +154,8 @@ static void ax25_put_addr(const char* call, uint8_t ssid, bool last, uint16_t& f
   
 void prepare_ax25_frequencies(uint32_t ax25_freq_hz, bool invert) {  
   ax25_inverted = invert;  
-  uint32_t mark_hz  = ax25_freq_hz - AX25_HALF_SHIFT;  
-  uint32_t space_hz = ax25_freq_hz + AX25_HALF_SHIFT;  
+  uint32_t mark_hz  = ax25_freq_hz - AX25_HALF_SHIFT;  // нижний тон  
+  uint32_t space_hz = ax25_freq_hz + AX25_HALF_SHIFT;  // верхний тон  
   
   if (device_SI[0]) {  
     si_calculate_freq_bytes_mHz((uint64_t)mark_hz * 1000ULL,  ax25_reg_mark);  
@@ -164,7 +168,9 @@ void prepare_ax25_frequencies(uint32_t ax25_freq_hz, bool invert) {
   } else {  
     vfo_clk_boost_enter(0);  
     vfo_set_narrowband(true);  
-    vfo_hardware_init(invert ? space_hz : mark_hz, AX25_SHIFT_HZ);  
+    // vfo_tones[i] = base + i*step — таблица строится ТОЛЬКО вверх от базы,  
+    // поэтому база всегда нижний тон (mark_hz), независимо от invert  
+    vfo_hardware_init(mark_hz, AX25_SHIFT_HZ);  
     if (debug_flag) {  
       Serial.println(F("[AX25] PIO VFO: AFSK 1200/2200, 300 bd"));  
       Serial.print(F("   MARK : ")); Serial.println(mark_hz);  
@@ -176,6 +182,11 @@ void prepare_ax25_frequencies(uint32_t ax25_freq_hz, bool invert) {
 void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,  
                      const char* src_call,  uint8_t src_ssid,  
                      const uint8_t* info, size_t info_len) {  
+  if (!dest_call || !src_call || (!info && info_len > 0)) {  
+    tx_aborted = true;  
+    return;  
+  }  
+  
   uint32_t txdelay = strtoul(my_ax25_txdelay_var.c_str(), NULL, 10);  
   if (txdelay == 0) txdelay = 30;  
   
@@ -183,7 +194,19 @@ void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,
   tx_aborted       = false;  
   hdlc_ones        = 0;  
   nrzi_tone_mark   = true;  
-  tone_initialized = false;  // первый бит кадра всегда выполняет настройку генератора  
+  tone_initialized = false;  
+  
+  // пре-тон MARK до нулевого слота: первый бит не ждёт переключения  
+  if (device_SI[0]) {  
+    setFrq_si5351(ax25_reg_mark);  
+    VFO_TX_ON();  
+  } else {  
+    vfo_set_tone_instant(ax25_inverted ? 1 : 0);  
+  }  
+  tone_initialized = true;  
+  last_tone_mark   = true;  
+  
+  // расписание стартует ПОСЛЕ установки начального тона  
   sched_start_us   = micros();  
   sched_bit_idx    = 0;  
   
@@ -193,8 +216,8 @@ void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,
   
   // заголовок + payload, попутно считаем FCS  
   uint16_t fcs = 0xFFFF;  
-  ax25_put_addr(dest_call, dest_ssid, false, fcs);  
-  ax25_put_addr(src_call,  src_ssid,  true,  fcs);  
+  ax25_put_addr(dest_call, dest_ssid, false, fcs);  // Extension=0  
+  ax25_put_addr(src_call,  src_ssid,  true,  fcs);  // Extension=1 (последний адрес)  
   fcs = ax25_fcs_update(fcs, 0x03); hdlc_put_byte(0x03);  // control: UI  
   fcs = ax25_fcs_update(fcs, 0xF0); hdlc_put_byte(0xF0);  // PID: no L3  
   

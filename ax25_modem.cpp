@@ -25,8 +25,8 @@ void vfo_set_tone_instant(uint8_t tone);
 // ---- параметры ----  
 #define AX25_SHIFT_HZ     1000   // разнос AFSK-тонов 1200/2200  
 #define AX25_HALF_SHIFT    500  
-// битовый период 1/300 c: работаем в третях микросекунды (период = 10000/3)  
-// -> расписание битов абсолютное: bit_k начинается в t0 + k*10000/3 третей мкс  
+// битовый период 1/300 c = 10000/3 мкс (3333.33 мкс)  
+// расписание абсолютное: бит k начинается в t0 + floor(k * 10000 / 3) мкс  
   
 static uint8_t ax25_reg_mark[8];  
 static uint8_t ax25_reg_space[8];  
@@ -39,6 +39,10 @@ static uint8_t hdlc_ones      = 0;
 static uint32_t sched_start_us;  
 static uint32_t sched_bit_idx;  
   
+// текущий тон генератора — file-scope, сбрасывается в начале каждого кадра  
+static bool tone_initialized = false;  
+static bool last_tone_mark   = true;  
+  
 // ---------- прерывание ----------  
 static inline bool ax25_stop_requested() {  
   if (pc_file_written || soft_restart_flag) tx_aborted = true;  
@@ -49,7 +53,7 @@ static inline bool ax25_stop_requested() {
   
 // ждём до абсолютного момента начала бита sched_bit_idx  
 static void ax25_wait_slot() {  
-  // целевое время в мкс: t0 + floor(idx * 10000/3) — делаем в uint64 для точности  
+  // целевое время: t0 + floor(idx * 10000 / 3) мкс — uint64 для точности  
   uint32_t target = sched_start_us +  
                     (uint32_t)(((uint64_t)sched_bit_idx * 10000ULL) / 3ULL);  
   
@@ -63,29 +67,28 @@ static void ax25_wait_slot() {
   
 // один битовый слот: сначала дожидаемся начала слота, потом переключаем тон  
 static void ax25_bit_slot(bool mark) {  
-  static bool last_tone = true; // для пропуска лишних перенастроек  
-  static bool first     = true;  
-  
   ax25_wait_slot();  
   if (ax25_stop_requested()) return;  
   
-  if (first || mark != last_tone) {  
+  // генератор перенастраиваем только при смене тона  
+  if (!tone_initialized || mark != last_tone_mark) {  
     if (device_SI[0]) {  
       setFrq_si5351(mark ? ax25_reg_mark : ax25_reg_space);  
       VFO_TX_ON();  
     } else {  
+      // сетка: tone0 = нижний тон (mark при норме), tone1 = верхний (space)  
       uint8_t tone = mark ? (ax25_inverted ? 1 : 0)  
                           : (ax25_inverted ? 0 : 1);  
       vfo_set_tone_instant(tone);  
     }  
     if (mark) ZERO_LED_RED_ON(); else ZERO_LED_GREEN_ON();  
-    last_tone = mark;  
-    first     = false;  
+    last_tone_mark   = mark;  
+    tone_initialized = true;  
   }  
   sched_bit_idx++;  
 }  
   
-// NRZI: '1' — тон сохраняется, '0' — переключается  
+// NRZI: '1' — тон сохраняется, '0' — тон переключается  
 static void ax25_send_bit(uint8_t bit) {  
   if (ax25_stop_requested()) return;  
   if (!bit) nrzi_tone_mark = !nrzi_tone_mark;  
@@ -94,17 +97,23 @@ static void ax25_send_bit(uint8_t bit) {
   
 // ---------- HDLC ----------  
   
+// байт без stuffing (флаги)  
 static void hdlc_put_byte_raw(uint8_t b) {  
   for (int i = 0; i < 8 && !ax25_stop_requested(); i++)  
     ax25_send_bit((b >> i) & 1);  
 }  
   
+// байт со stuffing: вставка '0' после пяти подряд единиц  
 static void hdlc_put_byte(uint8_t b) {  
   for (int i = 0; i < 8 && !ax25_stop_requested(); i++) {  
     uint8_t bit = (b >> i) & 1;  
     ax25_send_bit(bit);  
     if (bit) {  
-      if (++hdlc_ones == 5) { ax25_send_bit(0); hdlc_ones = 0; }  
+      if (++hdlc_ones == 5) {  
+        ax25_send_bit(0);  
+        hdlc_ones = 0;  
+        if (ax25_stop_requested()) return;  
+      }  
     } else {  
       hdlc_ones = 0;  
     }  
@@ -121,6 +130,7 @@ static uint16_t ax25_fcs_update(uint16_t fcs, uint8_t b) {
   
 // ---------- адресация (безопасная) ----------  
   
+// AX.25 адрес: 6 символов callsign<<1 (padding пробелами) + байт SSID  
 static void ax25_put_addr(const char* call, uint8_t ssid, bool last, uint16_t& fcs) {  
   size_t len = strlen(call);  
   if (len > 6) len = 6;            // поле адреса = 6 символов  
@@ -170,21 +180,23 @@ void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,
   if (txdelay == 0) txdelay = 30;  
   
   // инициализация состояния  
-  tx_aborted     = false;  
-  hdlc_ones      = 0;  
-  nrzi_tone_mark = true;  
-  sched_start_us = micros();  
-  sched_bit_idx  = 0;  
-  { extern void ax25_reset_last_tone(); ax25_reset_last_tone(); } // см. ниже  
+  tx_aborted       = false;  
+  hdlc_ones        = 0;  
+  nrzi_tone_mark   = true;  
+  tone_initialized = false;  // первый бит кадра всегда выполняет настройку генератора  
+  sched_start_us   = micros();  
+  sched_bit_idx    = 0;  
   
+  // преамбула — флаги (TX delay)  
   for (uint32_t i = 0; i < txdelay && !ax25_stop_requested(); i++)  
     hdlc_put_byte_raw(0x7E);  
   
+  // заголовок + payload, попутно считаем FCS  
   uint16_t fcs = 0xFFFF;  
   ax25_put_addr(dest_call, dest_ssid, false, fcs);  
   ax25_put_addr(src_call,  src_ssid,  true,  fcs);  
-  fcs = ax25_fcs_update(fcs, 0x03); hdlc_put_byte(0x03);  
-  fcs = ax25_fcs_update(fcs, 0xF0); hdlc_put_byte(0xF0);  
+  fcs = ax25_fcs_update(fcs, 0x03); hdlc_put_byte(0x03);  // control: UI  
+  fcs = ax25_fcs_update(fcs, 0xF0); hdlc_put_byte(0xF0);  // PID: no L3  
   
   for (size_t i = 0; i < info_len && !ax25_stop_requested(); i++) {  
     fcs = ax25_fcs_update(fcs, info[i]);  
@@ -192,13 +204,19 @@ void send_ax25_frame(const char* dest_call, uint8_t dest_ssid,
   }  
   
   if (ax25_stop_requested()) return;  
-  uint16_t fcs_out = fcs ^ 0xFFFF;  
-  hdlc_put_byte(fcs_out & 0xFF);  
-  hdlc_put_byte((fcs_out >> 8) & 0xFF);  
-  hdlc_put_byte_raw(0x7E);  
-  hdlc_put_byte_raw(0x7E);  
   
-  // дождаться окончания последнего битового слота — тон гасим в вызывающем коде  
+  uint16_t fcs_out = fcs ^ 0xFFFF;  
+  hdlc_put_byte(fcs_out & 0xFF);        // FCS: младший байт первым  
+  hdlc_put_byte((fcs_out >> 8) & 0xFF);  
+  
+  // завершающие флаги  
+  hdlc_put_byte_raw(0x7E);  
+  hdlc_put_byte_raw(0x7E);  
+  if (ax25_stop_requested()) return;  
+  
+  // последний бит завершающего флага должен прозвучать полный слот:  
+  // sched_bit_idx указывает на слот ПОСЛЕ последнего переданного бита  
+  ax25_wait_slot();  
 }  
   
 void send_ax25_packet(const String& payload) {  
